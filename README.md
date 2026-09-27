@@ -77,3 +77,7 @@ The workspace has four crates:
 - `daw-engine`: real-time audio rendering and the built-in synth
 - `daw-plugins`: VST3 and Audio Unit scanning, loading, and editor windows
 - `daw`: the iced app
+
+## License
+
+MIT. See [LICENSE](LICENSE).
