@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use daw_engine::output::BitDepth;
@@ -10,6 +11,8 @@ use daw_model::layout::{Axis, Layout, Panel, Rect, TileId};
 use daw_model::time::Ticks;
 use daw_model::{AutomationId, ChannelId, ClipSource, InsertId, InstanceId, PatternId, Project, Target};
 use daw_plugins::scan::{Catalog, Progress};
+use iced::futures::channel::mpsc::{self, UnboundedReceiver};
+use iced::futures::{Stream, StreamExt, stream};
 use iced::widget::{button, column, container, mouse_area, pick_list, row, rule, text, text_input};
 use iced::{Element, Length, Point, Size, Subscription, Task, event, keyboard, mouse, window};
 
@@ -179,6 +182,7 @@ impl App {
         if let Some(path) = STARTUP_PROJECT.get().cloned().flatten() {
             app.open(path);
         }
+        forward_plugin_keys();
         if std::env::var_os("DAW_OPEN_EDITORS").is_some() {
             for instance in app.project.plugins.iter().map(|p| p.id).collect::<Vec<_>>() {
                 let _ = app.update(Message::OpenPlugin(instance));
@@ -922,7 +926,8 @@ impl App {
         });
         let tick = iced::time::every(Duration::from_millis(33)).map(|_| Message::Tick);
         let close = window::close_requests().map(|_| Message::CloseRequested);
-        let mut subscriptions = vec![events, presses, tick, close];
+        let plugin_keys = Subscription::run(plugin_keys);
+        let mut subscriptions = vec![events, presses, tick, close, plugin_keys];
         if self.screenshot.is_some() {
             let delay = std::env::var("DAW_SCREENSHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(8);
             subscriptions.push(iced::time::every(Duration::from_secs(delay)).map(|_| Message::Screenshot));
@@ -1117,6 +1122,25 @@ impl std::fmt::Display for PatternChoice {
 
 fn rule_style() -> rule::Style {
     rule::Style { color: theme::LINE, radius: 0.0.into(), fill_mode: rule::FillMode::Full, snap: true }
+}
+
+/// Keys from plugin editor windows, waiting for the subscription to take them.
+static PLUGIN_KEYS: Mutex<Option<UnboundedReceiver<keyboard::Event>>> = Mutex::new(None);
+
+/// Send keys that plugin editors do not use to the app's key bindings, so
+/// Space plays while a plugin window is in front. Call on the main thread.
+fn forward_plugin_keys() {
+    let (sender, receiver) = mpsc::unbounded();
+    *PLUGIN_KEYS.lock().unwrap() = Some(receiver);
+    daw_plugins::set_unhandled_keys(move |press| {
+        let Some(event) = crate::keys::plugin_key_event(press) else { return false };
+        sender.unbounded_send(event).is_ok()
+    });
+}
+
+fn plugin_keys() -> impl Stream<Item = Message> {
+    let receiver = PLUGIN_KEYS.lock().unwrap().take();
+    stream::iter(receiver).flatten().map(|event| Message::Key(event, false))
 }
 
 pub fn gain_text(gain: f32) -> String {

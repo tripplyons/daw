@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use daw_model::layout::{Axis, Direction};
 use iced::keyboard::key::{Code, Physical};
-use iced::keyboard::{Event, Modifiers};
+use iced::keyboard::{Event, Key, Location, Modifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -116,6 +116,48 @@ const KEY_NAMES: &[(Code, &str)] = &[
     (Code::F1, "f1"), (Code::F2, "f2"), (Code::F3, "f3"), (Code::F4, "f4"), (Code::F5, "f5"), (Code::F6, "f6"),
     (Code::F7, "f7"), (Code::F8, "f8"), (Code::F9, "f9"), (Code::F10, "f10"), (Code::F11, "f11"), (Code::F12, "f12"),
 ];
+
+/// macOS virtual key codes (`kVK_*`) for the keys in `KEY_NAMES`.
+#[rustfmt::skip]
+const MAC_KEY_CODES: &[(u16, Code)] = &[
+    (0x00, Code::KeyA), (0x0B, Code::KeyB), (0x08, Code::KeyC), (0x02, Code::KeyD), (0x0E, Code::KeyE),
+    (0x03, Code::KeyF), (0x05, Code::KeyG), (0x04, Code::KeyH), (0x22, Code::KeyI), (0x26, Code::KeyJ),
+    (0x28, Code::KeyK), (0x25, Code::KeyL), (0x2E, Code::KeyM), (0x2D, Code::KeyN), (0x1F, Code::KeyO),
+    (0x23, Code::KeyP), (0x0C, Code::KeyQ), (0x0F, Code::KeyR), (0x01, Code::KeyS), (0x11, Code::KeyT),
+    (0x20, Code::KeyU), (0x09, Code::KeyV), (0x0D, Code::KeyW), (0x07, Code::KeyX), (0x10, Code::KeyY),
+    (0x06, Code::KeyZ),
+    (0x1D, Code::Digit0), (0x12, Code::Digit1), (0x13, Code::Digit2), (0x14, Code::Digit3), (0x15, Code::Digit4),
+    (0x17, Code::Digit5), (0x16, Code::Digit6), (0x1A, Code::Digit7), (0x1C, Code::Digit8), (0x19, Code::Digit9),
+    (0x7B, Code::ArrowLeft), (0x7C, Code::ArrowRight), (0x7E, Code::ArrowUp), (0x7D, Code::ArrowDown),
+    (0x24, Code::Enter), (0x4C, Code::Enter), (0x31, Code::Space), (0x35, Code::Escape), (0x30, Code::Tab),
+    (0x33, Code::Backspace), (0x75, Code::Delete), (0x73, Code::Home), (0x77, Code::End),
+    (0x74, Code::PageUp), (0x79, Code::PageDown),
+    (0x1B, Code::Minus), (0x18, Code::Equal), (0x21, Code::BracketLeft), (0x1E, Code::BracketRight),
+    (0x2A, Code::Backslash), (0x29, Code::Semicolon), (0x27, Code::Quote), (0x32, Code::Backquote),
+    (0x2B, Code::Comma), (0x2F, Code::Period), (0x2C, Code::Slash),
+    (0x7A, Code::F1), (0x78, Code::F2), (0x63, Code::F3), (0x76, Code::F4), (0x60, Code::F5), (0x61, Code::F6),
+    (0x62, Code::F7), (0x64, Code::F8), (0x65, Code::F9), (0x6D, Code::F10), (0x67, Code::F11), (0x6F, Code::F12),
+];
+
+/// A key press from a plugin editor window as a key event for the app. Only
+/// the physical key is known, so panel keys that read the typed character
+/// do not apply.
+pub fn plugin_key_event(press: daw_plugins::KeyPress) -> Option<Event> {
+    let code = MAC_KEY_CODES.iter().find(|(k, _)| *k == press.key_code)?.1;
+    let mut modifiers = Modifiers::empty();
+    for (on, modifier) in [(press.cmd, Modifiers::LOGO), (press.ctrl, Modifiers::CTRL), (press.alt, Modifiers::ALT), (press.shift, Modifiers::SHIFT)] {
+        modifiers.set(modifier, on);
+    }
+    Some(Event::KeyPressed {
+        key: Key::Unidentified,
+        modified_key: Key::Unidentified,
+        physical_key: Physical::Code(code),
+        location: Location::Standard,
+        modifiers,
+        text: None,
+        repeat: press.repeat,
+    })
+}
 
 /// A physical key with exact modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

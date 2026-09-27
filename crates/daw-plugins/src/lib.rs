@@ -5,6 +5,8 @@ pub mod scan;
 pub mod vst3;
 mod window;
 
+pub use window::{KeyPress, set_unhandled_keys};
+
 use daw_engine::Processor;
 use daw_model::{PluginFormat, PluginRef};
 use serde::{Deserialize, Serialize};
