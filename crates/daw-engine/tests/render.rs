@@ -220,3 +220,26 @@ fn builtin_synth_makes_sound() {
     let peak = signal.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     assert!(peak > 0.05, "peak {peak}");
 }
+
+#[test]
+fn inserts_send_through_their_outputs() {
+    let mut project = unity_project();
+    let channel = project.channels[0].id;
+    let pattern = project.patterns[0].id;
+    project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    let [source, bus] = [1, 2].map(|i| project.mixer.inserts[i].id);
+    project.channels[0].insert = source;
+    assert!(project.mixer.set_output(source, bus));
+    project.mixer.insert_mut(bus).unwrap().volume = 0.5;
+    let peak = |project: &Project| {
+        let (mut engine, _handle, _) = engine_with_probe(project, PlayMode::Pattern(pattern), false);
+        render(&mut engine, FRAMES_PER_BEAT).iter().fold(0.0f32, |m, s| m.max(*s))
+    };
+    assert_eq!(peak(&project), 0.5, "the bus gain applies");
+
+    // Soloing the source keeps the bus it feeds.
+    project.mixer.insert_mut(source).unwrap().solo = true;
+    assert_eq!(peak(&project), 0.5);
+    project.mixer.insert_mut(bus).unwrap().mute = true;
+    assert_eq!(peak(&project), 0.0);
+}

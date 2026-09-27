@@ -229,9 +229,16 @@ pub struct Insert {
     pub mute: bool,
     pub solo: bool,
     pub effects: Vec<InstanceId>,
+    /// Insert this one sends its output to. Ignored on the master.
+    #[serde(default = "master")]
+    pub output: InsertId,
 }
 
 pub const MASTER: InsertId = InsertId(0);
+
+fn master() -> InsertId {
+    MASTER
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mixer {
@@ -240,6 +247,45 @@ pub struct Mixer {
 }
 
 impl Mixer {
+    /// Where an insert's signal goes next, or `None` for the master.
+    pub fn output(&self, id: InsertId) -> Option<InsertId> {
+        if id == MASTER {
+            return None;
+        }
+        let output = self.insert(id).map_or(MASTER, |i| i.output);
+        Some(if self.insert(output).is_some() { output } else { MASTER })
+    }
+
+    /// Whether `from`'s signal reaches `to` through insert outputs.
+    pub fn feeds(&self, from: InsertId, to: InsertId) -> bool {
+        let mut at = from;
+        for _ in 0..self.inserts.len() {
+            match self.output(at) {
+                Some(next) if next == to => return true,
+                Some(next) => at = next,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether `from` may send to `to`: not itself, not the master's output,
+    /// and not anything that already feeds `from`, which would loop.
+    pub fn can_route(&self, from: InsertId, to: InsertId) -> bool {
+        from != MASTER && from != to && self.insert(to).is_some() && !self.feeds(to, from)
+    }
+
+    /// Route an insert's output. Returns false when the route would loop.
+    pub fn set_output(&mut self, from: InsertId, to: InsertId) -> bool {
+        if !self.can_route(from, to) {
+            return false;
+        }
+        if let Some(insert) = self.insert_mut(from) {
+            insert.output = to;
+        }
+        true
+    }
+
     pub fn insert(&self, id: InsertId) -> Option<&Insert> {
         self.inserts.iter().find(|i| i.id == id)
     }
@@ -506,6 +552,13 @@ impl Project {
                 channel.insert = MASTER;
             }
         }
+        // Inserts that fed this one send to where it went.
+        let next = self.mixer.output(id).unwrap_or(MASTER);
+        for other in &mut self.mixer.inserts {
+            if other.output == id {
+                other.output = next;
+            }
+        }
         let dead: Vec<AutomationId> = self
             .automation
             .iter()
@@ -547,7 +600,7 @@ impl Project {
 
 impl Insert {
     pub fn new(id: InsertId, name: &str) -> Self {
-        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new() }
+        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new(), output: MASTER }
     }
 }
 
@@ -728,5 +781,20 @@ mod tests {
         assert_eq!(project.automation_clip(automation).unwrap().length, bar * 5);
         assert_eq!(project.playlist.clips[0].length, bar * 5);
         assert_eq!(project.playlist.clips[1].length, length);
+    }
+
+    #[test]
+    fn insert_outputs_refuse_loops_and_survive_removal() {
+        let mut project = Project::new();
+        let [a, b, c] = [1, 2, 3].map(|i| project.mixer.inserts[i].id);
+        let mixer = &mut project.mixer;
+        assert!(mixer.set_output(a, b));
+        assert!(mixer.set_output(b, c));
+        assert!(mixer.feeds(a, c) && mixer.feeds(a, MASTER));
+        assert!(!mixer.set_output(c, a), "c feeds back into a");
+        assert!(!mixer.set_output(a, a));
+        assert!(!mixer.set_output(MASTER, a));
+        project.remove_insert(b);
+        assert_eq!(project.mixer.output(a), Some(c));
     }
 }

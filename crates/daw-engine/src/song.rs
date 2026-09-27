@@ -28,8 +28,10 @@ pub struct InsertPlan {
     pub effects: Vec<u64>,
     pub volume: f32,
     pub pan: f32,
-    pub mute: bool,
-    pub solo: bool,
+    /// Muted, or left out by a solo elsewhere.
+    pub silent: bool,
+    /// Index of the insert this one sums into; 0 is the master.
+    pub output: usize,
     pub left: Box<[f32]>,
     pub right: Box<[f32]>,
 }
@@ -77,6 +79,8 @@ pub struct Song {
     pub channels: Vec<ChannelPlan>,
     /// Index 0 is the master insert.
     pub inserts: Vec<InsertPlan>,
+    /// Non-master insert indices, each before the insert it sends to.
+    pub order: Vec<usize>,
     pub automation: Vec<AutomationPlan>,
 }
 
@@ -185,22 +189,41 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize) -> Song {
         channel.events.sort_by(|a, b| a.tick.cmp(&b.tick).then((a.velocity > 0.0).cmp(&(b.velocity > 0.0))));
     }
 
-    let inserts = project
-        .mixer
+    let mixer = &project.mixer;
+    let soloed: Vec<_> = mixer.inserts.iter().filter(|i| i.solo && i.id != daw_model::MASTER).map(|i| i.id).collect();
+    // A solo keeps the inserts feeding it and the ones it feeds.
+    let audible = |id| soloed.is_empty() || soloed.iter().any(|&s| s == id || mixer.feeds(id, s) || mixer.feeds(s, id));
+    let inserts: Vec<InsertPlan> = mixer
         .inserts
         .iter()
-        .map(|i| InsertPlan {
-            effects: i.effects.iter().map(|e| e.0).collect(),
-            volume: i.volume,
-            pan: i.pan,
-            mute: i.mute,
-            solo: i.solo,
-            left: vec![0.0; max_block].into_boxed_slice(),
-            right: vec![0.0; max_block].into_boxed_slice(),
+        .enumerate()
+        .map(|(index, i)| {
+            let output = mixer.output(i.id).map_or(0, insert_index);
+            InsertPlan {
+                effects: i.effects.iter().map(|e| e.0).collect(),
+                volume: i.volume,
+                pan: i.pan,
+                silent: i.mute || (index > 0 && !audible(i.id)),
+                output: if output == index { 0 } else { output },
+                left: vec![0.0; max_block].into_boxed_slice(),
+                right: vec![0.0; max_block].into_boxed_slice(),
+            }
         })
         .collect();
+    // Farthest from the master first, so every insert is complete before
+    // it is added to its output.
+    let hops = |mut index: usize| {
+        let mut hops = 0;
+        while index != 0 && hops < inserts.len() {
+            index = inserts[index].output;
+            hops += 1;
+        }
+        hops
+    };
+    let mut order: Vec<usize> = (1..inserts.len()).collect();
+    order.sort_by_key(|&index| std::cmp::Reverse(hops(index)));
 
-    Song { bpm: project.bpm, signature: project.signature, loop_range, channels, inserts, automation }
+    Song { bpm: project.bpm, signature: project.signature, loop_range, channels, inserts, order, automation }
 }
 
 fn engine_target(project: &Project, target: Target) -> Option<EngineTarget> {

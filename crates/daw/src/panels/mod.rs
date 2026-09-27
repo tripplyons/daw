@@ -17,6 +17,19 @@ use iced::{Element, mouse};
 use crate::app::Message;
 use crate::theme;
 
+/// A mixer insert in a pick list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertChoice {
+    pub id: daw_model::InsertId,
+    pub name: String,
+}
+
+impl std::fmt::Display for InsertChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
 /// Small flat button used in toolbars.
 pub fn tool<'a>(label: &str, message: Message) -> Element<'a, Message> {
     button(text(label.to_string()).size(theme::SMALL)).on_press(message).style(theme::control).padding([2, 6]).into()

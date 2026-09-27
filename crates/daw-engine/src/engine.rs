@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use daw_model::time::{TICKS_PER_BEAT, Ticks};
 
 use crate::processor::{Event, EventKind, Processor, TransportInfo};
-use crate::song::{EngineTarget, Song, tempo_from_normalized};
+use crate::song::{EngineTarget, InsertPlan, Song, tempo_from_normalized};
 
 /// Largest block the engine renders at once; larger host buffers are split.
 pub const MAX_BLOCK: usize = 512;
@@ -177,6 +177,19 @@ fn apply_pan(pan: f32, gain: f32) -> (f32, f32) {
     (gain * (1.0 - pan).min(1.0), gain * (1.0 + pan).min(1.0))
 }
 
+/// An insert and the insert it sends to, borrowed together. Compiled songs
+/// never route an insert into itself.
+fn pair_mut(inserts: &mut [InsertPlan], index: usize) -> (&mut InsertPlan, &mut InsertPlan) {
+    let output = inserts[index].output;
+    if index < output {
+        let (low, high) = inserts.split_at_mut(output);
+        (&mut low[index], &mut high[0])
+    } else {
+        let (low, high) = inserts.split_at_mut(index);
+        (&mut high[0], &mut low[output])
+    }
+}
+
 fn peak(buffer: &[f32]) -> f32 {
     buffer.iter().fold(0.0f32, |m, s| m.max(s.abs()))
 }
@@ -315,9 +328,8 @@ impl Engine {
             }
         }
 
-        let any_solo = song.inserts.iter().skip(1).any(|i| i.solo);
-        let (master, others) = song.inserts.split_first_mut().expect("compiled songs always have a master insert");
-        for (index, insert) in others.iter_mut().enumerate() {
+        for &index in &song.order {
+            let (insert, output) = pair_mut(&mut song.inserts, index);
             let (l, r) = (&mut insert.left[..frames], &mut insert.right[..frames]);
             for key in &insert.effects {
                 if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
@@ -325,16 +337,16 @@ impl Engine {
                     node.events.clear();
                 }
             }
-            let silent = insert.mute || (any_solo && !insert.solo);
-            let (gl, gr) = if silent { (0.0, 0.0) } else { apply_pan(insert.pan, insert.volume) };
+            let (gl, gr) = if insert.silent { (0.0, 0.0) } else { apply_pan(insert.pan, insert.volume) };
             for i in 0..frames {
                 l[i] *= gl;
                 r[i] *= gr;
-                master.left[i] += l[i];
-                master.right[i] += r[i];
+                output.left[i] += l[i];
+                output.right[i] += r[i];
             }
-            self.shared.raise_peak(index + 1, peak(l), peak(r));
+            self.shared.raise_peak(index, peak(l), peak(r));
         }
+        let master = &mut song.inserts[0];
         let (l, r) = (&mut master.left[..frames], &mut master.right[..frames]);
         for key in &master.effects {
             if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
@@ -342,7 +354,7 @@ impl Engine {
                 node.events.clear();
             }
         }
-        let (gl, gr) = if master.mute { (0.0, 0.0) } else { apply_pan(master.pan, master.volume) };
+        let (gl, gr) = if master.silent { (0.0, 0.0) } else { apply_pan(master.pan, master.volume) };
         for i in 0..frames {
             left[i] = l[i] * gl;
             right[i] = r[i] * gr;

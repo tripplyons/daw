@@ -4,7 +4,7 @@ use daw_model::{InsertId, Target};
 use iced::widget::{Space, button, column, container, mouse_area, row, slider, text, vertical_slider};
 use iced::{Element, Length};
 
-use super::{label, tool, toggle};
+use super::{InsertChoice, label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage, gain_text, pan_text};
 use crate::theme;
 
@@ -21,6 +21,7 @@ pub enum Message {
     RaiseEffect(InsertId, usize),
     AddInsert,
     DeleteInsert,
+    Output(InsertId, InsertId),
 }
 
 impl From<Message> for AppMessage {
@@ -71,6 +72,15 @@ pub fn update(app: &mut App, message: Message) {
             if let Some(insert) = app.project.mixer.insert_mut(id) {
                 insert.mute = !insert.mute;
             }
+            app.edited();
+        }
+        Message::Output(from, to) => {
+            if !app.project.mixer.can_route(from, to) {
+                app.set_status("that route would feed the insert back into itself");
+                return;
+            }
+            app.checkpoint();
+            app.project.mixer.set_output(from, to);
             app.edited();
         }
         Message::Solo(id) => {
@@ -161,8 +171,17 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             .style(theme::plain(selected))
             .padding([1, 3])
             .width(Length::Fill);
+        // Where the signal goes, when it is not straight to the master.
+        let output = match app.project.mixer.output(id) {
+            Some(to) if to != daw_model::MASTER => app.project.mixer.insert(to).map(|i| format!("> {}", i.name)),
+            _ => None,
+        };
+        // About 5 px per character at size 10.
+        let output: String = output.unwrap_or_default().chars().take(((STRIP_WIDTH - 6.0) / 5.0) as usize).collect();
+        let output = text(output).size(10).color(theme::TEXT_DIM);
         let strip = column![
             name,
+            output,
             row![meter(left), meter(right), fader].spacing(2).height(Length::Fill),
             text(gain_text(insert.volume)).size(10).color(theme::TEXT_DIM),
             pan,
@@ -184,6 +203,22 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
     let mut chain = column![label("effects")].spacing(2).padding(4).width(190);
     if let Some(insert) = app.project.mixer.insert(app.selected_insert) {
         chain = chain.push(text(insert.name.clone()).size(theme::TEXT_SIZE).color(theme::BRIGHT));
+        if insert.id != daw_model::MASTER {
+            let mixer = &app.project.mixer;
+            let from = insert.id;
+            let choices: Vec<InsertChoice> = mixer
+                .inserts
+                .iter()
+                .filter(|i| mixer.can_route(from, i.id))
+                .map(|i| InsertChoice { id: i.id, name: i.name.clone() })
+                .collect();
+            let current = mixer.output(from).and_then(|to| choices.iter().find(|c| c.id == to).cloned());
+            chain = chain.push(
+                row![label("output"), pick(choices, current, move |c: InsertChoice| Message::Output(from, c.id).into())]
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+            );
+        }
         for (index, &instance) in insert.effects.iter().enumerate() {
             let name = app.project.plugin(instance).map(|p| p.plugin.name.clone()).unwrap_or_default();
             let failed = app.session.load_errors.contains_key(&instance);

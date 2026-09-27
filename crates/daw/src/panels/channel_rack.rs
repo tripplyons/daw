@@ -7,7 +7,7 @@ use daw_model::{ChannelId, InsertId, STEP_TICKS, Source, SynthParams, Target};
 use iced::widget::{Space, button, column, container, mouse_area, row, slider, text};
 use iced::{Element, Length, Task};
 
-use super::{label, pick, tool};
+use super::{InsertChoice, label, pick, tool};
 use crate::app::{App, Message as AppMessage};
 use crate::theme;
 
@@ -31,18 +31,6 @@ pub enum Message {
 impl From<Message> for AppMessage {
     fn from(message: Message) -> Self {
         AppMessage::Rack(message)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct InsertChoice {
-    id: InsertId,
-    name: String,
-}
-
-impl std::fmt::Display for InsertChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name)
     }
 }
 

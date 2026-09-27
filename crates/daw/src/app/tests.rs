@@ -261,6 +261,19 @@ fn bpm_field_keeps_partial_text_and_applies_valid_tempos() {
 }
 
 #[test]
+fn mixer_routes_insert_outputs_without_loops() {
+    let mut app = app();
+    let [a, b] = [1, 2].map(|i| app.project.mixer.inserts[i].id);
+    let _ = app.update(crate::panels::mixer::Message::Output(a, b).into());
+    assert_eq!(app.project.mixer.output(a), Some(b));
+    let _ = app.update(crate::panels::mixer::Message::Output(b, a).into());
+    assert_eq!(app.project.mixer.output(b), Some(daw_model::MASTER));
+    assert!(app.status.contains("back into itself"), "{}", app.status);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.mixer.output(a), Some(daw_model::MASTER));
+}
+
+#[test]
 fn automation_clips_size_like_patterns() {
     let mut app = app();
     let bar = app.project.signature.ticks_per_bar();
