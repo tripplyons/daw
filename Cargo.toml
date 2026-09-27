@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+daw-model = { path = "crates/daw-model" }
+daw-engine = { path = "crates/daw-engine" }
+daw-plugins = { path = "crates/daw-plugins" }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+serde_json = "1"
+base64 = "0.22"
+cpal = "0.18"
+rtrb = "0.4"
+hound = "3.5"
+iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
+vst3 = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder", "NSGraphics", "NSViewController", "NSApplication", "NSMenu", "NSMenuItem"] }
+objc2-audio-toolbox = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-core-foundation = { version = "0.3", features = ["CFBundle", "CFURL", "CFString", "CFRunLoop", "CFError"] }
+libloading = "0.8"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+dirs = "6"
+
+[profile.dev.package."*"]
+opt-level = 2

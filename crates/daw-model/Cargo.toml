@@ -1,0 +1,10 @@
+[package]
+name = "daw-model"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+ron.workspace = true
+base64.workspace = true
+thiserror.workspace = true

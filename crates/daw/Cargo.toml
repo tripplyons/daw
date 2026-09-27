@@ -1,0 +1,25 @@
+[package]
+name = "daw"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+daw-model.workspace = true
+daw-engine.workspace = true
+daw-plugins.workspace = true
+iced.workspace = true
+cpal.workspace = true
+log.workspace = true
+env_logger.workspace = true
+rfd = "0.15"
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+
+[dev-dependencies]
+hound.workspace = true

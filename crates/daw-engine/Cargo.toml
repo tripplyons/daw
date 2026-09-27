@@ -1,0 +1,12 @@
+[package]
+name = "daw-engine"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+daw-model.workspace = true
+cpal.workspace = true
+rtrb.workspace = true
+hound.workspace = true
+log.workspace = true
+thiserror.workspace = true
