@@ -1,5 +1,6 @@
 mod app;
 mod capture;
+mod cli;
 mod config;
 mod keys;
 mod open_files;
@@ -8,23 +9,32 @@ mod quit;
 mod session;
 mod theme;
 
-use app::App;
+use std::process::ExitCode;
 
-fn main() -> iced::Result {
+use app::App;
+use clap::Parser;
+
+fn main() -> ExitCode {
     // Plugin scanning re-runs this executable as a child process per plugin.
     let args: Vec<String> = std::env::args().collect();
     if let Some(code) = daw_plugins::scan::run_child(&args) {
         std::process::exit(code);
     }
-    if args.get(1).map(String::as_str) == Some("--export") {
-        let (Some(project), Some(out)) = (args.get(2), args.get(3)) else {
-            eprintln!("usage: daw --export <project> <file.wav>");
-            std::process::exit(2);
-        };
-        std::process::exit(app::export_cli(project, out));
+    let cli = cli::Cli::parse();
+    if let Some(command) = cli.command {
+        return cli::run(command);
     }
-    let project = args.get(1).filter(|a| !a.starts_with('-')).map(std::path::PathBuf::from);
-    let _ = app::STARTUP_PROJECT.set(project);
+    let _ = app::STARTUP_PROJECT.set(cli.project);
+    match run_app() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_app() -> iced::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     open_files::install();
     iced::application(App::boot, App::update, App::view)

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::automation::{Envelope, Point};
+use crate::automation::{Envelope, Point, tempo_to_normalized};
 use crate::layout::Layout;
 use crate::time::{Grid, TICKS_PER_BEAT, TimeSignature, Ticks};
 
@@ -470,6 +470,24 @@ impl Project {
         self.plugins.iter_mut().find(|p| p.id == id)
     }
 
+    /// Current normalized value of a built-in target. `None` for plugin
+    /// parameters, whose values live in the loaded plugin, and for targets
+    /// whose channel or insert is gone.
+    pub fn target_value(&self, target: Target) -> Option<f32> {
+        match target {
+            Target::Plugin { .. } => None,
+            Target::InsertVolume(id) => self.mixer.insert(id).map(|i| i.volume / 2.0),
+            Target::InsertPan(id) => self.mixer.insert(id).map(|i| (i.pan + 1.0) / 2.0),
+            Target::ChannelVolume(id) => self.channel(id).map(|c| c.volume),
+            Target::ChannelPan(id) => self.channel(id).map(|c| (c.pan + 1.0) / 2.0),
+            Target::SynthCutoff(id) => match &self.channel(id)?.source {
+                Source::Synth(params) => Some(params.cutoff),
+                _ => None,
+            },
+            Target::Tempo => Some(tempo_to_normalized(self.bpm)),
+        }
+    }
+
     /// Existing automation clip for a target, if any.
     pub fn automation_for(&self, target: Target) -> Option<AutomationId> {
         self.automation.iter().find(|a| a.target == target).map(|a| a.id)
@@ -508,6 +526,12 @@ impl Project {
         for automation in dead {
             self.remove_automation(automation);
         }
+    }
+
+    /// Remove a pattern and its playlist clips.
+    pub fn remove_pattern(&mut self, id: PatternId) {
+        self.patterns.retain(|p| p.id != id);
+        self.playlist.clips.retain(|c| c.source != ClipSource::Pattern(id));
     }
 
     pub fn remove_automation(&mut self, id: AutomationId) {

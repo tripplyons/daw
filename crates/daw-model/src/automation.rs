@@ -78,6 +78,18 @@ impl Point {
     }
 }
 
+/// Tempo range that normalized tempo automation spans.
+pub const TEMPO_MIN: f64 = 40.0;
+pub const TEMPO_MAX: f64 = 240.0;
+
+pub fn tempo_from_normalized(value: f32) -> f64 {
+    TEMPO_MIN + f64::from(value) * (TEMPO_MAX - TEMPO_MIN)
+}
+
+pub fn tempo_to_normalized(bpm: f64) -> f32 {
+    ((bpm - TEMPO_MIN) / (TEMPO_MAX - TEMPO_MIN)).clamp(0.0, 1.0) as f32
+}
+
 /// Shape a 0..1 position within a segment into a 0..1 blend factor.
 pub fn shape_factor(shape: Shape, tension: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);

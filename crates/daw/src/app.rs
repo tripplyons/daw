@@ -1,7 +1,7 @@
 //! Application state, messages, and top-level update and view.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -368,19 +368,9 @@ impl App {
 
     /// Current normalized value of a target, for new automation clips.
     pub fn target_value(&self, target: Target) -> f32 {
-        let insert = |id| self.project.mixer.insert(id);
-        let channel = |id| self.project.channel(id);
         match target {
             Target::Plugin { instance, param } => self.session.param_value(instance, param),
-            Target::InsertVolume(id) => insert(id).map(|i| i.volume / 2.0).unwrap_or(0.4),
-            Target::InsertPan(id) => insert(id).map(|i| (i.pan + 1.0) / 2.0).unwrap_or(0.5),
-            Target::ChannelVolume(id) => channel(id).map(|c| c.volume).unwrap_or(0.8),
-            Target::ChannelPan(id) => channel(id).map(|c| (c.pan + 1.0) / 2.0).unwrap_or(0.5),
-            Target::SynthCutoff(id) => match channel(id).map(|c| &c.source) {
-                Some(daw_model::Source::Synth(params)) => params.cutoff,
-                _ => 0.5,
-            },
-            Target::Tempo => daw_engine::song::tempo_to_normalized(self.project.bpm),
+            _ => self.project.target_value(target).unwrap_or(0.5),
         }
     }
 
@@ -392,7 +382,7 @@ impl App {
             Target::ChannelVolume(_) => gain_text(value),
             Target::InsertPan(_) | Target::ChannelPan(_) => pan_text(value * 2.0 - 1.0),
             Target::SynthCutoff(_) => format!("{:.0} Hz", 40.0 * (18000.0f32 / 40.0).powf(value)),
-            Target::Tempo => format!("{:.1} bpm", daw_engine::song::tempo_from_normalized(value)),
+            Target::Tempo => format!("{:.1} bpm", daw_model::automation::tempo_from_normalized(value)),
         }
     }
 
@@ -1259,24 +1249,15 @@ pub fn pan_text(pan: f32) -> String {
     }
 }
 
-/// Headless render: `daw --export <project> <file.wav>`. Returns the exit code.
-pub fn export_cli(project: &str, out: &str) -> i32 {
+/// Headless render for `daw export`, loading the project's plugins.
+pub fn export_cli(project: &Path, out: &Path) -> Result<(), String> {
     let mut app = App::boot().0;
-    app.open(PathBuf::from(project));
+    app.open(project.to_path_buf());
     for (instance, error) in &app.session.load_errors {
-        eprintln!("plugin {instance:?} failed to load: {error}");
+        eprintln!("plugin {} failed to load: {error}", instance.0);
     }
     let mode = app.mode;
-    match app.session.export(&app.project, std::path::Path::new(out), BitDepth::Int24, mode) {
-        Ok(()) => {
-            println!("exported {out}");
-            0
-        }
-        Err(error) => {
-            eprintln!("export failed: {error}");
-            1
-        }
-    }
+    app.session.export(&app.project, out, BitDepth::Int24, mode).map_err(|e| format!("export failed: {e}"))
 }
 
 async fn save_dialog() -> Option<PathBuf> {

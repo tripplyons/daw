@@ -196,16 +196,26 @@ pub fn scan(exe: &Path, cache_file: &Path, progress: impl Fn(Progress) + Sync) -
     entries.extend(results.into_inner().unwrap());
     entries.sort_by(|a, b| a.key.cmp(&b.key));
 
+    let catalog = catalog(&entries);
+    cache.entries = entries;
+    save_cache(cache_file, &cache);
+    catalog
+}
+
+/// The catalog from the last scan, without probing any plugins.
+pub fn cached(cache_file: &Path) -> Catalog {
+    catalog(&load_cache(cache_file).entries)
+}
+
+fn catalog(entries: &[Entry]) -> Catalog {
     let mut catalog = Catalog::default();
-    for entry in &entries {
+    for entry in entries {
         match &entry.result {
             Ok(plugins) => catalog.plugins.extend(plugins.iter().cloned()),
             Err(error) => catalog.failed.push(Failure { format: entry.format, name: entry.name.clone(), error: error.clone() }),
         }
     }
     catalog.plugins.sort_by_key(|p| p.plugin.name.to_lowercase());
-    cache.entries = entries;
-    save_cache(cache_file, &cache);
     catalog
 }
 

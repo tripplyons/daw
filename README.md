@@ -55,6 +55,33 @@ Click a plugin in the browser panel to use it: an instrument gets a new channel 
 - Projects are saved as `.dawproj` files. Closing, starting a new project, or opening another one asks to save unsaved changes first.
 - Key bindings are saved to `~/.config/daw/config.json`, or to `$XDG_CONFIG_HOME/daw/config.json` when that variable is an absolute path. Edit them on the settings page (Cmd+comma).
 
+## Command line
+
+With no command, `daw [project]` opens the app. Subcommands read and change project files without a window:
+
+```sh
+daw new song.dawproj
+daw show song.dawproj                      # overview with ids
+daw edit song.dawproj note add 10 9 E4 1beat 2step
+daw edit song.dawproj clip add pattern:10 0 4bar
+daw plugins                                # installed plugins from the scan cache
+daw export song.dawproj song.wav
+```
+
+`daw --help` lists every command.
+
+### Agent skill
+
+The `daw-project` skill in `.claude/skills/daw-project` teaches coding agents to use these commands: the project model, value formats, and a worked example. Claude Code loads it automatically inside this repository. To use it in other folders, put `daw` on your PATH and install the skill for your user. From the repository root:
+
+```sh
+cargo install --path crates/daw
+mkdir -p ~/.claude/skills
+ln -s "$PWD/.claude/skills/daw-project" ~/.claude/skills/daw-project
+```
+
+The symlink keeps the skill in step with the repository; copy the folder instead if you want a fixed version. Other agents that read `SKILL.md` folders can use the same folder, for example by linking it into `~/.agents/skills`.
+
 ## Default keys
 
 Alt is the tiling modifier. Keys match by physical position, so they work on any keyboard layout. On Linux, Ctrl replaces Cmd everywhere in this README. If your window manager already uses an Alt shortcut, rebind it there or in the settings page.

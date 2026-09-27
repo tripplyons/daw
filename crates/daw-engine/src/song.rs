@@ -91,17 +91,6 @@ pub enum PlayMode {
     Song,
 }
 
-pub const TEMPO_MIN: f64 = 40.0;
-pub const TEMPO_MAX: f64 = 240.0;
-
-pub fn tempo_from_normalized(value: f32) -> f64 {
-    TEMPO_MIN + f64::from(value) * (TEMPO_MAX - TEMPO_MIN)
-}
-
-pub fn tempo_to_normalized(bpm: f64) -> f32 {
-    ((bpm - TEMPO_MIN) / (TEMPO_MAX - TEMPO_MIN)).clamp(0.0, 1.0) as f32
-}
-
 /// Node key for a channel's instrument: the plugin instance id, or the channel
 /// id for built-in sources. Ids share one counter, so keys never collide.
 pub fn channel_node(source: &Source, channel: daw_model::ChannelId) -> u64 {

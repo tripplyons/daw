@@ -12,6 +12,7 @@ cpal.workspace = true
 log.workspace = true
 env_logger.workspace = true
 rfd = "0.15"
+clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true

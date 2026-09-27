@@ -4,10 +4,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use daw_model::automation::tempo_from_normalized;
 use daw_model::time::{TICKS_PER_BEAT, Ticks};
 
 use crate::processor::{Event, EventKind, Processor, TransportInfo};
-use crate::song::{EngineTarget, InsertPlan, Song, tempo_from_normalized};
+use crate::song::{EngineTarget, InsertPlan, Song};
 
 /// Largest block the engine renders at once; larger host buffers are split.
 pub const MAX_BLOCK: usize = 512;
