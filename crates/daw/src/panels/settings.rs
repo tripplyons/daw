@@ -71,7 +71,7 @@ pub fn key(app: &mut App, event: &Event) {
 const SCROLLING: &[(&str, &str)] = &[
     ("scroll", "scroll up and down"),
     ("shift+scroll, or swipe sideways", "scroll sideways"),
-    ("cmd+scroll", "zoom time"),
+    (if cfg!(target_os = "macos") { "cmd+scroll" } else { "ctrl+scroll" }, "zoom time"),
     ("alt+scroll", "zoom height (keys, tracks, values)"),
     ("alt+shift+scroll over a note", "note velocity"),
 ];
@@ -123,8 +123,9 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
     for (combo, action) in SCROLLING {
         list = list.push(row![text(*action).size(theme::SMALL).width(180), label(*combo)].spacing(6));
     }
-    let note = "Keys match by position, so Alt chords work on any layout. Panel keys (Delete, arrows, \
-                Cmd+A/C/V/D, 1-6 in automation, Q in the piano roll) apply when no binding matches.";
+    let command = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+    let note = format!("Keys match by position, so Alt chords work on any layout. Panel keys (Delete, arrows, \
+                {command}+A/C/V/D, 1-6 in automation, Q in the piano roll) apply when no binding matches.");
     list = list.push(container(label(note)).padding([8, 0]));
     super::scroll(list, true, false).height(Length::Fill).into()
 }

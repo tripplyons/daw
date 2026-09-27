@@ -1,6 +1,13 @@
 //! VST3 hosting: bundle loading, class enumeration, processing, and editors.
 
 mod host;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+mod run_loop;
+
+#[cfg(target_os = "linux")]
+pub use linux::binary_dir;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
@@ -9,6 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use daw_engine::{Event as EngineEvent, EventKind, Processor, TransportInfo};
 use daw_model::{PluginFormat, PluginRef};
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::{CFBundle, CFRetained, CFString, CFURL};
 use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent};
@@ -27,8 +35,7 @@ use vst3::Steinberg::Vst::{
 };
 use vst3::Steinberg::{
     FUnknown, IBStream, IPlugView, IPlugViewTrait, IPluginBaseTrait, IPluginFactory, IPluginFactory2,
-    IPluginFactory2Trait, IPluginFactoryTrait, PClassInfo, PClassInfo2, TUID, ViewRect, kPlatformTypeNSView,
-    kResultOk, kResultTrue,
+    IPluginFactory2Trait, IPluginFactoryTrait, PClassInfo, PClassInfo2, TUID, ViewRect, kResultOk, kResultTrue,
 };
 use vst3::{ComPtr, ComWrapper, Interface};
 
@@ -38,6 +45,13 @@ use host::{
     ComponentHandler, EventList, HostApplication, MemoryStream, ParameterChanges, PlugFrame, read_string128,
 };
 
+/// The window type editors attach to.
+#[cfg(target_os = "macos")]
+const EDITOR_PLATFORM: vst3::Steinberg::FIDString = vst3::Steinberg::kPlatformTypeNSView;
+#[cfg(target_os = "linux")]
+const EDITOR_PLATFORM: vst3::Steinberg::FIDString = vst3::Steinberg::kPlatformTypeX11EmbedWindowID;
+
+#[cfg(target_os = "macos")]
 type BundleEntry = unsafe extern "C" fn(*mut c_void) -> bool;
 type GetPluginFactory = unsafe extern "C" fn() -> *mut IPluginFactory;
 
@@ -45,7 +59,10 @@ type GetPluginFactory = unsafe extern "C" fn() -> *mut IPluginFactory;
 /// many plugins crash when their bundle is unloaded and reloaded.
 struct Module {
     factory: ComPtr<IPluginFactory>,
+    #[cfg(target_os = "macos")]
     _bundle: CFRetained<CFBundle>,
+    #[cfg(target_os = "linux")]
+    _library: linux::Library,
 }
 
 unsafe impl Send for Module {}
@@ -71,6 +88,13 @@ fn host_context() -> *mut FUnknown {
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// The folder with the bundle's binaries for this platform.
+#[cfg(target_os = "macos")]
+pub fn binary_dir(bundle: &Path) -> PathBuf {
+    bundle.join("Contents/MacOS")
+}
+
+#[cfg(target_os = "macos")]
 fn load_module(path: &Path) -> Result<Arc<Module>, PluginError> {
     if let Some(module) = modules().lock().unwrap().get(path) {
         return Ok(module.clone());
@@ -106,14 +130,33 @@ fn load_module(path: &Path) -> Result<Arc<Module>, PluginError> {
     Ok(module)
 }
 
+#[cfg(target_os = "linux")]
+fn load_module(path: &Path) -> Result<Arc<Module>, PluginError> {
+    // Hold the lock while loading so two threads cannot both run ModuleEntry
+    // for one library.
+    let mut modules = modules().lock().unwrap();
+    if let Some(module) = modules.get(path) {
+        return Ok(module.clone());
+    }
+    let fail = |message: &str| PluginError::Load(format!("{}: {message}", path.display()));
+    let library = linux::executable_path(path).and_then(|binary| linux::Library::open(&binary)).map_err(|e| fail(&e))?;
+    let get_factory = unsafe { library.inner.get::<GetPluginFactory>(b"GetPluginFactory\0") }
+        .map_err(|_| fail("no GetPluginFactory export"))?;
+    let factory = unsafe { ComPtr::from_raw(get_factory()) }.ok_or_else(|| fail("GetPluginFactory returned null"))?;
+    // Fields drop in order, so the factory is released before ModuleExit.
+    let module = Arc::new(Module { factory, _library: library });
+    modules.insert(path.to_owned(), module.clone());
+    Ok(module)
+}
+
 fn c_text(bytes: &[c_char]) -> String {
     let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
-    let bytes: Vec<u8> = bytes[..end].iter().map(|&c| c as u8).collect();
+    let bytes: Vec<u8> = bytes[..end].iter().map(|c| c.to_ne_bytes()[0]).collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn tuid_hex(tuid: &TUID) -> String {
-    tuid.iter().map(|b| format!("{:02X}", *b as u8)).collect()
+    tuid.iter().map(|b| format!("{:02X}", b.to_ne_bytes()[0])).collect()
 }
 
 fn parse_tuid(hex: &str) -> Option<TUID> {
@@ -178,12 +221,14 @@ pub fn scan_bundle(path: &Path) -> Result<Vec<PluginInfo>, PluginError> {
 /// Component, processor, and controller for one plugin instance. Torn down
 /// when both the processor and controller sides are dropped.
 struct Instance {
-    component: ComPtr<IComponent>,
+    // Rust drops fields in declaration order after Drop::drop. Release child
+    // interfaces before their owning controller/component (DPF requires this).
+    connections: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
     processor: ComPtr<IAudioProcessor>,
     controller: Option<ComPtr<IEditController>>,
+    component: ComPtr<IComponent>,
     /// True when the controller is a separate object that needs its own terminate.
     separate_controller: bool,
-    connections: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
     _module: Arc<Module>,
 }
 
@@ -552,7 +597,9 @@ impl Processor for Vst3Processor {
 
 struct Editor {
     view: ComPtr<IPlugView>,
-    _frame: ComWrapper<PlugFrame>,
+    /// Kept alive while the view holds it. Linux also pumps its run loop.
+    #[cfg_attr(target_os = "macos", expect(dead_code))]
+    frame: ComWrapper<PlugFrame>,
     window: EditorWindow,
 }
 
@@ -641,20 +688,33 @@ impl Controller for Vst3Controller {
         let view = unsafe { controller.createView(c"editor".as_ptr()) };
         let view = unsafe { ComPtr::<IPlugView>::from_raw(view) }
             .ok_or_else(|| PluginError::Load(format!("{title} has no editor")))?;
-        if unsafe { view.isPlatformTypeSupported(kPlatformTypeNSView) } != kResultTrue {
-            return Err(PluginError::Load(format!("{title} editor does not support NSView")));
+        if unsafe { view.isPlatformTypeSupported(EDITOR_PLATFORM) } != kResultTrue {
+            return Err(PluginError::Load(format!("{title} has no editor for this window system")));
         }
         let mut rect = ViewRect { left: 0, top: 0, right: 400, bottom: 300 };
         unsafe { view.getSize(&mut rect) };
-        let window = EditorWindow::new(title, f64::from(rect.right - rect.left), f64::from(rect.bottom - rect.top));
-        let resizer = window.resizer();
-        let frame = ComWrapper::new(PlugFrame { resize: Mutex::new(Some(Box::new(resizer))) });
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        #[cfg(target_os = "macos")]
+        let window = EditorWindow::new(title, f64::from(width), f64::from(height));
+        #[cfg(target_os = "linux")]
+        let window = EditorWindow::new(title, width, height, unsafe { view.canResize() } == kResultTrue)?;
+        let frame = ComWrapper::new(PlugFrame {
+            resize: Mutex::new(Some(Box::new(window.resizer()))),
+            #[cfg(target_os = "linux")]
+            run_loop: Default::default(),
+        });
         unsafe {
             view.setFrame(frame.as_com_ref::<vst3::Steinberg::IPlugFrame>().unwrap().as_ptr());
-            check("IPlugView::attached", view.attached(window.content_view(), kPlatformTypeNSView))?;
+            if let Err(error) = check("IPlugView::attached", view.attached(window.content_view(), EDITOR_PLATFORM)) {
+                view.setFrame(std::ptr::null_mut());
+                #[cfg(target_os = "linux")]
+                frame.run_loop.clear();
+                window.close();
+                return Err(error);
+            }
         }
         window.show();
-        self.editor = Some(Editor { view, _frame: frame, window });
+        self.editor = Some(Editor { view, frame, window });
         Ok(())
     }
 
@@ -669,6 +729,21 @@ impl Controller for Vst3Controller {
     }
 
     fn take_touches(&mut self) -> Vec<Touch> {
+        // Linux has no shared event loop, so drive the editor from here.
+        #[cfg(target_os = "linux")]
+        if let Some(editor) = &self.editor {
+            editor.frame.run_loop.pump();
+            // The user resized the window: let the plugin adjust the size, then follow it.
+            if let Some((width, height)) = editor.window.poll() {
+                let mut rect = ViewRect { left: 0, top: 0, right: width, bottom: height };
+                unsafe { editor.view.checkSizeConstraint(&mut rect) };
+                let fitted = (rect.right - rect.left, rect.bottom - rect.top);
+                if fitted != (width, height) {
+                    editor.window.resize(fitted.0, fitted.1);
+                }
+                unsafe { editor.view.onSize(&mut rect) };
+            }
+        }
         std::mem::take(&mut *self.handler.touches.lock().unwrap())
     }
 }
@@ -680,6 +755,8 @@ impl Drop for Vst3Controller {
                 editor.view.removed();
                 editor.view.setFrame(std::ptr::null_mut());
             }
+            #[cfg(target_os = "linux")]
+            editor.frame.run_loop.clear();
             editor.window.close();
         }
     }
@@ -691,7 +768,7 @@ mod tests {
 
     #[test]
     fn tuid_hex_round_trip() {
-        let tuid: TUID = [1, -2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let tuid: TUID = [1, (-2i8) as c_char, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         assert_eq!(parse_tuid(&tuid_hex(&tuid)), Some(tuid));
     }
 

@@ -1,8 +1,16 @@
 //! List Audio Units, then load the ones whose name contains the argument and
 //! run a note or noise through them.
 
+#[cfg(target_os = "macos")]
 use daw_engine::{Event, EventKind, TransportInfo};
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("Audio Units are only supported on macOS.");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "macos")]
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
     let all = daw_plugins::au::list();

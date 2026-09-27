@@ -1,9 +1,9 @@
 //! Song arrangement: pattern and automation clips on tracks.
 //!
 //! Left click places the brush clip or drags clips (the right edge resizes),
-//! double click opens a clip, right click deletes, right or Ctrl drag
-//! selects a box, Alt click splits a clip. Click a track name to select the
-//! track, or its square to mute it. In the ruler, left click seeks and right drag sets the loop.
+//! double click opens a clip, right click deletes, right drag (or Ctrl drag
+//! on macOS) selects a box, Alt click splits a clip. Click a track name to
+//! select the track, or its square to mute it. In the ruler, left click seeks and right drag sets the loop.
 
 use daw_engine::song::PlayMode;
 use daw_model::time::{Grid, Ticks};
@@ -329,14 +329,14 @@ pub fn delete_selected(app: &mut App) -> bool {
 
 pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
     match key {
-        Key::Character(c) if modifiers.logo() && c.as_str() == "a" => {
+        Key::Character(c) if modifiers.command() && c.as_str() == "a" => {
             app.playlist.selected = app.project.playlist.clips.iter().map(|c| c.id).collect();
         }
-        Key::Character(c) if modifiers.logo() && c.as_str() == "c" => {
+        Key::Character(c) if modifiers.command() && c.as_str() == "c" => {
             begin_drag(app);
             app.playlist.clipboard = std::mem::take(&mut app.playlist.originals);
         }
-        Key::Character(c) if modifiers.logo() && (c.as_str() == "v" || c.as_str() == "d") => {
+        Key::Character(c) if modifiers.command() && (c.as_str() == "v" || c.as_str() == "d") => {
             let source = if c.as_str() == "d" {
                 begin_drag(app);
                 std::mem::take(&mut app.playlist.originals)
@@ -578,9 +578,9 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                         state.drag = Some(Drag::Clips { tick, track });
                         publish(Message::Begin { id, resize, additive: state.modifiers.shift() })
                     }
-                    (Button::Left, None) if !state.modifiers.control() => {
+                    (Button::Left, None) if !timeline::box_select_modifier(state.modifiers) => {
                         let app = self.app;
-                        let start = if state.modifiers.logo() {
+                        let start = if state.modifiers.command() {
                             tick.max(0.0) as Ticks
                         } else {
                             app.project.grid.snap_floor(tick.max(0.0) as Ticks, app.project.signature)
@@ -603,7 +603,7 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                     Drag::Clips { tick: origin, track } => publish(Message::Drag {
                         ticks: tick - *origin,
                         tracks: self.track_at(p.y) - *track,
-                        bypass: state.modifiers.logo(),
+                        bypass: state.modifiers.command(),
                     }),
                     Drag::Box { to, .. } => {
                         *to = p;

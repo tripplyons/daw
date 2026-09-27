@@ -1,7 +1,8 @@
 //! Note editor for the selected channel in the selected pattern.
 //!
 //! Left click places a note or drags notes (the right edge resizes), right
-//! click deletes, right or Ctrl drag selects a box, Cmd bypasses snapping.
+//! click deletes, right drag (or Ctrl drag on macOS) selects a box, Cmd
+//! (Ctrl on Linux) bypasses snapping.
 //! Clicking in the ruler sets where pattern playback starts; dragging the
 //! handle at the pattern end changes the length. Alt+Shift+scroll over a
 //! note changes its velocity; other scrolling follows `timeline::Wheel`.
@@ -309,12 +310,12 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
             app.set_status(format!("quantized to {}", grid.label()));
             app.edited();
         }
-        Key::Character(c) if modifiers.logo() && c.as_str() == "a" => app.piano_roll.selected = (0..count).collect(),
-        Key::Character(c) if modifiers.logo() && c.as_str() == "c" => {
+        Key::Character(c) if modifiers.command() && c.as_str() == "a" => app.piano_roll.selected = (0..count).collect(),
+        Key::Character(c) if modifiers.command() && c.as_str() == "c" => {
             let notes = notes(app);
             app.piano_roll.clipboard = app.piano_roll.selected.iter().filter_map(|&i| notes.get(i).copied()).collect();
         }
-        Key::Character(c) if modifiers.logo() && (c.as_str() == "v" || c.as_str() == "d") => {
+        Key::Character(c) if modifiers.command() && (c.as_str() == "v" || c.as_str() == "d") => {
             let source: Vec<Note> = if c.as_str() == "d" {
                 let notes = notes(app);
                 app.piano_roll.selected.iter().filter_map(|&i| notes.get(i).copied()).collect()
@@ -495,9 +496,9 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                         state.drag = Some(Drag::Notes { tick, key });
                         publish(Message::Begin { index, resize, additive: state.modifiers.shift() })
                     }
-                    (Button::Left, None) if !state.modifiers.control() => {
+                    (Button::Left, None) if !timeline::box_select_modifier(state.modifiers) => {
                         let app = self.app;
-                        let start = if state.modifiers.logo() {
+                        let start = if state.modifiers.command() {
                             tick.max(0.0) as Ticks
                         } else {
                             app.project.grid.snap_floor(tick.max(0.0) as Ticks, app.project.signature)
@@ -519,7 +520,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                     Drag::Notes { tick, key } => publish(Message::Drag {
                         ticks: self.tick_at(p.x) - *tick,
                         keys: self.key_at(p.y) - *key,
-                        bypass: state.modifiers.logo(),
+                        bypass: state.modifiers.command(),
                     }),
                     Drag::Box { to, .. } => {
                         *to = p;

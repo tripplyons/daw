@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use iced::futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use iced::futures::channel::mpsc::{self, UnboundedReceiver};
 
 /// Paths waiting for the app's subscription to take them.
 static RECEIVER: Mutex<Option<UnboundedReceiver<PathBuf>>> = Mutex::new(None);
@@ -29,7 +29,7 @@ mod macos {
     use objc2_app_kit::NSApplicationWillFinishLaunchingNotification;
     use objc2_foundation::{NSObject, NSString};
 
-    use super::UnboundedSender;
+    use iced::futures::channel::mpsc::UnboundedSender;
 
     /// Four-character Apple Event codes.
     const fn code(c: &[u8; 4]) -> u32 {

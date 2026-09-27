@@ -16,7 +16,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use daw_model::PluginFormat;
 use serde::{Deserialize, Serialize};
 
-use crate::{PluginInfo, au, vst3};
+use crate::{PluginInfo, vst3};
+#[cfg(target_os = "macos")]
+use crate::au;
 
 const MARKER: &str = "@@daw-scan@@";
 const TIMEOUT: Duration = Duration::from_secs(45);
@@ -59,11 +61,14 @@ pub fn cache_path() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("daw").join("plugins.ron")
 }
 
+/// The standard VST3 folders: system-wide, then the user's.
 pub fn vst3_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("/Library/Audio/Plug-Ins/VST3")];
-    if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join("Library/Audio/Plug-Ins/VST3"));
-    }
+    #[cfg(target_os = "macos")]
+    let (system, user) = (&["/Library/Audio/Plug-Ins/VST3"][..], "Library/Audio/Plug-Ins/VST3");
+    #[cfg(target_os = "linux")]
+    let (system, user) = (&["/usr/lib/vst3", "/usr/local/lib/vst3"][..], ".vst3");
+    let mut dirs: Vec<PathBuf> = system.iter().map(PathBuf::from).collect();
+    dirs.extend(dirs::home_dir().map(|home| home.join(user)));
     dirs
 }
 
@@ -92,8 +97,7 @@ pub fn find_vst3_bundles(root: &Path) -> Vec<PathBuf> {
 
 fn modified_seconds(path: &Path) -> u64 {
     // Bundle contents change on update; the executable's mtime is the best signal.
-    let binary_dir = path.join("Contents/MacOS");
-    let newest = std::fs::read_dir(&binary_dir)
+    let newest = std::fs::read_dir(vst3::binary_dir(path))
         .into_iter()
         .flatten()
         .flatten()
@@ -150,6 +154,7 @@ pub fn scan(exe: &Path, cache_file: &Path, progress: impl Fn(Progress) + Sync) -
             listed: None,
         });
     }
+    #[cfg(target_os = "macos")]
     for (info, version) in au::list() {
         jobs.push(Job {
             key: info.plugin.id.clone(),
@@ -266,6 +271,7 @@ pub fn run_child(args: &[String]) -> Option<i32> {
     let (flag, key) = (args.get(1)?, args.get(2)?);
     let result: Result<Vec<PluginInfo>, String> = match flag.as_str() {
         "--scan-vst3" => probe_vst3(Path::new(key)),
+        #[cfg(target_os = "macos")]
         "--scan-au" => probe_au(key),
         _ => return None,
     };
@@ -283,6 +289,7 @@ fn probe_vst3(path: &Path) -> Result<Vec<PluginInfo>, String> {
     Ok(plugins)
 }
 
+#[cfg(target_os = "macos")]
 fn probe_au(id: &str) -> Result<Vec<PluginInfo>, String> {
     let (info, _) = au::list().into_iter().find(|(info, _)| info.plugin.id == id).ok_or_else(|| format!("{id} not registered"))?;
     crate::load(&info.plugin, &[], 48_000.0, 512).map_err(|e| e.to_string())?;

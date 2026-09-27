@@ -62,7 +62,7 @@ impl TimeView {
 ///
 /// - scroll: up and down
 /// - Shift+scroll, or a sideways trackpad swipe: sideways
-/// - Cmd+scroll: zoom time around the cursor
+/// - Cmd+scroll (Ctrl+scroll on Linux): zoom time around the cursor
 /// - Alt+scroll: zoom height around the cursor
 /// - Alt+Shift+scroll: panel specific (note velocity in the piano roll)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,7 +81,7 @@ impl Wheel {
         let (dx, dy) = super::wheel_lines(delta);
         // macOS turns Shift+wheel into sideways steps, so take whichever axis moved.
         let steps = if dx.abs() > dy.abs() { dx } else { dy };
-        if modifiers.logo() {
+        if modifiers.command() {
             return Wheel::Time(view.zoom(steps, x));
         }
         match (modifiers.alt(), modifiers.shift()) {
@@ -92,6 +92,12 @@ impl Wheel {
             (false, false) => Wheel::Vertical(dy),
         }
     }
+}
+
+/// Whether a left drag selects a box. Ctrl does on macOS; on Linux Ctrl is
+/// the command modifier, so only right drag selects there.
+pub fn box_select_modifier(modifiers: Modifiers) -> bool {
+    modifiers.control() && !modifiers.command()
 }
 
 /// Scale a row height by `steps` wheel steps of zoom, within `min..=max`.
@@ -243,10 +249,18 @@ mod tests {
         assert_eq!(wheel(0.0, -1.0, Modifiers::SHIFT), Wheel::Time(view.scroll_by_lines(-1.0)));
         assert_eq!(wheel(0.0, 1.0, Modifiers::ALT), Wheel::Height(1.0));
         assert_eq!(wheel(1.0, 0.0, Modifiers::ALT | Modifiers::SHIFT), Wheel::Alternate(1.0));
-        let Wheel::Time(zoomed) = wheel(0.0, 1.0, Modifiers::LOGO) else { panic!("cmd zooms time") };
+        let Wheel::Time(zoomed) = wheel(0.0, 1.0, Modifiers::COMMAND) else { panic!("command zooms time") };
         assert!(zoomed.scale > view.scale);
-        // Ctrl no longer zooms.
-        assert_eq!(wheel(0.0, 1.0, Modifiers::CTRL), Wheel::Vertical(1.0));
+        // The other of Cmd and Ctrl does not zoom.
+        let other = if cfg!(target_os = "macos") { Modifiers::CTRL } else { Modifiers::LOGO };
+        assert_eq!(wheel(0.0, 1.0, other), Wheel::Vertical(1.0));
+    }
+
+    #[test]
+    fn ctrl_drag_selects_a_box_only_on_macos() {
+        assert!(!box_select_modifier(Modifiers::COMMAND));
+        assert!(!box_select_modifier(Modifiers::empty()));
+        assert_eq!(box_select_modifier(Modifiers::CTRL), cfg!(target_os = "macos"));
     }
 
     #[test]

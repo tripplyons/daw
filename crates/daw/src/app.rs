@@ -214,6 +214,7 @@ impl App {
         if let Some(path) = STARTUP_PROJECT.get().cloned().flatten() {
             app.open(path);
         }
+        #[cfg(target_os = "macos")]
         forward_plugin_keys();
         if std::env::var_os("DAW_OPEN_EDITORS").is_some() {
             for instance in app.project.plugins.iter().map(|p| p.id).collect::<Vec<_>>() {
@@ -1226,6 +1227,7 @@ static PLUGIN_KEYS: Mutex<Option<UnboundedReceiver<keyboard::Event>>> = Mutex::n
 
 /// Send keys that plugin editors do not use to the app's key bindings, so
 /// Space plays while a plugin window is in front. Call on the main thread.
+#[cfg(target_os = "macos")]
 fn forward_plugin_keys() {
     let (sender, receiver) = mpsc::unbounded();
     *PLUGIN_KEYS.lock().unwrap() = Some(receiver);
@@ -1287,7 +1289,7 @@ async fn save_dialog() -> Option<PathBuf> {
 }
 
 fn scan_task() -> Task<Message> {
-    let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+    let (sender, receiver) = mpsc::unbounded();
     std::thread::spawn(move || {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("daw"));
         let progress_sender = sender.clone();

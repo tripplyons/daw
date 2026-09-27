@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 
 use daw_model::layout::{Axis, Direction};
 use iced::keyboard::key::{Code, Physical};
-use iced::keyboard::{Event, Key, Location, Modifiers};
+use iced::keyboard::{Event, Modifiers};
+#[cfg(target_os = "macos")]
+use iced::keyboard::{Key, Location};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -118,6 +120,7 @@ const KEY_NAMES: &[(Code, &str)] = &[
 ];
 
 /// macOS virtual key codes (`kVK_*`) for the keys in `KEY_NAMES`.
+#[cfg(target_os = "macos")]
 #[rustfmt::skip]
 const MAC_KEY_CODES: &[(u16, Code)] = &[
     (0x00, Code::KeyA), (0x0B, Code::KeyB), (0x08, Code::KeyC), (0x02, Code::KeyD), (0x0E, Code::KeyE),
@@ -142,6 +145,7 @@ const MAC_KEY_CODES: &[(u16, Code)] = &[
 /// A key press from a plugin editor window as a key event for the app. Only
 /// the physical key is known, so panel keys that read the typed character
 /// do not apply.
+#[cfg(target_os = "macos")]
 pub fn plugin_key_event(press: daw_plugins::KeyPress) -> Option<Event> {
     let code = MAC_KEY_CODES.iter().find(|(k, _)| *k == press.key_code)?.1;
     let mut modifiers = Modifiers::empty();
@@ -220,6 +224,17 @@ fn binding(id: &str) -> Option<&'static Binding> {
     BINDINGS.iter().find(|b| b.id == id)
 }
 
+/// Parse a default chord. Defaults are written with Cmd, which is Ctrl on
+/// Linux; saved chords keep whatever the user picked.
+fn default_chord(text: &str) -> Option<Chord> {
+    let mut chord = Chord::parse(text)?;
+    if cfg!(not(target_os = "macos")) && chord.cmd {
+        chord.cmd = false;
+        chord.ctrl = true;
+    }
+    Some(chord)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keymap {
     /// Chords per binding id, for every entry in `BINDINGS`.
@@ -228,7 +243,7 @@ pub struct Keymap {
 
 impl Default for Keymap {
     fn default() -> Self {
-        let chords = BINDINGS.iter().map(|b| (b.id, b.defaults.iter().filter_map(|d| Chord::parse(d)).collect())).collect();
+        let chords = BINDINGS.iter().map(|b| (b.id, b.defaults.iter().filter_map(|d| default_chord(d)).collect())).collect();
         Keymap { chords }
     }
 }
@@ -265,7 +280,7 @@ impl Keymap {
     }
 
     pub fn is_default(&self, id: &str) -> bool {
-        let defaults: Vec<Chord> = binding(id).map(|b| b.defaults.iter().filter_map(|d| Chord::parse(d)).collect()).unwrap_or_default();
+        let defaults: Vec<Chord> = binding(id).map(|b| b.defaults.iter().filter_map(|d| default_chord(d)).collect()).unwrap_or_default();
         self.chords(id) == defaults.as_slice()
     }
 
@@ -297,7 +312,7 @@ impl Keymap {
     pub fn reset(&mut self, id: &str) {
         let Some(binding) = binding(id) else { return };
         self.chords.insert(binding.id, Vec::new());
-        for chord in binding.defaults.iter().filter_map(|d| Chord::parse(d)) {
+        for chord in binding.defaults.iter().filter_map(|d| default_chord(d)) {
             self.assign(binding.id, chord);
         }
     }
@@ -321,6 +336,17 @@ pub fn label(id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_defaults_use_control_for_app_commands() {
+        let mut keymap = Keymap::default();
+        assert_eq!(keymap.chords("undo"), &[Chord::parse("ctrl+z").unwrap()]);
+        keymap.remove("undo", Chord::parse("ctrl+z").unwrap());
+        keymap.reset("undo");
+        assert_eq!(keymap.chords("undo"), &[Chord::parse("ctrl+z").unwrap()]);
+        assert!(keymap.is_default("undo"));
+    }
 
     #[test]
     fn chords_round_trip_and_defaults_parse() {

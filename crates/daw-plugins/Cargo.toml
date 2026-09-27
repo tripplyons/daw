@@ -12,13 +12,19 @@ log.workspace = true
 dirs.workspace = true
 libloading.workspace = true
 vst3.workspace = true
+daw-engine.workspace = true
+rtrb.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2.21"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-audio-toolbox.workspace = true
 objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
-daw-engine.workspace = true
-rtrb.workspace = true
 block2 = "0.6"
 objc2-avf-audio = "0.3"
 objc2-foundation = { version = "0.3", features = ["NSPropertyList", "NSData", "NSDictionary", "NSError", "NSString", "NSArray"] }

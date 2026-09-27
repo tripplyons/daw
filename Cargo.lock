@@ -866,6 +866,7 @@ dependencies = [
  "daw-engine",
  "daw-model",
  "dirs",
+ "libc",
  "libloading",
  "log",
  "objc2 0.6.4",
@@ -880,6 +881,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "vst3",
+ "x11-dl",
 ]
 
 [[package]]

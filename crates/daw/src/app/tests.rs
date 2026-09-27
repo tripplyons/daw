@@ -87,7 +87,7 @@ fn automation_points_snap_to_time_and_value_and_undo() {
     let _ = app.update(auto::Message::End.into());
     assert!(points(&app).iter().any(|p| p.0 == 1200 && (p.1 - 0.5).abs() < 1e-6), "{:?}", points(&app));
 
-    // Cmd bypasses snapping.
+    // Cmd (Ctrl on Linux) bypasses snapping.
     let index = points(&app).iter().position(|p| p.0 == 1200).unwrap();
     let _ = app.update(auto::Message::Begin { index, additive: false }.into());
     let _ = app.update(auto::Message::Drag { ticks: 7.0, value: 0.013, bypass: true }.into());
@@ -114,13 +114,13 @@ fn automation_shapes_tension_keys_and_delete() {
     assert_eq!(app.project.automation_clip(id).unwrap().envelope.points[0].tension, 1.0);
 
     focus(&mut app, Panel::Automation);
-    let _ = app.update(press(Code::KeyA, char_key("a"), Modifiers::LOGO));
+    let _ = app.update(press(Code::KeyA, char_key("a"), Modifiers::COMMAND));
     assert_eq!(app.automation.selected.len(), 2);
     let _ = app.update(press(Code::Digit5, char_key("5"), Modifiers::empty()));
     assert!(points(&app).iter().all(|p| p.2 == Shape::Stairs(4)));
 
     // Duplicate the selection after itself.
-    let _ = app.update(press(Code::KeyD, char_key("d"), Modifiers::LOGO));
+    let _ = app.update(press(Code::KeyD, char_key("d"), Modifiers::COMMAND));
     assert_eq!(points(&app).len(), 4);
 
     let _ = app.update(press(Code::Delete, Key::Named(keyboard::key::Named::Delete), Modifiers::empty()));
@@ -245,6 +245,20 @@ fn each_pattern_sets_its_own_length_and_can_shrink() {
 }
 
 #[test]
+fn piano_roll_command_selects_and_duplicates_notes() {
+    let mut app = app();
+    let _ = app.update(roll::Message::Add { start: 0, key: 64 }.into());
+    let _ = app.update(roll::Message::End.into());
+    focus(&mut app, Panel::PianoRoll);
+    app.piano_roll.selected.clear();
+    let _ = app.update(press(Code::KeyA, char_key("a"), Modifiers::COMMAND));
+    assert_eq!(app.piano_roll.selected, vec![0]);
+    let _ = app.update(press(Code::KeyD, char_key("d"), Modifiers::COMMAND));
+    let _ = app.update(press(Code::KeyA, char_key("a"), Modifiers::COMMAND));
+    assert_eq!(app.piano_roll.selected.len(), 2);
+}
+
+#[test]
 fn bpm_field_keeps_partial_text_and_applies_valid_tempos() {
     let mut app = app();
     let before = app.project.bpm;
@@ -324,7 +338,7 @@ fn playlist_place_move_duplicate_and_loop() {
     assert_eq!((clip.start, clip.track), (bar, 3));
 
     focus(&mut app, Panel::Playlist);
-    let _ = app.update(press(Code::KeyD, char_key("d"), Modifiers::LOGO));
+    let _ = app.update(press(Code::KeyD, char_key("d"), Modifiers::COMMAND));
     assert_eq!(app.project.playlist.clips.len(), 2);
     assert_eq!(app.project.playlist.clips[1].start, bar + clip.length);
 

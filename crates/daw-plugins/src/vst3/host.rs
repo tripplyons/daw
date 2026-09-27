@@ -15,6 +15,8 @@ use vst3::Steinberg::{
     FIDString, IBStream, IBStreamTrait, IPlugFrame, IPlugFrameTrait, IPlugView, IPlugViewTrait, TUID,
     ViewRect, int32, int64, kInvalidArgument, kResultFalse, kResultOk, tresult, uint32,
 };
+#[cfg(target_os = "linux")]
+use vst3::Steinberg::Linux::{FileDescriptor, IEventHandler, IRunLoop, IRunLoopTrait, ITimerHandler, TimerInterval};
 use vst3::{Class, ComRef, ComWrapper, Interface};
 
 use crate::Touch;
@@ -34,7 +36,7 @@ pub fn read_string128(text: &String128) -> String {
 }
 
 fn tuid_is(tuid: &TUID, guid: &vst3::com_scrape_types::Guid) -> bool {
-    tuid.iter().zip(guid).all(|(a, b)| *a as u8 == *b)
+    tuid.iter().zip(guid).all(|(a, b)| a.to_ne_bytes()[0] == *b)
 }
 
 pub struct HostApplication;
@@ -343,13 +345,20 @@ pub type Resizer = Box<dyn FnMut(i32, i32)>;
 /// Resizes the editor window when the plugin asks.
 pub struct PlugFrame {
     pub resize: Mutex<Option<Resizer>>,
+    #[cfg(target_os = "linux")]
+    pub run_loop: super::run_loop::RunLoop,
 }
 
+#[cfg(target_os = "macos")]
 unsafe impl Sync for PlugFrame {}
+#[cfg(target_os = "macos")]
 unsafe impl Send for PlugFrame {}
 
 impl Class for PlugFrame {
+    #[cfg(target_os = "macos")]
     type Interfaces = (IPlugFrame,);
+    #[cfg(target_os = "linux")]
+    type Interfaces = (IPlugFrame, IRunLoop);
 }
 
 impl IPlugFrameTrait for PlugFrame {
@@ -358,14 +367,37 @@ impl IPlugFrameTrait for PlugFrame {
             return kInvalidArgument;
         }
         let rect = unsafe { *new_size };
+        let (width, height) = (rect.right.saturating_sub(rect.left), rect.bottom.saturating_sub(rect.top));
+        if width <= 0 || height <= 0 {
+            return kInvalidArgument;
+        }
         if let Some(resize) = self.resize.lock().unwrap().as_mut() {
-            resize(rect.right - rect.left, rect.bottom - rect.top);
+            resize(width, height);
         }
         if let Some(view) = unsafe { ComRef::<IPlugView>::from_raw(view) } {
             let mut rect = rect;
             unsafe { view.onSize(&mut rect) };
         }
         kResultOk
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl IRunLoopTrait for PlugFrame {
+    unsafe fn registerEventHandler(&self, handler: *mut IEventHandler, fd: FileDescriptor) -> tresult {
+        unsafe { self.run_loop.register_event_handler(handler, fd) }
+    }
+
+    unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
+        unsafe { self.run_loop.unregister_event_handler(handler) }
+    }
+
+    unsafe fn registerTimer(&self, handler: *mut ITimerHandler, milliseconds: TimerInterval) -> tresult {
+        unsafe { self.run_loop.register_timer(handler, milliseconds) }
+    }
+
+    unsafe fn unregisterTimer(&self, handler: *mut ITimerHandler) -> tresult {
+        unsafe { self.run_loop.unregister_timer(handler) }
     }
 }
 
@@ -461,11 +493,17 @@ impl IParamValueQueueTrait for ParamQueue {
 
     unsafe fn addPoint(&self, offset: int32, value: ParamValue, index: *mut int32) -> tresult {
         let points = unsafe { &mut *self.points.get() };
-        if points.len() >= points.capacity() {
-            return kResultFalse;
+        let position = points.partition_point(|&(o, _)| o < offset);
+        if points.get(position).is_some_and(|&(o, _)| o == offset) {
+            // UI edits accumulate at offset zero between audio callbacks.
+            // VST3 queues have one value per sample: the latest edit wins.
+            points[position].1 = value;
+        } else {
+            if points.len() >= points.capacity() {
+                return kResultFalse;
+            }
+            points.insert(position, (offset, value));
         }
-        let position = points.partition_point(|&(o, _)| o <= offset);
-        points.insert(position, (offset, value));
         if !index.is_null() {
             unsafe { *index = position as int32 };
         }
@@ -540,5 +578,27 @@ impl IParameterChangesTrait for ParameterChanges {
             unsafe { *index = queue as int32 };
         }
         self.pointers[queue]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latest_edit_at_same_sample_replaces_earlier_value() {
+        let queue = ParamQueue { id: Cell::new(6), points: UnsafeCell::new(Vec::with_capacity(2)) };
+        let mut index = -1;
+        unsafe {
+            assert_eq!(queue.addPoint(10, 0.8, &mut index), kResultOk);
+            assert_eq!(queue.addPoint(0, 0.5, &mut index), kResultOk);
+            // Replacing a point must work even at capacity and must not allocate.
+            assert_eq!(queue.addPoint(0, 0.25, &mut index), kResultOk);
+            assert_eq!(index, 0);
+            assert_eq!(queue.getPointCount(), 2);
+            assert_eq!(&*queue.points.get(), &[(0, 0.25), (10, 0.8)]);
+            assert_eq!((&*queue.points.get()).capacity(), 2);
+            assert_eq!(queue.addPoint(20, 1.0, &mut index), kResultFalse);
+        }
     }
 }

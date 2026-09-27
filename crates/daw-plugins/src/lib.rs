@@ -1,10 +1,16 @@
-//! Plugin discovery and hosting for VST3 and Audio Units on macOS.
+//! VST3 hosting on macOS and Linux, and Audio Units on macOS.
 
+#[cfg(target_os = "macos")]
 pub mod au;
 pub mod scan;
 pub mod vst3;
+#[cfg(target_os = "macos")]
+mod window;
+#[cfg(target_os = "linux")]
+#[path = "window_linux.rs"]
 mod window;
 
+#[cfg(target_os = "macos")]
 pub use window::{KeyPress, set_unhandled_keys};
 
 use daw_engine::Processor;
@@ -70,7 +76,8 @@ pub trait Controller {
     fn hide_editor(&mut self);
     /// Whether the editor window is showing.
     fn editor_open(&self) -> bool;
-    /// Parameter edits from the plugin editor since the last call.
+    /// Parameter edits from the plugin editor since the last call. Call often
+    /// from the UI thread: on Linux this also runs the editor's events.
     fn take_touches(&mut self) -> Vec<Touch>;
 }
 
@@ -83,6 +90,9 @@ pub struct Loaded {
 pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize) -> Result<Loaded, PluginError> {
     match plugin.format {
         PluginFormat::Vst3 => vst3::load(plugin, state, sample_rate, max_block),
+        #[cfg(target_os = "macos")]
         PluginFormat::AudioUnit => au::load(plugin, state, sample_rate, max_block),
+        #[cfg(not(target_os = "macos"))]
+        PluginFormat::AudioUnit => Err(PluginError::Load("Audio Units are only supported on macOS".into())),
     }
 }

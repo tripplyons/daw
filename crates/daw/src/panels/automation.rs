@@ -1,10 +1,11 @@
 //! Automation clip editor.
 //!
 //! Edit tool: click adds a point, drag moves the selection, right click
-//! deletes, right or Ctrl drag selects a box, Alt drag (or the square handle)
-//! bends a segment, double click cycles the segment shape. Cmd bypasses
-//! snapping and Shift locks the drag to one axis. Keys 1-6 set the shape of
-//! the selected points, arrows nudge, Delete, Cmd A/C/V/D edit the selection.
+//! deletes, right drag (or Ctrl drag on macOS) selects a box, Alt drag (or
+//! the square handle) bends a segment, double click cycles the segment shape.
+//! Cmd (Ctrl on Linux) bypasses snapping and Shift locks the drag to one
+//! axis. Keys 1-6 set the shape of the selected points, arrows nudge, Delete
+//! and Cmd A/C/V/D edit the selection.
 //! The draw tool paints a curve and the line tool replaces a range with a ramp.
 //! Clicking or dragging in the ruler sets where the clip ends.
 
@@ -546,16 +547,16 @@ pub fn delete_selected(app: &mut App) -> bool {
 pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
     let count = points(app).len();
     match key {
-        Key::Character(c) if !modifiers.logo() && !modifiers.alt() => {
+        Key::Character(c) if !modifiers.command() && !modifiers.alt() => {
             let Some(digit) = c.as_str().parse::<usize>().ok().filter(|d| (1..=6).contains(d)) else { return false };
             set_shape(app, Shape::CYCLE[digit - 1]);
         }
-        Key::Character(c) if modifiers.logo() && c.as_str() == "a" => app.automation.selected = (0..count).collect(),
-        Key::Character(c) if modifiers.logo() && c.as_str() == "c" => {
+        Key::Character(c) if modifiers.command() && c.as_str() == "a" => app.automation.selected = (0..count).collect(),
+        Key::Character(c) if modifiers.command() && c.as_str() == "c" => {
             let points = points(app);
             app.automation.clipboard = app.automation.selected.iter().filter_map(|&i| points.get(i).copied()).collect();
         }
-        Key::Character(c) if modifiers.logo() && (c.as_str() == "v" || c.as_str() == "d") => {
+        Key::Character(c) if modifiers.command() && (c.as_str() == "v" || c.as_str() == "d") => {
             let duplicate = c.as_str() == "d";
             let source: Vec<EnvPoint> = if duplicate {
                 let points = points(app);
@@ -875,11 +876,11 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                     return None;
                 }
                 match tool {
-                    Tool::Draw if !modifiers.control() => {
+                    Tool::Draw if !timeline::box_select_modifier(modifiers) => {
                         state.drag = Some(Drag::Stroke(vec![p]));
                         return redraw();
                     }
-                    Tool::Line if !modifiers.control() => {
+                    Tool::Line if !timeline::box_select_modifier(modifiers) => {
                         state.drag = Some(Drag::Line { from: p, to: p });
                         return redraw();
                     }
@@ -908,13 +909,13 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                 if double && let Some(index) = self.segment_at(tick) {
                     return publish(Message::CycleShape(index));
                 }
-                if modifiers.control() {
+                if timeline::box_select_modifier(modifiers) {
                     state.drag = Some(Drag::Box { from: p, to: p, additive: modifiers.shift() });
                     return redraw();
                 }
-                let (time, snapped) = self.snap(tick, value, modifiers.logo());
+                let (time, snapped) = self.snap(tick, value, modifiers.command());
                 state.drag = Some(Drag::Points { tick: time as f64, value: snapped, origin: p });
-                publish(Message::Add { time: tick, value, bypass: modifiers.logo() })
+                publish(Message::Add { time: tick, value, bypass: modifiers.command() })
             }
             canvas::Event::Mouse(MouseEvent::CursorMoved { .. }) => {
                 let p = cursor.position_from(bounds.position())?;
@@ -932,7 +933,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                                 dt = 0.0;
                             }
                         }
-                        publish(Message::Drag { ticks: dt, value: dv, bypass: modifiers.logo() })
+                        publish(Message::Drag { ticks: dt, value: dv, bypass: modifiers.command() })
                     }
                     Drag::Tension { index, origin, start, rising } => {
                         let sign = if *rising { 1.0 } else { -1.0 };
@@ -951,7 +952,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                 }
             }
             canvas::Event::Mouse(MouseEvent::ButtonReleased(_)) => {
-                let bypass = state.modifiers.logo();
+                let bypass = state.modifiers.command();
                 match state.drag.take()? {
                     Drag::Points { .. } => publish(Message::End),
                     Drag::Tension { .. } => publish(Message::End),
@@ -1075,7 +1076,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                 frame.stroke(&path, Stroke::default().with_color(theme::BRIGHT).with_width(1.0));
             }
             Some(Drag::Line { from, to }) => {
-                let bypass = state.modifiers.logo();
+                let bypass = state.modifiers.command();
                 let a = self.snap(self.tick(from.x), self.value(from.y, bounds), bypass);
                 let b = self.snap(self.tick(to.x), self.value(to.y, bounds), bypass);
                 let pa = Point::new(self.x(a.0 as f64), self.y(a.1, bounds));
@@ -1129,7 +1130,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                     Some(format!("{}  {}  {}", timeline::position_text(p.time as f64, app.project.signature), app.value_text(target, p.value), p.shape.name()))
                 }
                 None => {
-                    let (t, v) = self.snap(self.tick(hover.x), self.value(hover.y, bounds), state.modifiers.logo());
+                    let (t, v) = self.snap(self.tick(hover.x), self.value(hover.y, bounds), state.modifiers.command());
                     Some(format!("{}  {}", timeline::position_text(t as f64, app.project.signature), app.value_text(target, v)))
                 }
             },

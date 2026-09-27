@@ -2,13 +2,19 @@
 
 A digital audio workstation (DAW) written in Rust with [iced](https://iced.rs). It hosts VST3 and Audio Unit plugins, arranges its panels as tiles the way an i3 or sway window manager does, and has FL Studio style patterns, a playlist, a mixer, and an automation editor.
 
-It runs on macOS only, because plugin hosting and editor windows use AppKit and Audio Unit APIs.
+It runs on macOS and Linux. Audio Units are macOS only. On Linux, plugin editor windows use X11, or XWayland on Wayland desktops.
 
 ## Requirements
 
-- macOS on Apple silicon or Intel
-- Xcode Command Line Tools: `xcode-select --install`
 - Rust 1.88 or newer (edition 2024), installed with [rustup](https://rustup.rs)
+- macOS: Xcode Command Line Tools (`xcode-select --install`)
+- Linux: the ALSA, X11, xkbcommon, and Wayland development packages. On Debian or Ubuntu:
+
+```sh
+sudo apt-get install build-essential pkg-config libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev
+```
+
+On Linux, audio goes through ALSA, which PipeWire and PulseAudio also accept. File dialogs use the XDG desktop portal, or `zenity` when no portal is running. Without an output device the app still edits projects and exports WAV files.
 
 ## Run
 
@@ -20,7 +26,7 @@ cargo run --release
 
 The first build takes a few minutes. Debug builds also work (`cargo run`); the workspace compiles dependencies with optimizations so audio keeps up in either mode.
 
-## Build a .app
+## Build a .app (macOS)
 
 ```sh
 scripts/bundle-app.sh
@@ -35,10 +41,12 @@ The bundle declares the `.dawproj` file type, so double-clicking a project in Fi
 
 On startup the app scans the standard plugin folders:
 
-- `/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/VST3`
-- every Audio Unit registered with macOS
+- macOS: `/Library/Audio/Plug-Ins/VST3`, `~/Library/Audio/Plug-Ins/VST3`, and every Audio Unit registered with macOS
+- Linux: `/usr/lib/vst3`, `/usr/local/lib/vst3`, and `~/.vst3`
 
-Each plugin is scanned in a separate process, so a plugin that crashes or hangs during the scan is listed as failed instead of closing the app. Results are cached in `~/Library/Application Support/daw/plugins.ron`; later scans only probe new or updated plugins. The browser panel's "rescan" button scans again.
+A Linux VST3 bundle needs a binary for your CPU, such as `Contents/x86_64-linux/` or `Contents/aarch64-linux/`. A project with Audio Units still opens on Linux; those plugins show a load error.
+
+Each plugin is scanned in a separate process, so a plugin that crashes or hangs during the scan is listed as failed instead of closing the app. Results are cached in `~/Library/Application Support/daw/plugins.ron` on macOS and `~/.local/share/daw/plugins.ron` on Linux; later scans only probe new or updated plugins. The browser panel's "rescan" button scans again.
 
 Click a plugin in the browser panel to use it: an instrument gets a new channel in the channel rack, and an effect goes on the selected mixer insert.
 
@@ -49,7 +57,7 @@ Click a plugin in the browser panel to use it: an instrument gets a new channel 
 
 ## Default keys
 
-Alt is the tiling modifier. Keys match by physical position, so they work on any keyboard layout.
+Alt is the tiling modifier. Keys match by physical position, so they work on any keyboard layout. On Linux, Ctrl replaces Cmd everywhere in this README. If your window manager already uses an Alt shortcut, rebind it there or in the settings page.
 
 | Keys | Action |
 | --- | --- |
@@ -73,7 +81,7 @@ Alt is the tiling modifier. Keys match by physical position, so they work on any
 | Cmd+E | Export WAV |
 | Cmd+comma | Settings |
 
-Bound keys also work while a plugin window is in front, as long as the plugin does not use the key itself.
+On macOS, bound keys also work while a plugin window is in front, as long as the plugin does not use the key itself.
 
 ## Scrolling
 
