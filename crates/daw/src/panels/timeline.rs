@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use daw_model::time::{Grid, TICKS_PER_BEAT, Ticks, TimeSignature};
 use iced::widget::canvas::{Frame, Path, Stroke, Text};
+use iced::keyboard::Modifiers;
 use iced::{Color, Point, Renderer, Size, mouse};
 
 use crate::theme;
@@ -41,29 +42,61 @@ impl TimeView {
         f64::from(width) / self.px_per_tick()
     }
 
-    /// Apply a wheel event: plain scrolls horizontally when the device is
-    /// horizontal, Cmd or Ctrl zooms around `x`. Returns `None` for vertical
-    /// scrolling, which each panel handles itself.
-    pub fn wheel(self, delta: mouse::ScrollDelta, zoom: bool, x: f32) -> Option<Self> {
-        let (dx, dy) = super::wheel_lines(delta);
-        if zoom {
-            let anchor = self.tick(x);
-            let scale = (self.scale * 1.15f32.powf(dy)).clamp(MIN_SCALE, MAX_SCALE);
-            let view = TimeView { scale, scroll: 0.0 };
-            let scroll = (anchor - f64::from(x) / view.px_per_tick()).max(0.0);
-            return Some(TimeView { scale, scroll });
-        }
-        if dx.abs() > dy.abs() {
-            let scroll = (self.scroll - f64::from(dx) * 40.0 / self.px_per_tick()).max(0.0);
-            return Some(TimeView { scroll, ..self });
-        }
-        None
+    /// Zoom time by `lines` wheel steps, keeping the tick under `x` in place.
+    pub fn zoom(self, lines: f32, x: f32) -> Self {
+        let anchor = self.tick(x);
+        let scale = (self.scale * 1.15f32.powf(lines)).clamp(MIN_SCALE, MAX_SCALE);
+        let view = TimeView { scale, scroll: 0.0 };
+        let scroll = (anchor - f64::from(x) / view.px_per_tick()).max(0.0);
+        TimeView { scale, scroll }
     }
 
     pub fn scroll_by_lines(self, lines: f32) -> Self {
         let scroll = (self.scroll - f64::from(lines) * 40.0 / self.px_per_tick()).max(0.0);
         TimeView { scroll, ..self }
     }
+}
+
+/// What a wheel event does in a timeline panel. The scheme is shared by the
+/// piano roll, playlist, and automation editor:
+///
+/// - scroll: up and down
+/// - Shift+scroll, or a sideways trackpad swipe: sideways
+/// - Cmd+scroll: zoom time around the cursor
+/// - Alt+scroll: zoom height around the cursor
+/// - Alt+Shift+scroll: panel specific (note velocity in the piano roll)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Wheel {
+    Time(TimeView),
+    /// Wheel steps up (positive) or down.
+    Vertical(f32),
+    /// Wheel steps of height zoom; positive zooms in.
+    Height(f32),
+    Alternate(f32),
+}
+
+impl Wheel {
+    /// `x` is relative to the left edge of the time area.
+    pub fn from_event(view: TimeView, delta: mouse::ScrollDelta, modifiers: Modifiers, x: f32) -> Wheel {
+        let (dx, dy) = super::wheel_lines(delta);
+        // macOS turns Shift+wheel into sideways steps, so take whichever axis moved.
+        let steps = if dx.abs() > dy.abs() { dx } else { dy };
+        if modifiers.logo() {
+            return Wheel::Time(view.zoom(steps, x));
+        }
+        match (modifiers.alt(), modifiers.shift()) {
+            (true, true) => Wheel::Alternate(steps),
+            (true, false) => Wheel::Height(steps),
+            (false, true) => Wheel::Time(view.scroll_by_lines(steps)),
+            (false, false) if dx.abs() > dy.abs() => Wheel::Time(view.scroll_by_lines(dx)),
+            (false, false) => Wheel::Vertical(dy),
+        }
+    }
+}
+
+/// Scale a row height by `steps` wheel steps of zoom, within `min..=max`.
+pub fn zoom_height(height: f32, steps: f32, min: f32, max: f32) -> f32 {
+    (height * 1.15f32.powf(steps)).clamp(min, max)
 }
 
 fn line(frame: &mut Frame<Renderer>, from: Point, to: Point, color: Color) {
@@ -191,3 +224,37 @@ impl Clicks {
         double
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wheel(dx: f32, dy: f32, modifiers: Modifiers) -> Wheel {
+        Wheel::from_event(TimeView::new(64.0), mouse::ScrollDelta::Lines { x: dx, y: dy }, modifiers, 100.0)
+    }
+
+    #[test]
+    fn modifiers_pick_scroll_or_zoom_axis() {
+        let view = TimeView::new(64.0);
+        assert_eq!(wheel(0.0, 1.0, Modifiers::empty()), Wheel::Vertical(1.0));
+        assert_eq!(wheel(-2.0, 0.0, Modifiers::empty()), Wheel::Time(view.scroll_by_lines(-2.0)));
+        // macOS reports Shift+wheel as sideways steps; either axis scrolls time.
+        assert_eq!(wheel(-1.0, 0.0, Modifiers::SHIFT), Wheel::Time(view.scroll_by_lines(-1.0)));
+        assert_eq!(wheel(0.0, -1.0, Modifiers::SHIFT), Wheel::Time(view.scroll_by_lines(-1.0)));
+        assert_eq!(wheel(0.0, 1.0, Modifiers::ALT), Wheel::Height(1.0));
+        assert_eq!(wheel(1.0, 0.0, Modifiers::ALT | Modifiers::SHIFT), Wheel::Alternate(1.0));
+        let Wheel::Time(zoomed) = wheel(0.0, 1.0, Modifiers::LOGO) else { panic!("cmd zooms time") };
+        assert!(zoomed.scale > view.scale);
+        // Ctrl no longer zooms.
+        assert_eq!(wheel(0.0, 1.0, Modifiers::CTRL), Wheel::Vertical(1.0));
+    }
+
+    #[test]
+    fn time_zoom_keeps_the_tick_under_the_cursor() {
+        let view = TimeView { scale: 64.0, scroll: 960.0 };
+        let before = view.tick(200.0);
+        let after = view.zoom(3.0, 200.0).tick(200.0);
+        assert!((before - after).abs() < 1.0, "{before} {after}");
+    }
+}
+

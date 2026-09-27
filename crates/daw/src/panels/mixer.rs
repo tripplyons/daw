@@ -1,14 +1,16 @@
 //! Mixer inserts with meters, and the effect chain of the selected insert.
 
 use daw_model::{InsertId, Target};
+use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::{Space, button, column, container, mouse_area, row, slider, text, vertical_slider};
-use iced::{Element, Length};
+use iced::{Element, Length, Task, mouse};
 
 use super::{InsertChoice, label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage, gain_text, pan_text};
 use crate::theme;
 
 const STRIP_WIDTH: f32 = 58.0;
+const STRIPS: &str = "mixer-strips";
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -22,6 +24,9 @@ pub enum Message {
     AddInsert,
     DeleteInsert,
     Output(InsertId, InsertId),
+    /// A wheel step the strip area did not use: plain up/down scrolling,
+    /// turned into sideways scrolling since the strips only scroll sideways.
+    Wheel(mouse::ScrollDelta),
 }
 
 impl From<Message> for AppMessage {
@@ -48,7 +53,7 @@ pub fn delete_selected(app: &mut App) -> bool {
     true
 }
 
-pub fn update(app: &mut App, message: Message) {
+pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     match message {
         Message::Select(id) => app.selected_insert = id,
         Message::Volume(id, volume) => {
@@ -74,10 +79,17 @@ pub fn update(app: &mut App, message: Message) {
             }
             app.edited();
         }
+        Message::Wheel(delta) => {
+            let (dx, dy) = super::wheel_lines(delta);
+            if dy.abs() > dx.abs() {
+                let x = -dy * 60.0;
+                return operation::scroll_by(STRIPS, AbsoluteOffset { x, y: 0.0 });
+            }
+        }
         Message::Output(from, to) => {
             if !app.project.mixer.can_route(from, to) {
                 app.set_status("that route would feed the insert back into itself");
-                return;
+                return Task::none();
             }
             app.checkpoint();
             app.project.mixer.set_output(from, to);
@@ -91,7 +103,7 @@ pub fn update(app: &mut App, message: Message) {
             app.edited();
         }
         Message::RemoveEffect(id, index) => {
-            let Some(instance) = app.project.mixer.insert(id).and_then(|i| i.effects.get(index).copied()) else { return };
+            let Some(instance) = app.project.mixer.insert(id).and_then(|i| i.effects.get(index).copied()) else { return Task::none() };
             app.checkpoint();
             app.project.remove_plugin(instance);
             app.edited();
@@ -118,6 +130,7 @@ pub fn update(app: &mut App, message: Message) {
             app.edited();
         }
     }
+    Task::none()
 }
 
 pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
@@ -241,7 +254,8 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         }
     }
     row![
-        super::scroll(strips, false, true).width(Length::Fill).height(Length::Fill),
+        mouse_area(super::scroll(strips, false, true).id(STRIPS).width(Length::Fill).height(Length::Fill))
+            .on_scroll(|delta| Message::Wheel(delta).into()),
         container(chain).height(Length::Fill).style(theme::fill(theme::HEADER)),
     ]
     .spacing(3)

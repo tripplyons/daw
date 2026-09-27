@@ -453,6 +453,7 @@ impl App {
 
     pub fn open_automation(&mut self, id: AutomationId) {
         self.automation.clip = Some(id);
+        self.automation.values = automation::ValueRange::FULL;
         self.automation.selected.clear();
         self.show_panel(Panel::Automation);
     }
@@ -576,7 +577,7 @@ impl App {
             Message::Rack(message) => return channel_rack::update(self, message),
             Message::PianoRoll(message) => piano_roll::update(self, message),
             Message::Playlist(message) => playlist::update(self, message),
-            Message::Mixer(message) => mixer::update(self, message),
+            Message::Mixer(message) => return mixer::update(self, message),
             Message::Params(message) => parameters::update(self, message),
             Message::Automation(message) => automation::update(self, message),
             Message::Settings(message) => settings::update(self, message),

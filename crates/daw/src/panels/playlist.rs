@@ -13,13 +13,15 @@ use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::row;
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
-use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView};
+use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
 use super::{label, pick};
 use crate::app::{App, Message as AppMessage};
 use crate::theme;
 
 const HEADER_WIDTH: f32 = 84.0;
 const EDGE: f32 = 5.0;
+const MIN_TRACK_HEIGHT: f32 = 16.0;
+const MAX_TRACK_HEIGHT: f32 = 120.0;
 /// Left part of a track header that toggles mute.
 const MUTE_WIDTH: f32 = 14.0;
 
@@ -57,6 +59,8 @@ impl Default for State {
 pub enum Message {
     View(TimeView),
     ScrollTracks(i32),
+    /// Alt+scroll: track height, keeping the track under `y` in place.
+    ZoomTracks { steps: f32, y: f32 },
     Add { start: Ticks, track: usize },
     Begin { id: ClipId, resize: bool, additive: bool },
     Drag { ticks: f64, tracks: i32, bypass: bool },
@@ -115,6 +119,14 @@ fn grow_tracks(app: &mut App, needed: usize) {
 pub fn update(app: &mut App, message: Message) {
     match message {
         Message::View(view) => app.playlist.time = view,
+        Message::ZoomTracks { steps, y } => {
+            let count = app.project.playlist.tracks.len().max(1);
+            let playlist = &mut app.playlist;
+            let rows = (y - RULER_HEIGHT).max(0.0);
+            let track = playlist.top_track as f32 + rows / playlist.track_height;
+            playlist.track_height = timeline::zoom_height(playlist.track_height, steps, MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT);
+            playlist.top_track = (track - rows / playlist.track_height).round().clamp(0.0, (count - 1) as f32) as usize;
+        }
         Message::ScrollTracks(tracks) => {
             let top = app.playlist.top_track as i32 + tracks;
             app.playlist.top_track = top.clamp(0, app.project.playlist.tracks.len().saturating_sub(1) as i32) as usize;
@@ -599,16 +611,12 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             },
             canvas::Event::Mouse(MouseEvent::WheelScrolled { delta }) => {
                 let p = cursor.position_in(bounds)?;
-                let view = self.state().time;
-                let zoom = state.modifiers.logo() || state.modifiers.control();
-                if let Some(view) = view.wheel(*delta, zoom, p.x - HEADER_WIDTH) {
-                    return publish(Message::View(view));
+                match Wheel::from_event(self.state().time, *delta, state.modifiers, p.x - HEADER_WIDTH) {
+                    Wheel::Time(view) => publish(Message::View(view)),
+                    Wheel::Vertical(steps) => publish(Message::ScrollTracks(-steps.round() as i32)),
+                    Wheel::Height(steps) => publish(Message::ZoomTracks { steps, y: p.y }),
+                    Wheel::Alternate(_) => None,
                 }
-                let (_, lines) = super::wheel_lines(*delta);
-                if state.modifiers.shift() {
-                    return publish(Message::View(view.scroll_by_lines(lines)));
-                }
-                publish(Message::ScrollTracks(-lines.round() as i32))
             }
             _ => None,
         }

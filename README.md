@@ -75,6 +75,20 @@ Alt is the tiling modifier. Keys match by physical position, so they work on any
 
 Bound keys also work while a plugin window is in front, as long as the plugin does not use the key itself.
 
+## Scrolling
+
+The piano roll, playlist, and automation editor share one scheme. Zooming keeps the spot under the cursor in place.
+
+| Scroll with | Action |
+| --- | --- |
+| nothing | Scroll up and down (keys, tracks, or values) |
+| Shift, or a sideways trackpad swipe | Scroll sideways in time |
+| Cmd | Zoom time |
+| Alt | Zoom height: key height, track height, or the automation value range |
+| Alt+Shift over a note | Change the note's velocity |
+
+The mixer strips scroll sideways with a plain scroll wheel.
+
 ## Development
 
 ```sh

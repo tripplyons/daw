@@ -3,7 +3,8 @@
 //! Left click places a note or drags notes (the right edge resizes), right
 //! click deletes, right or Ctrl drag selects a box, Cmd bypasses snapping.
 //! Clicking in the ruler sets where pattern playback starts; dragging the
-//! handle at the pattern end changes the length.
+//! handle at the pattern end changes the length. Alt+Shift+scroll over a
+//! note changes its velocity; other scrolling follows `timeline::Wheel`.
 
 use daw_engine::song::{PlayMode, channel_node};
 use daw_model::time::{Grid, Ticks};
@@ -13,13 +14,15 @@ use iced::widget::canvas::{self, Canvas, Frame, Geometry};
 use iced::widget::row;
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
-use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView};
+use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
 use super::{label, pick};
 use crate::app::{App, Message as AppMessage};
 use crate::theme;
 
 const KEYS_WIDTH: f32 = 40.0;
 const EDGE: f32 = 5.0;
+const MIN_KEY_HEIGHT: f32 = 6.0;
+const MAX_KEY_HEIGHT: f32 = 40.0;
 
 #[derive(Debug)]
 pub struct State {
@@ -54,6 +57,8 @@ impl Default for State {
 pub enum Message {
     View(TimeView),
     ScrollKeys(i32),
+    /// Alt+scroll: key height, keeping the key under `y` in place.
+    ZoomKeys { steps: f32, y: f32 },
     Add { start: Ticks, key: u8 },
     Begin { index: usize, resize: bool, additive: bool },
     Drag { ticks: f64, keys: i32, bypass: bool },
@@ -121,6 +126,13 @@ fn begin_drag(app: &mut App) {
 pub fn update(app: &mut App, message: Message) {
     match message {
         Message::View(view) => app.piano_roll.time = view,
+        Message::ZoomKeys { steps, y } => {
+            let roll = &mut app.piano_roll;
+            let rows = (y - RULER_HEIGHT).max(0.0);
+            let key = roll.top_key as f32 - rows / roll.key_height;
+            roll.key_height = timeline::zoom_height(roll.key_height, steps, MIN_KEY_HEIGHT, MAX_KEY_HEIGHT);
+            roll.top_key = (key + rows / roll.key_height).round().clamp(0.0, 127.0) as i32;
+        }
         Message::ScrollKeys(keys) => {
             let visible = 24;
             app.piano_roll.top_key = (app.piano_roll.top_key + keys).clamp(visible, 127);
@@ -529,22 +541,15 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             },
             canvas::Event::Mouse(MouseEvent::WheelScrolled { delta }) => {
                 let p = cursor.position_in(bounds)?;
-                let view = self.state().time;
-                if state.modifiers.alt()
-                    && let Some((index, _)) = self.hit(p)
-                {
-                    let (_, lines) = super::wheel_lines(*delta);
-                    return publish(Message::Velocity(index, lines * 0.05));
+                match Wheel::from_event(self.state().time, *delta, state.modifiers, p.x - KEYS_WIDTH) {
+                    Wheel::Time(view) => publish(Message::View(view)),
+                    Wheel::Vertical(steps) => publish(Message::ScrollKeys((steps * 3.0).round() as i32)),
+                    Wheel::Height(steps) => publish(Message::ZoomKeys { steps, y: p.y }),
+                    Wheel::Alternate(steps) => {
+                        let (index, _) = self.hit(p)?;
+                        publish(Message::Velocity(index, steps * 0.05))
+                    }
                 }
-                let zoom = state.modifiers.logo() || state.modifiers.control();
-                if let Some(view) = view.wheel(*delta, zoom, p.x - KEYS_WIDTH) {
-                    return publish(Message::View(view));
-                }
-                let (_, lines) = super::wheel_lines(*delta);
-                if state.modifiers.shift() {
-                    return publish(Message::View(view.scroll_by_lines(lines)));
-                }
-                publish(Message::ScrollKeys((lines * 3.0).round() as i32))
             }
             _ => None,
         }

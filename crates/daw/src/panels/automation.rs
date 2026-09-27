@@ -19,7 +19,7 @@ use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::row;
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
-use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView};
+use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
 use super::{label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage};
 use crate::theme;
@@ -59,6 +59,45 @@ impl std::fmt::Display for LfoRate {
     }
 }
 
+/// The visible slice of normalized values, zoomed with Alt+scroll.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ValueRange {
+    pub low: f32,
+    pub high: f32,
+}
+
+impl ValueRange {
+    pub const FULL: ValueRange = ValueRange { low: 0.0, high: 1.0 };
+    const MIN_SPAN: f32 = 0.05;
+
+    fn span(self) -> f32 {
+        self.high - self.low
+    }
+
+    /// Zoom by wheel steps (positive zooms in), keeping `anchor` in place.
+    pub fn zoom(self, steps: f32, anchor: f32) -> ValueRange {
+        let span = (self.span() / 1.15f32.powf(steps)).clamp(Self::MIN_SPAN, 1.0);
+        let ratio = ((anchor - self.low) / self.span()).clamp(0.0, 1.0);
+        ValueRange { low: anchor - ratio * span, high: anchor - ratio * span + span }.clamped()
+    }
+
+    /// Scroll by wheel steps; positive moves toward higher values.
+    pub fn scroll(self, steps: f32) -> ValueRange {
+        let shift = steps * self.span() * 0.1;
+        ValueRange { low: self.low + shift, high: self.high + shift }.clamped()
+    }
+
+    /// Keep the span, moved back inside 0..1.
+    fn clamped(self) -> ValueRange {
+        let span = self.span().min(1.0);
+        if span > 1.0 - 1e-4 {
+            return ValueRange::FULL;
+        }
+        let low = self.low.clamp(0.0, 1.0 - span);
+        ValueRange { low, high: low + span }
+    }
+}
+
 #[derive(Debug)]
 pub struct State {
     pub clip: Option<AutomationId>,
@@ -67,6 +106,8 @@ pub struct State {
     pub time_snap: TimeSnap,
     pub value_snap: ValueSnap,
     pub time: TimeView,
+    /// Visible part of the 0..1 value range.
+    pub values: ValueRange,
     pub lfo_shape: LfoShape,
     pub lfo_rate: LfoRate,
     /// Points being dragged, the pressed one first.
@@ -85,6 +126,7 @@ impl Default for State {
             time_snap: TimeSnap::Grid(Grid::Division(16)),
             value_snap: ValueSnap::Off,
             time: TimeView::new(48.0),
+            values: ValueRange::FULL,
             lfo_shape: LfoShape::Sine,
             lfo_rate: LfoRate(4),
             originals: Vec::new(),
@@ -97,6 +139,8 @@ impl Default for State {
 #[derive(Debug, Clone)]
 pub enum Message {
     View(TimeView),
+    /// Visible value range, from scrolling or Alt+scroll zoom.
+    Values(ValueRange),
     Clip(ClipChoice),
     Bind(TargetChoice),
     Tool(Tool),
@@ -220,8 +264,10 @@ fn replace(app: &mut App, start: Ticks, end: Ticks, new: Vec<EnvPoint>) {
 pub fn update(app: &mut App, message: Message) {
     match message {
         Message::View(view) => app.automation.time = view,
+        Message::Values(range) => app.automation.values = range,
         Message::Clip(choice) => {
             app.automation.clip = Some(choice.id);
+            app.automation.values = ValueRange::FULL;
             app.automation.selected.clear();
         }
         Message::Bind(choice) => {
@@ -649,11 +695,13 @@ impl Editor<'_> {
     }
 
     fn y(&self, value: f32, bounds: Rectangle) -> f32 {
-        RULER_HEIGHT + PAD + (1.0 - value) * self.height(bounds)
+        let range = self.state().values;
+        RULER_HEIGHT + PAD + (range.high - value) / range.span() * self.height(bounds)
     }
 
     fn value(&self, y: f32, bounds: Rectangle) -> f32 {
-        1.0 - (y - RULER_HEIGHT - PAD) / self.height(bounds)
+        let range = self.state().values;
+        range.high - (y - RULER_HEIGHT - PAD) / self.height(bounds) * range.span()
     }
 
     fn x(&self, tick: f64) -> f32 {
@@ -934,13 +982,13 @@ impl canvas::Program<AppMessage> for Editor<'_> {
             }
             canvas::Event::Mouse(MouseEvent::WheelScrolled { delta }) => {
                 let p = cursor.position_in(bounds)?;
-                let view = self.state().time;
-                let zoom = state.modifiers.logo() || state.modifiers.control();
-                if let Some(view) = view.wheel(*delta, zoom, p.x - AXIS_WIDTH) {
-                    return publish(Message::View(view));
+                let values = self.state().values;
+                match Wheel::from_event(self.state().time, *delta, state.modifiers, p.x - AXIS_WIDTH) {
+                    Wheel::Time(view) => publish(Message::View(view)),
+                    Wheel::Vertical(steps) => publish(Message::Values(values.scroll(steps))),
+                    Wheel::Height(steps) => publish(Message::Values(values.zoom(steps, self.value(p.y, bounds)))),
+                    Wheel::Alternate(_) => None,
                 }
-                let (_, lines) = super::wheel_lines(*delta);
-                publish(Message::View(view.scroll_by_lines(lines)))
             }
             _ => None,
         }
@@ -957,15 +1005,22 @@ impl canvas::Program<AppMessage> for Editor<'_> {
 
         // Value guides: snap steps when coarse enough, otherwise quarters.
         let steps = app.target_steps(target);
-        let guide = match editor.value_snap {
+        let mut guide = match editor.value_snap {
             ValueSnap::Step(step) if step >= 0.05 => step,
             ValueSnap::Discrete if (1..=24).contains(&steps) => 1.0 / steps as f32,
             _ => 0.25,
         };
-        let mut v = 0.0;
-        while v <= 1.0001 {
-            let y = self.y(v, bounds).round() + 0.5;
-            frame.fill_rectangle(Point::new(AXIS_WIDTH, y), Size::new(area.width, 1.0), theme::GRID);
+        // Keep a few guides on screen when zoomed in.
+        let range = editor.values;
+        while range.span() / guide < 4.0 && guide > 0.001 {
+            guide /= 2.0;
+        }
+        let mut v = (range.low / guide).floor() * guide;
+        while v <= range.high + 0.0001 {
+            if v >= range.low - 0.0001 {
+                let y = self.y(v, bounds).round() + 0.5;
+                frame.fill_rectangle(Point::new(AXIS_WIDTH, y), Size::new(area.width, 1.0), theme::GRID);
+            }
             v += guide;
         }
         let grid = match editor.time_snap {
@@ -1044,7 +1099,8 @@ impl canvas::Program<AppMessage> for Editor<'_> {
 
         // Value axis.
         frame.fill_rectangle(Point::new(0.0, RULER_HEIGHT), Size::new(AXIS_WIDTH, area.height), theme::HEADER);
-        for v in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        for i in 0..=4 {
+            let v = editor.values.low + editor.values.span() * i as f32 / 4.0;
             let y = self.y(v, bounds);
             let text = app.value_text(target, v);
             let text = timeline::fit(&text, AXIS_WIDTH - 4.0);
@@ -1111,3 +1167,24 @@ impl canvas::Program<AppMessage> for Editor<'_> {
         mouse::Interaction::Crosshair
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ValueRange;
+
+    #[test]
+    fn value_range_zooms_around_the_anchor_and_stays_inside() {
+        let zoomed = ValueRange::FULL.zoom(5.0, 0.8);
+        assert!(zoomed.high - zoomed.low < 0.6);
+        let ratio = (0.8 - zoomed.low) / (zoomed.high - zoomed.low);
+        assert!((ratio - 0.8).abs() < 1e-4, "anchor stays at the same height: {ratio}");
+        let top = zoomed.scroll(100.0);
+        assert!((top.high - 1.0).abs() < 1e-6 && top.low > 0.0);
+        assert_eq!(ValueRange::FULL.scroll(3.0), ValueRange::FULL);
+        let tight = ValueRange::FULL.zoom(100.0, 0.0);
+        assert!((tight.high - tight.low - 0.05).abs() < 1e-6 && tight.low == 0.0);
+        let out = tight.zoom(-100.0, 0.0);
+        assert_eq!(out, ValueRange::FULL);
+    }
+}
+

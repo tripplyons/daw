@@ -67,6 +67,15 @@ pub fn key(app: &mut App, event: &Event) {
     app.save_config(status);
 }
 
+/// The shared wheel scheme in `timeline::Wheel`, for reference.
+const SCROLLING: &[(&str, &str)] = &[
+    ("scroll", "scroll up and down"),
+    ("shift+scroll, or swipe sideways", "scroll sideways"),
+    ("cmd+scroll", "zoom time"),
+    ("alt+scroll", "zoom height (keys, tracks, values)"),
+    ("alt+shift+scroll over a note", "note velocity"),
+];
+
 pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     row![tool("reset all", Message::ResetAll.into()), label(app.config_path.display())]
         .spacing(6)
@@ -108,6 +117,11 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             .spacing(6)
             .align_y(iced::Alignment::Center),
         );
+    }
+    // Scrolling is fixed; list it next to the editable keys.
+    list = list.push(container(label("scrolling")).padding(iced::Padding { top: 8.0, bottom: 2.0, ..iced::Padding::ZERO }));
+    for (combo, action) in SCROLLING {
+        list = list.push(row![text(*action).size(theme::SMALL).width(180), label(*combo)].spacing(6));
     }
     let note = "Keys match by position, so Alt chords work on any layout. Panel keys (Delete, arrows, \
                 Cmd+A/C/V/D, 1-6 in automation, Q in the piano roll) apply when no binding matches.";

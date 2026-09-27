@@ -8,7 +8,7 @@ use iced::keyboard::key::{Code, Physical};
 use iced::keyboard::{self, Key, Location, Modifiers};
 
 use super::*;
-use crate::panels::{automation as auto, piano_roll as roll, playlist as list};
+use crate::panels::{automation as auto, piano_roll as roll, playlist as list, timeline};
 
 /// A fresh app that ignores the user's config and writes its own to a temp file.
 fn app() -> App {
@@ -271,6 +271,25 @@ fn mixer_routes_insert_outputs_without_loops() {
     assert!(app.status.contains("back into itself"), "{}", app.status);
     let _ = app.update(Message::Action(Action::Undo));
     assert_eq!(app.project.mixer.output(a), Some(daw_model::MASTER));
+}
+
+#[test]
+fn alt_scroll_zooms_key_and_track_height_around_the_cursor() {
+    let mut app = app();
+    let (top, height) = (app.piano_roll.top_key, app.piano_roll.key_height);
+    let y = timeline::RULER_HEIGHT + height * 10.0; // ten keys below the top
+    let _ = app.update(roll::Message::ZoomKeys { steps: 3.0, y }.into());
+    assert!(app.piano_roll.key_height > height);
+    let key_under = app.piano_roll.top_key as f32 - (y - timeline::RULER_HEIGHT) / app.piano_roll.key_height;
+    assert!((key_under - (top as f32 - 10.0)).abs() <= 1.0, "{key_under}");
+    let _ = app.update(roll::Message::ZoomKeys { steps: -100.0, y }.into());
+    assert_eq!(app.piano_roll.key_height, 6.0);
+
+    let height = app.playlist.track_height;
+    let _ = app.update(list::Message::ZoomTracks { steps: 2.0, y: 100.0 }.into());
+    assert!(app.playlist.track_height > height);
+    let _ = app.update(list::Message::ZoomTracks { steps: 100.0, y: 100.0 }.into());
+    assert_eq!(app.playlist.track_height, 120.0);
 }
 
 #[test]
