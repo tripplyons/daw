@@ -25,7 +25,6 @@ pub enum Message {
     AddSynth,
     AddSampler,
     SamplePicked(Option<PathBuf>),
-    Bars(u64),
     Preview(ChannelId),
 }
 
@@ -149,15 +148,6 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.edited();
         }
         Message::SamplePicked(None) => {}
-        Message::Bars(bars) => {
-            app.checkpoint();
-            let bar = app.project.signature.ticks_per_bar();
-            let pattern = app.selected_pattern;
-            if let Some(pattern) = app.project.pattern_mut(pattern) {
-                pattern.length = bars * bar;
-            }
-            app.edited();
-        }
         Message::Preview(id) => {
             if let Some(channel) = app.project.channel(id) {
                 let node = channel_node(&channel.source, id);
@@ -170,16 +160,11 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     Task::none()
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
-    let bar = app.project.signature.ticks_per_bar();
-    let bars = app.project.pattern(app.selected_pattern).map(|p| p.length / bar).unwrap_or(1);
-    let choices: Vec<u64> = vec![1, 2, 4, 8];
+pub fn toolbar(_app: &App) -> Element<'_, AppMessage> {
     row![
         tool("+ synth", Message::AddSynth.into()),
         tool("+ sample", Message::AddSampler.into()),
         tool("delete", Message::Remove.into()),
-        label("bars"),
-        pick(choices, Some(bars), |b| Message::Bars(b).into()),
     ]
     .spacing(2)
     .align_y(iced::Alignment::Center)

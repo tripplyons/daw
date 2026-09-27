@@ -44,6 +44,8 @@ pub enum Message {
     SetBpm(String),
     SelectPattern(PatternId),
     NewPattern,
+    /// Length of the selected pattern, in bars.
+    PatternBars(u64),
     ScanProgress(Progress),
     ScanDone(Catalog),
     Rescan,
@@ -501,6 +503,12 @@ impl App {
                     self.refresh();
                 }
                 self.playlist.brush = Some(ClipSource::Pattern(id));
+            }
+            Message::PatternBars(bars) => {
+                self.checkpoint();
+                let bar = self.project.signature.ticks_per_bar();
+                self.project.set_pattern_length(self.selected_pattern, bars.max(1) * bar);
+                self.edited();
             }
             Message::NewPattern => {
                 self.checkpoint();
@@ -1067,6 +1075,14 @@ impl App {
         let pattern_names: Vec<PatternChoice> =
             self.project.patterns.iter().map(|p| PatternChoice { id: p.id, name: p.name.clone() }).collect();
         let selected = pattern_names.iter().find(|p| p.id == self.selected_pattern).cloned();
+        let bar = self.project.signature.ticks_per_bar();
+        let bars = self.project.pattern(self.selected_pattern).map(|p| p.length.div_ceil(bar).max(1));
+        let mut bar_choices: Vec<u64> = (1..=16).collect();
+        if let Some(bars) = bars
+            && !bar_choices.contains(&bars)
+        {
+            bar_choices.push(bars);
+        }
         let scan = match self.scan {
             Some(Progress { done, total }) if total > 0 => format!("scanning plugins {done}/{total}"),
             Some(_) => "scanning plugins".into(),
@@ -1092,6 +1108,12 @@ impl App {
                 .padding([3, 6])
                 .style(theme::pick)
                 .menu_style(theme::menu),
+            pick_list(bar_choices, bars, Message::PatternBars)
+                .text_size(theme::SMALL)
+                .padding([3, 6])
+                .style(theme::pick)
+                .menu_style(theme::menu),
+            small("bars").color(theme::TEXT_DIM),
             button(small("+ pattern")).on_press(Message::NewPattern).style(theme::control).padding([3, 8]),
             button(small("bind")).on_press(Message::Action(Action::ToggleBind)).style(theme::toggle(self.bind_mode)).padding([3, 8]),
             button(small("rec")).on_press(Message::Action(Action::ToggleRecord)).style(theme::toggle(self.record)).padding([3, 8]),

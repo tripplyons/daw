@@ -214,6 +214,58 @@ fn piano_roll_add_move_resize_and_keys() {
 }
 
 #[test]
+fn each_pattern_sets_its_own_length_and_can_shrink() {
+    let mut app = app();
+    let bar = app.project.signature.ticks_per_bar();
+    let first = app.selected_pattern;
+    let _ = app.update(Message::PatternBars(3));
+    let _ = app.update(Message::NewPattern);
+    let second = app.selected_pattern;
+    assert_eq!(app.project.pattern(first).unwrap().length, bar * 3);
+    assert_eq!(app.project.pattern(second).unwrap().length, bar);
+
+    // Placing a note past the end grows the pattern; the ruler drag shrinks it
+    // again as one undo step.
+    let _ = app.update(roll::Message::Add { start: bar * 5, key: 60 }.into());
+    let _ = app.update(roll::Message::End.into());
+    assert_eq!(app.project.pattern(second).unwrap().length, bar * 6);
+    let _ = app.update(roll::Message::PatternEnd(bar as f64 * 2.4).into());
+    let _ = app.update(roll::Message::PatternEnd(bar as f64 * 1.8).into());
+    let _ = app.update(Message::EndEdit);
+    assert_eq!(app.project.pattern(second).unwrap().length, bar * 2);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.pattern(second).unwrap().length, bar * 6);
+
+    // Editing a note inside a shortened pattern does not grow it back.
+    let _ = app.update(roll::Message::PatternEnd(bar as f64 * 2.0).into());
+    let _ = app.update(Message::EndEdit);
+    let _ = app.update(roll::Message::Add { start: 0, key: 64 }.into());
+    let _ = app.update(roll::Message::End.into());
+    assert_eq!(app.project.pattern(second).unwrap().length, bar * 2);
+}
+
+#[test]
+fn automation_clips_size_like_patterns() {
+    let mut app = app();
+    let bar = app.project.signature.ticks_per_bar();
+    let _ = app.update(Message::Automate(Target::Tempo));
+    let id = app.automation.clip.unwrap();
+    let length = |app: &App| app.project.automation_clip(id).unwrap().length;
+    let _ = app.update(auto::Message::Bars(3).into());
+    assert_eq!(length(&app), bar * 3);
+
+    let _ = app.update(auto::Message::Add { time: bar as f64 * 4.5, value: 0.5, bypass: true }.into());
+    let _ = app.update(auto::Message::End.into());
+    assert_eq!(length(&app), bar * 5);
+    let _ = app.update(auto::Message::ClipEnd(bar as f64 * 1.2).into());
+    let _ = app.update(Message::EndEdit);
+    assert_eq!(length(&app), bar);
+    let _ = app.update(auto::Message::Add { time: 10.0, value: 0.5, bypass: true }.into());
+    let _ = app.update(auto::Message::End.into());
+    assert_eq!(length(&app), bar);
+}
+
+#[test]
 fn playlist_place_move_duplicate_and_loop() {
     let mut app = app();
     let bar = app.project.signature.ticks_per_bar();

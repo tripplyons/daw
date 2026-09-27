@@ -6,6 +6,7 @@
 //! snapping and Shift locks the drag to one axis. Keys 1-6 set the shape of
 //! the selected points, arrows nudge, Delete, Cmd A/C/V/D edit the selection.
 //! The draw tool paints a curve and the line tool replaces a range with a ramp.
+//! Clicking or dragging in the ruler sets where the clip ends.
 
 use std::collections::HashMap;
 
@@ -106,6 +107,8 @@ pub enum Message {
     LfoRate(LfoRate),
     Lfo,
     Bars(u64),
+    /// Drag in the ruler: move the clip end to this tick, rounded to a bar.
+    ClipEnd(f64),
     Add { time: f64, value: f32, bypass: bool },
     Begin { index: usize, additive: bool },
     Drag { ticks: f64, value: f32, bypass: bool },
@@ -178,21 +181,22 @@ fn ticks_per_px(app: &App) -> f64 {
 }
 
 /// Sort points by time and keep the selection on the same points. Also grows
-/// the clip to cover every point.
+/// the clip to cover points just placed or moved past its end.
 fn sort(app: &mut App) {
     let selected = std::mem::take(&mut app.automation.selected);
-    let bar = app.project.signature.ticks_per_bar();
     let Some(id) = app.automation.clip else { return };
     let Some(clip) = app.project.automation_clip_mut(id) else { return };
     let mut tagged: Vec<(bool, EnvPoint)> =
         clip.envelope.points.iter().enumerate().map(|(i, p)| (selected.contains(&i), *p)).collect();
     tagged.sort_by_key(|(_, p)| p.time);
     clip.envelope.points = tagged.iter().map(|(_, p)| *p).collect();
-    let last = clip.envelope.points.last().map(|p| p.time).unwrap_or(0);
-    if last > clip.length {
-        clip.length = last.div_ceil(bar).max(1) * bar;
-    }
+    let length = clip.length;
     app.automation.selected = tagged.iter().enumerate().filter(|(_, (s, _))| *s).map(|(i, _)| i).collect();
+    let end = tagged.iter().filter(|(s, _)| *s).map(|(_, p)| p.time).max().unwrap_or(0);
+    if end > length {
+        let length = app.project.bars_to(end);
+        app.project.set_automation_length(id, length);
+    }
 }
 
 fn begin_drag(app: &mut App, first: usize) {
@@ -235,10 +239,18 @@ pub fn update(app: &mut App, message: Message) {
             let bar = app.project.signature.ticks_per_bar();
             let Some(id) = app.automation.clip else { return };
             app.checkpoint();
-            if let Some(clip) = app.project.automation_clip_mut(id) {
-                clip.length = bars * bar;
-            }
+            app.project.set_automation_length(id, bars.max(1) * bar);
             app.edited();
+        }
+        Message::ClipEnd(tick) => {
+            let bar = app.project.signature.ticks_per_bar();
+            let length = ((tick / bar as f64).round().max(1.0) as Ticks) * bar;
+            let Some(id) = app.automation.clip else { return };
+            if app.project.automation_clip(id).is_some_and(|c| c.length != length) {
+                app.begin_edit();
+                app.project.set_automation_length(id, length);
+                app.edited();
+            }
         }
         Message::Add { time, value, bypass } => {
             let Some(_) = app.automation.clip else { return };
@@ -564,13 +576,12 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     let mut time_snaps: Vec<TimeSnap> = Grid::CHOICES.iter().map(|&g| TimeSnap::Grid(g)).collect();
     time_snaps.push(TimeSnap::Points);
     let bar = app.project.signature.ticks_per_bar();
-    let bars = state.clip.and_then(|id| app.project.automation_clip(id)).map(|c| c.length / bar);
-    let mut bar_choices: Vec<u64> = vec![1, 2, 4, 8, 16, 32];
+    let bars = state.clip.and_then(|id| app.project.automation_clip(id)).map(|c| c.length.div_ceil(bar).max(1));
+    let mut bar_choices: Vec<u64> = (1..=16).collect();
     if let Some(bars) = bars
         && !bar_choices.contains(&bars)
     {
         bar_choices.push(bars);
-        bar_choices.sort_unstable();
     }
     let selected_shape = state.selected.first().and_then(|&i| points(app).get(i)).map(|p| p.shape);
     row![
@@ -616,6 +627,8 @@ enum Drag {
     Box { from: Point, to: Point, additive: bool },
     Stroke(Vec<Point>),
     Line { from: Point, to: Point },
+    /// Moving the clip end in the ruler.
+    End,
 }
 
 #[derive(Debug, Default)]
@@ -791,6 +804,10 @@ impl canvas::Program<AppMessage> for Editor<'_> {
             }
             canvas::Event::Mouse(MouseEvent::ButtonPressed(button)) => {
                 let p = cursor.position_in(bounds)?;
+                if p.y < RULER_HEIGHT && p.x >= AXIS_WIDTH && *button == Button::Left {
+                    state.drag = Some(Drag::End);
+                    return publish(Message::ClipEnd(self.tick(p.x)));
+                }
                 if p.y < RULER_HEIGHT || p.x < AXIS_WIDTH {
                     return None;
                 }
@@ -882,6 +899,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                         stroke.push(p);
                         redraw()
                     }
+                    Drag::End => publish(Message::ClipEnd(self.tick(p.x))),
                 }
             }
             canvas::Event::Mouse(MouseEvent::ButtonReleased(_)) => {
@@ -889,6 +907,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
                 match state.drag.take()? {
                     Drag::Points { .. } => publish(Message::End),
                     Drag::Tension { .. } => publish(Message::End),
+                    Drag::End => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
                     Drag::Box { from, to, additive } => {
                         let (t0, t1) = (self.tick(from.x.min(to.x)), self.tick(from.x.max(to.x)));
                         let (v0, v1) = (self.value(from.y.max(to.y), bounds), self.value(from.y.min(to.y), bounds));
@@ -1033,6 +1052,11 @@ impl canvas::Program<AppMessage> for Editor<'_> {
         }
 
         timeline::draw_ruler(&mut frame, editor.time, AXIS_WIDTH, area.width, app.project.signature);
+        // Clip end handle in the ruler; drag it to change the length.
+        let end_x = self.x(clip.length as f64).round();
+        if end_x >= AXIS_WIDTH && end_x < size.width {
+            frame.fill_rectangle(Point::new(end_x - 1.0, 0.0), Size::new(2.0, RULER_HEIGHT), theme::TEXT_DIM);
+        }
         frame.fill_rectangle(Point::ORIGIN, Size::new(AXIS_WIDTH, RULER_HEIGHT), theme::HEADER);
 
         // Readout of the dragged or hovered point, else the cursor position.
@@ -1066,6 +1090,9 @@ impl canvas::Program<AppMessage> for Editor<'_> {
 
     fn mouse_interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
         let Some(p) = cursor.position_in(bounds) else { return mouse::Interaction::default() };
+        if matches!(state.drag, Some(Drag::End)) || (p.x >= AXIS_WIDTH && p.y < RULER_HEIGHT) {
+            return mouse::Interaction::ResizingHorizontally;
+        }
         if p.x < AXIS_WIDTH || p.y < RULER_HEIGHT {
             return mouse::Interaction::default();
         }

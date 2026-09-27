@@ -158,12 +158,6 @@ impl Pattern {
         }
     }
 
-    /// Grow the length to cover every note, rounded up to whole bars.
-    pub fn fit_length(&mut self, signature: TimeSignature) {
-        let bar = signature.ticks_per_bar();
-        let end = self.lanes.iter().flat_map(|l| &l.notes).map(Note::end).max().unwrap_or(0);
-        self.length = self.length.max(end.div_ceil(bar).max(1) * bar);
-    }
 }
 
 /// What an automation clip drives.
@@ -341,6 +335,36 @@ impl Project {
         let length = self.signature.ticks_per_bar();
         self.patterns.push(Pattern { id, name: format!("pattern {number}"), length, lanes: Vec::new() });
         id
+    }
+
+    /// Set a pattern's length. Playlist clips that show the whole pattern
+    /// follow it; clips trimmed to a part of it keep their length.
+    pub fn set_pattern_length(&mut self, id: PatternId, length: Ticks) {
+        let Some(pattern) = self.patterns.iter_mut().find(|p| p.id == id) else { return };
+        let old = std::mem::replace(&mut pattern.length, length.max(1));
+        self.resize_whole_clips(ClipSource::Pattern(id), old, length.max(1));
+    }
+
+    /// Set an automation clip's length, with the same playlist rule as patterns.
+    pub fn set_automation_length(&mut self, id: AutomationId, length: Ticks) {
+        let Some(clip) = self.automation_clip_mut(id) else { return };
+        let old = std::mem::replace(&mut clip.length, length.max(1));
+        self.resize_whole_clips(ClipSource::Automation(id), old, length.max(1));
+    }
+
+    fn resize_whole_clips(&mut self, source: ClipSource, old: Ticks, new: Ticks) {
+        for clip in &mut self.playlist.clips {
+            if clip.source == source && clip.offset == 0 && clip.length == old {
+                clip.length = new;
+            }
+        }
+    }
+
+    /// Whole bars that reach `end`, for growing a pattern or automation clip
+    /// when something is placed past its end.
+    pub fn bars_to(&self, end: Ticks) -> Ticks {
+        let bar = self.signature.ticks_per_bar();
+        end.div_ceil(bar).max(1) * bar
     }
 
     pub fn add_plugin(&mut self, plugin: PluginRef) -> InstanceId {
@@ -672,5 +696,37 @@ mod tests {
         project.add_clip(0, 0, ClipSource::Pattern(pattern));
         assert_eq!(project.free_track(0, 100), 1);
         assert_eq!(project.free_track(5000, 6000), 0);
+    }
+
+    #[test]
+    fn pattern_length_moves_whole_clips_only() {
+        let mut project = Project::new();
+        let pattern = project.patterns[0].id;
+        let bar = project.signature.ticks_per_bar();
+        project.add_clip(0, 0, ClipSource::Pattern(pattern));
+        project.add_clip(1, 0, ClipSource::Pattern(pattern));
+        project.playlist.clips[1].length = bar / 2;
+        project.set_pattern_length(pattern, bar * 3);
+        assert_eq!(project.patterns[0].length, bar * 3);
+        assert_eq!(project.playlist.clips[0].length, bar * 3);
+        assert_eq!(project.playlist.clips[1].length, bar / 2);
+
+        assert_eq!(project.bars_to(bar * 2 + 10), bar * 3);
+        assert_eq!(project.bars_to(0), bar);
+    }
+
+    #[test]
+    fn automation_length_moves_whole_clips_only() {
+        let mut project = Project::new();
+        let bar = project.signature.ticks_per_bar();
+        let automation = project.add_automation("x", Target::Tempo, 0.5);
+        let length = project.automation_clip(automation).unwrap().length;
+        project.add_clip(0, 0, ClipSource::Automation(automation));
+        project.add_clip(1, 0, ClipSource::Automation(automation));
+        project.playlist.clips[1].offset = 10;
+        project.set_automation_length(automation, bar * 5);
+        assert_eq!(project.automation_clip(automation).unwrap().length, bar * 5);
+        assert_eq!(project.playlist.clips[0].length, bar * 5);
+        assert_eq!(project.playlist.clips[1].length, length);
     }
 }
