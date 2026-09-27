@@ -2,6 +2,7 @@ mod app;
 mod capture;
 mod config;
 mod keys;
+mod open_files;
 mod panels;
 mod quit;
 mod session;
@@ -25,6 +26,7 @@ fn main() -> iced::Result {
     let project = args.get(1).filter(|a| !a.starts_with('-')).map(std::path::PathBuf::from);
     let _ = app::STARTUP_PROJECT.set(project);
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    open_files::install();
     iced::application(App::boot, App::update, App::view)
         .title(App::title)
         .theme(|_: &App| theme::theme())

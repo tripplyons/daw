@@ -818,6 +818,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 name = "daw"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "cpal",
  "daw-engine",
  "daw-model",

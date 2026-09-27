@@ -963,7 +963,8 @@ impl App {
         let tick = iced::time::every(Duration::from_millis(33)).map(|_| Message::Tick);
         let close = window::close_requests().map(|_| Message::CloseRequested);
         let plugin_keys = Subscription::run(plugin_keys);
-        let mut subscriptions = vec![events, presses, tick, close, plugin_keys];
+        let opened = Subscription::run(opened_files);
+        let mut subscriptions = vec![events, presses, tick, close, plugin_keys, opened];
         if self.screenshot.is_some() {
             let delay = std::env::var("DAW_SCREENSHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(8);
             subscriptions.push(iced::time::every(Duration::from_secs(delay)).map(|_| Message::Screenshot));
@@ -1186,6 +1187,11 @@ fn forward_plugin_keys() {
         let Some(event) = crate::keys::plugin_key_event(press) else { return false };
         sender.unbounded_send(event).is_ok()
     });
+}
+
+/// Projects opened from Finder, loaded the same way as Cmd+O.
+fn opened_files() -> impl Stream<Item = Message> {
+    stream::iter(crate::open_files::take()).flatten().map(|path| Message::Opened(Some(path)))
 }
 
 fn plugin_keys() -> impl Stream<Item = Message> {

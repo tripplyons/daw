@@ -20,6 +20,17 @@ cargo run --release
 
 The first build takes a few minutes. Debug builds also work (`cargo run`); the workspace compiles dependencies with optimizations so audio keeps up in either mode.
 
+## Build a .app
+
+```sh
+scripts/bundle-app.sh
+open target/release/DAW.app
+```
+
+The script builds a release binary and wraps it in `target/release/DAW.app` with an ad-hoc code signature, which is enough to run it on your own Mac. Pass `--install` to also copy it to `/Applications`; it refuses to replace a different app already at that path.
+
+The bundle declares the `.dawproj` file type, so double-clicking a project in Finder (or dropping one on the Dock icon) opens it in DAW. After `--install`, only the copy in `/Applications` handles these files.
+
 ## Plugins
 
 On startup the app scans the standard plugin folders:
