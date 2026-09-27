@@ -74,15 +74,36 @@ pub enum Message {
     Captured(window::Screenshot),
     /// The window's close button or Cmd+Q.
     CloseRequested,
-    CloseChoice(CloseChoice),
-    SavedAsThenClose(Option<PathBuf>),
+    /// Answer to the unsaved changes prompt.
+    SaveChoice(SaveChoice),
+    /// Save As finished for the prompt; then the pending step runs.
+    SavedAsThenContinue(Option<PathBuf>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloseChoice {
+pub enum SaveChoice {
     Save,
     Discard,
     Cancel,
+}
+
+/// What replaces the current project once its unsaved changes are saved or
+/// discarded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pending {
+    Close,
+    New,
+    Open(PathBuf),
+}
+
+impl Pending {
+    fn verb(&self) -> String {
+        match self {
+            Pending::Close => "closing".into(),
+            Pending::New => "starting a new project".into(),
+            Pending::Open(path) => format!("opening \"{}\"", path.file_name().unwrap_or_default().to_string_lossy()),
+        }
+    }
 }
 
 pub struct App {
@@ -132,8 +153,8 @@ pub struct App {
     bpm_text: Option<String>,
     /// Cmd+Q has been pointed at the window's close request.
     quit_routed: bool,
-    /// A save prompt for closing is showing.
-    closing: bool,
+    /// The unsaved changes prompt is showing, for this next step.
+    pending: Option<Pending>,
 }
 
 impl App {
@@ -183,7 +204,7 @@ impl App {
             screenshot: std::env::var_os("DAW_SCREENSHOT").map(PathBuf::from),
             bpm_text: None,
             quit_routed: false,
-            closing: false,
+            pending: None,
         };
         app.load_config();
         if let Some(error) = &app.session.audio_error {
@@ -589,7 +610,7 @@ impl App {
             }
             Message::Opened(path) => {
                 if let Some(path) = path {
-                    self.open(path);
+                    return self.guard(Pending::Open(path));
                 }
             }
             Message::SavedAs(path) => {
@@ -615,26 +636,23 @@ impl App {
             }
             Message::CloseRequested => {
                 log::info!("close requested (unsaved changes: {})", self.dirty);
-                if self.closing {
-                    return Task::none();
-                }
-                if !self.dirty {
-                    return iced::exit();
-                }
-                self.closing = true;
-                return self.ask_to_save();
+                return self.guard(Pending::Close);
             }
-            Message::CloseChoice(CloseChoice::Save) => {
+            Message::SaveChoice(SaveChoice::Save) => {
                 if self.path.is_none() {
-                    return Task::perform(save_dialog(), Message::SavedAsThenClose);
+                    return Task::perform(save_dialog(), Message::SavedAsThenContinue);
                 }
-                return self.save_and_close();
+                return self.save_and_continue();
             }
-            Message::CloseChoice(CloseChoice::Discard) => return iced::exit(),
-            Message::CloseChoice(CloseChoice::Cancel) | Message::SavedAsThenClose(None) => self.closing = false,
-            Message::SavedAsThenClose(Some(path)) => {
+            Message::SaveChoice(SaveChoice::Discard) => {
+                if let Some(next) = self.pending.take() {
+                    return self.proceed(next);
+                }
+            }
+            Message::SaveChoice(SaveChoice::Cancel) | Message::SavedAsThenContinue(None) => self.pending = None,
+            Message::SavedAsThenContinue(Some(path)) => {
                 self.path = Some(path);
-                return self.save_and_close();
+                return self.save_and_continue();
             }
             Message::Exported(path) => {
                 if let Some(path) = path {
@@ -807,20 +825,7 @@ impl App {
                     self.redo = redo;
                 }
             }
-            Action::New => {
-                self.session.clear();
-                self.project = Project::new();
-                self.path = None;
-                self.undo.clear();
-                self.redo.clear();
-                self.dirty = false;
-                self.song_start = 0.0;
-                self.pattern_start = 0.0;
-                self.selected_pattern = self.project.patterns[0].id;
-                self.mode = PlayMode::Pattern(self.selected_pattern);
-                self.validate_selection();
-                self.refresh();
-            }
+            Action::New => return self.guard(Pending::New),
             Action::Open => {
                 return Task::perform(
                     async {
@@ -867,38 +872,78 @@ impl App {
         self.position = start;
     }
 
-    fn ask_to_save(&self) -> Task<Message> {
+    /// Run `next` now, or first ask to save unsaved changes. Ignored while
+    /// the prompt is already showing.
+    fn guard(&mut self, next: Pending) -> Task<Message> {
+        if self.pending.is_some() {
+            return Task::none();
+        }
+        if !self.dirty {
+            return self.proceed(next);
+        }
+        let prompt = self.ask_to_save(&next);
+        self.pending = Some(next);
+        prompt
+    }
+
+    fn proceed(&mut self, next: Pending) -> Task<Message> {
+        match next {
+            Pending::Close => return iced::exit(),
+            Pending::New => self.new_project(),
+            Pending::Open(path) => self.open(path),
+        }
+        Task::none()
+    }
+
+    fn new_project(&mut self) {
+        self.session.clear();
+        self.project = Project::new();
+        self.path = None;
+        self.undo.clear();
+        self.redo.clear();
+        self.dirty = false;
+        self.song_start = 0.0;
+        self.pattern_start = 0.0;
+        self.selected_pattern = self.project.patterns[0].id;
+        self.mode = PlayMode::Pattern(self.selected_pattern);
+        self.validate_selection();
+        self.refresh();
+    }
+
+    fn ask_to_save(&self, next: &Pending) -> Task<Message> {
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let name = name.unwrap_or_else(|| self.project.name.clone());
+        let verb = next.verb();
         Task::perform(
             async move {
                 let result = rfd::AsyncMessageDialog::new()
                     .set_level(rfd::MessageLevel::Warning)
                     .set_title("Unsaved changes")
-                    .set_description(format!("Save changes to \"{name}\" before closing?"))
+                    .set_description(format!("Save changes to \"{name}\" before {verb}?"))
                     .set_buttons(rfd::MessageButtons::YesNoCancelCustom("Save".into(), "Don't Save".into(), "Cancel".into()))
                     .show()
                     .await;
                 match result {
-                    rfd::MessageDialogResult::Custom(label) if label == "Save" => CloseChoice::Save,
-                    rfd::MessageDialogResult::Custom(label) if label == "Don't Save" => CloseChoice::Discard,
-                    rfd::MessageDialogResult::Yes => CloseChoice::Save,
-                    rfd::MessageDialogResult::No => CloseChoice::Discard,
-                    _ => CloseChoice::Cancel,
+                    rfd::MessageDialogResult::Custom(label) if label == "Save" => SaveChoice::Save,
+                    rfd::MessageDialogResult::Custom(label) if label == "Don't Save" => SaveChoice::Discard,
+                    rfd::MessageDialogResult::Yes => SaveChoice::Save,
+                    rfd::MessageDialogResult::No => SaveChoice::Discard,
+                    _ => SaveChoice::Cancel,
                 }
             },
-            Message::CloseChoice,
+            Message::SaveChoice,
         )
     }
 
-    /// Save, then quit only if the save worked; otherwise stay open with the error.
-    fn save_and_close(&mut self) -> Task<Message> {
+    /// Save, then run the pending step only if the save worked; otherwise
+    /// keep the project open with the error.
+    fn save_and_continue(&mut self) -> Task<Message> {
         self.save();
-        if self.dirty {
-            self.closing = false;
-            return Task::none();
+        let next = self.pending.take();
+        match next {
+            Some(next) if !self.dirty => self.proceed(next),
+            _ => Task::none(),
         }
-        iced::exit()
     }
 
     fn save(&mut self) {

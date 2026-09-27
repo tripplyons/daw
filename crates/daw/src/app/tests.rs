@@ -511,6 +511,42 @@ fn bar_ticks(app: &App) -> f64 {
 }
 
 #[test]
+fn new_and_open_ask_to_save_unsaved_changes_first() {
+    let dir = std::env::temp_dir().join(format!("daw-replace-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let other = dir.join("other.dawproj");
+    std::fs::write(&other, Project::new().to_ron().unwrap()).unwrap();
+
+    // Clean project: New and Open act at once.
+    let mut app = app();
+    let _ = app.update(Message::Opened(Some(other.clone())));
+    assert_eq!(app.path.as_deref(), Some(other.as_path()));
+    let _ = app.update(Message::Action(Action::New));
+    assert!(app.path.is_none() && app.pending.is_none());
+
+    // Unsaved changes: Cancel keeps the project, Don't Save goes ahead.
+    let _ = app.update(Message::NewPattern);
+    let _ = app.update(Message::Opened(Some(other.clone())));
+    assert_eq!(app.pending, Some(Pending::Open(other.clone())));
+    let _ = app.update(Message::SaveChoice(SaveChoice::Cancel));
+    assert!(app.pending.is_none() && app.dirty && app.path.is_none());
+    let _ = app.update(Message::Action(Action::New));
+    assert_eq!(app.pending, Some(Pending::New));
+    let _ = app.update(Message::SaveChoice(SaveChoice::Discard));
+    assert!(!app.dirty && app.project.patterns.len() == 1);
+
+    // Save writes the current project, then opens the other one.
+    let saved = dir.join("saved.dawproj");
+    app.path = Some(saved.clone());
+    let _ = app.update(Message::NewPattern);
+    let _ = app.update(Message::Opened(Some(other.clone())));
+    let _ = app.update(Message::SaveChoice(SaveChoice::Save));
+    assert_eq!(Project::from_ron(&std::fs::read_to_string(&saved).unwrap()).unwrap().patterns.len(), 2);
+    assert_eq!(app.path.as_deref(), Some(other.as_path()));
+    assert!(!app.dirty && app.pending.is_none());
+}
+
+#[test]
 fn closing_prompts_only_with_unsaved_changes_and_saves_before_quitting() {
     let dir = std::env::temp_dir().join(format!("daw-close-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -518,21 +554,21 @@ fn closing_prompts_only_with_unsaved_changes_and_saves_before_quitting() {
     // Clean project: no prompt.
     let mut app = app();
     let _ = app.update(Message::CloseRequested);
-    assert!(!app.closing);
+    assert!(app.pending.is_none());
 
     // Unsaved changes: the prompt opens once, and Cancel keeps everything.
     let _ = app.update(Message::NewPattern);
     assert!(app.dirty);
     let _ = app.update(Message::CloseRequested);
-    assert!(app.closing);
-    let _ = app.update(Message::CloseChoice(CloseChoice::Cancel));
-    assert!(!app.closing && app.dirty);
+    assert_eq!(app.pending, Some(Pending::Close));
+    let _ = app.update(Message::SaveChoice(SaveChoice::Cancel));
+    assert!(app.pending.is_none() && app.dirty);
 
     // Save with a known path writes the file before quitting.
     let path = dir.join("close.dawproj");
     app.path = Some(path.clone());
     let _ = app.update(Message::CloseRequested);
-    let _ = app.update(Message::CloseChoice(CloseChoice::Save));
+    let _ = app.update(Message::SaveChoice(SaveChoice::Save));
     assert!(!app.dirty);
     assert_eq!(Project::from_ron(&std::fs::read_to_string(&path).unwrap()).unwrap().patterns.len(), 2);
 
@@ -540,15 +576,15 @@ fn closing_prompts_only_with_unsaved_changes_and_saves_before_quitting() {
     let _ = app.update(Message::NewPattern);
     app.path = Some(dir.join("missing-dir").join("x.dawproj"));
     let _ = app.update(Message::CloseRequested);
-    let _ = app.update(Message::CloseChoice(CloseChoice::Save));
-    assert!(app.dirty && !app.closing);
+    let _ = app.update(Message::SaveChoice(SaveChoice::Save));
+    assert!(app.dirty && app.pending.is_none());
     assert!(app.status.contains("save failed"), "{}", app.status);
 
     // Untitled project: cancelling the save dialog keeps the app open.
     app.path = None;
     let _ = app.update(Message::CloseRequested);
-    let _ = app.update(Message::SavedAsThenClose(None));
-    assert!(app.dirty && !app.closing);
+    let _ = app.update(Message::SavedAsThenContinue(None));
+    assert!(app.dirty && app.pending.is_none());
 
     // Plugin parameter edits count as unsaved changes.
     let mut clean = self::app();

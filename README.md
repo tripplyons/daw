@@ -44,7 +44,7 @@ Click a plugin in the browser panel to use it: an instrument gets a new channel 
 
 ## Files
 
-- Projects are saved as `.dawproj` files.
+- Projects are saved as `.dawproj` files. Closing, starting a new project, or opening another one asks to save unsaved changes first.
 - Key bindings are saved to `~/.config/daw/config.json`, or to `$XDG_CONFIG_HOME/daw/config.json` when that variable is an absolute path. Edit them on the settings page (Cmd+comma).
 
 ## Default keys
