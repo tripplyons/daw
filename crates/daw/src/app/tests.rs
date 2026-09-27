@@ -455,6 +455,8 @@ fn delete_key_removes_the_selection_in_each_panel() {
 #[test]
 fn play_starts_from_pattern_or_song_marker_and_pause_returns_there() {
     let mut app = app();
+    assert_eq!(app.mode, PlayMode::Song, "projects start in song mode");
+    let _ = app.update(Message::Action(Action::ToggleMode));
     assert!(matches!(app.mode, PlayMode::Pattern(_)));
     let _ = app.update(Message::Action(Action::PlayPause));
     app.position = 1234.0;

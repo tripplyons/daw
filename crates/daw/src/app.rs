@@ -169,7 +169,7 @@ impl App {
             session: Session::new(),
             catalog: Catalog::default(),
             scan: Some(Progress { done: 0, total: 0 }),
-            mode: PlayMode::Pattern(selected_pattern),
+            mode: PlayMode::Song,
             playing: false,
             position: 0.0,
             song_start: 0.0,
@@ -905,7 +905,7 @@ impl App {
         self.song_start = 0.0;
         self.pattern_start = 0.0;
         self.selected_pattern = self.project.patterns[0].id;
-        self.mode = PlayMode::Pattern(self.selected_pattern);
+        self.mode = PlayMode::Song;
         self.validate_selection();
         self.refresh();
     }
@@ -977,7 +977,7 @@ impl App {
                 self.song_start = 0.0;
                 self.pattern_start = 0.0;
                 self.selected_pattern = self.project.patterns[0].id;
-                self.mode = PlayMode::Pattern(self.selected_pattern);
+                self.mode = PlayMode::Song;
                 self.validate_selection();
                 self.refresh();
                 let failures = self.session.load_errors.len();
