@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use daw_engine::output::{self, BitDepth};
+use daw_engine::output::{self, BitDepth, Stem};
 use daw_engine::song::{PlayMode, channel_node, compile};
 use daw_engine::synth::{PARAM_ATTACK, PARAM_CUTOFF, PARAM_RELEASE, PARAM_WAVEFORM, Sample, Sampler, Synth};
 use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
+use daw_model::time::{Ticks, ticks_to_seconds};
 use daw_model::{InstanceId, Project, Source, SynthParams, Waveform};
 use daw_plugins::{Controller, ParamInfo, Touch};
 
@@ -295,16 +296,28 @@ impl Session {
         self.stop();
     }
 
-    /// Render the whole song to a WAV file, then restore the live plan.
-    pub fn export(&mut self, project: &Project, path: &Path, depth: BitDepth, live_mode: PlayMode) -> Result<(), String> {
+    /// Render the song to a WAV file, then restore the live plan. With a range,
+    /// render only those ticks, without a tail; notes that start before it are
+    /// not heard. Stems come from the same pass.
+    pub fn export(
+        &mut self,
+        project: &Project,
+        path: &Path,
+        depth: BitDepth,
+        live_mode: PlayMode,
+        range: Option<(Ticks, Ticks)>,
+        stems: &[Stem],
+    ) -> Result<(), String> {
         self.stop();
         self.update_song(project, PlayMode::Song);
-        let tail_seconds = 2.0;
-        let seconds = daw_model::time::ticks_to_seconds(project.song_length() as f64, project.bpm) + tail_seconds;
+        let (start, seconds) = match range {
+            Some((start, end)) => (start, ticks_to_seconds(end.saturating_sub(start) as f64, project.bpm)),
+            None => (0, ticks_to_seconds(project.song_length() as f64, project.bpm) + 2.0),
+        };
         let frames = (seconds * self.sample_rate()) as usize;
         let result = {
             let mut engine = self.engine.lock().map_err(|_| "audio engine lock poisoned")?;
-            output::export_wav(&mut engine, path, frames, depth).map_err(|e| e.to_string())
+            output::export_wav(&mut engine, path, start, frames, depth, stems).map_err(|e| e.to_string())
         };
         self.update_song(project, live_mode);
         self.seek(0.0);

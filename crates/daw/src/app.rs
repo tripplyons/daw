@@ -649,7 +649,7 @@ impl App {
             Message::Exported(path) => {
                 if let Some(path) = path {
                     let path = if path.extension().is_none() { path.with_extension("wav") } else { path };
-                    match self.session.export(&self.project, &path, BitDepth::Int24, self.mode) {
+                    match self.session.export(&self.project, &path, BitDepth::Int24, self.mode, None, &[]) {
                         Ok(()) => self.set_status(format!("exported {}", path.display())),
                         Err(error) => self.set_status(format!("export failed: {error}")),
                     }
@@ -1249,15 +1249,36 @@ pub fn pan_text(pan: f32) -> String {
     }
 }
 
-/// Headless render for `daw export`, loading the project's plugins.
-pub fn export_cli(project: &Path, out: &Path) -> Result<(), String> {
+/// Headless render for `daw export`, loading the project's plugins. With
+/// `stems`, each mixer insert also goes to its own file in that folder.
+pub fn export_cli(project: &Path, out: &Path, range: Option<(Ticks, Ticks)>, stems: Option<&Path>) -> Result<(), String> {
     let mut app = App::boot().0;
     app.open(project.to_path_buf());
     for (instance, error) in &app.session.load_errors {
         eprintln!("plugin {} failed to load: {error}", instance.0);
     }
+    let stems: Vec<daw_engine::output::Stem> = match stems {
+        Some(folder) => {
+            std::fs::create_dir_all(folder).map_err(|e| format!("could not create {}: {e}", folder.display()))?;
+            // Skip inserts no channel's signal reaches; always keep the master.
+            let project = &app.project;
+            let reached = |id| project.channels.iter().any(|c| c.insert == id || project.mixer.feeds(c.insert, id));
+            project
+                .mixer
+                .inserts
+                .iter()
+                .enumerate()
+                .filter(|&(index, insert)| index == 0 || reached(insert.id))
+                .map(|(index, insert)| daw_engine::output::Stem {
+                    insert: index,
+                    path: folder.join(format!("{index:02} {}.wav", insert.name.replace(['/', '\\'], "-"))),
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     let mode = app.mode;
-    app.session.export(&app.project, out, BitDepth::Int24, mode).map_err(|e| format!("export failed: {e}"))
+    app.session.export(&app.project, out, BitDepth::Int24, mode, range, &stems).map_err(|e| format!("export failed: {e}"))
 }
 
 async fn save_dialog() -> Option<PathBuf> {

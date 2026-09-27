@@ -73,9 +73,23 @@ pub enum BitDepth {
     Float32,
 }
 
-/// Render `frames` from the song start into a WAV file. The engine must
-/// already hold a song-mode plan.
-pub fn export_wav(engine: &mut Engine, path: &std::path::Path, frames: usize, depth: BitDepth) -> Result<(), hound::Error> {
+/// A mixer insert's output to write as its own WAV file.
+pub struct Stem {
+    /// Index into the song's inserts; 0 is the master.
+    pub insert: usize,
+    pub path: std::path::PathBuf,
+}
+
+/// Render `frames` from `start` into a WAV file, and each stem into its own
+/// file from the same pass. The engine must already hold a song-mode plan.
+pub fn export_wav(
+    engine: &mut Engine,
+    path: &std::path::Path,
+    start: daw_model::time::Ticks,
+    frames: usize,
+    depth: BitDepth,
+    stems: &[Stem],
+) -> Result<(), hound::Error> {
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: engine.sample_rate() as u32,
@@ -89,25 +103,50 @@ pub fn export_wav(engine: &mut Engine, path: &std::path::Path, frames: usize, de
         },
     };
     let mut writer = hound::WavWriter::create(path, spec)?;
+    let mut stem_writers = stems.iter().map(|s| hound::WavWriter::create(&s.path, spec)).collect::<Result<Vec<_>, _>>()?;
+    engine.set_capture(!stems.is_empty());
+    engine.start_offline(start);
+    let (mut left, mut right) = (vec![0.0; MAX_BLOCK], vec![0.0; MAX_BLOCK]);
     let mut result = Ok(());
-    engine.start_offline();
-    engine.render_offline(frames, |left, right| {
-        if result.is_err() {
-            return;
+    let mut done = 0;
+    while done < frames && result.is_ok() {
+        let n = (frames - done).min(MAX_BLOCK);
+        engine.render(&mut left[..n], &mut right[..n]);
+        result = write_block(&mut writer, depth, &left[..n], &right[..n]);
+        for (stem, stem_writer) in stems.iter().zip(&mut stem_writers) {
+            if let (Ok(()), Some([l, r])) = (&result, engine.captured().get(stem.insert)) {
+                result = write_block(stem_writer, depth, &l[..n], &r[..n]);
+            }
         }
-        for (&l, &r) in left.iter().zip(right) {
-            result = match depth {
-                BitDepth::Int24 => {
-                    let scale = 8_388_607.0;
-                    writer
-                        .write_sample((l.clamp(-1.0, 1.0) * scale) as i32)
-                        .and_then(|_| writer.write_sample((r.clamp(-1.0, 1.0) * scale) as i32))
-                }
-                BitDepth::Float32 => writer.write_sample(l).and_then(|_| writer.write_sample(r)),
-            };
-        }
-    });
+        done += n;
+    }
     engine.stop_offline();
+    engine.set_capture(false);
     result?;
+    for stem_writer in stem_writers {
+        stem_writer.finalize()?;
+    }
     writer.finalize()
+}
+
+fn write_block<W: std::io::Write + std::io::Seek>(
+    writer: &mut hound::WavWriter<W>,
+    depth: BitDepth,
+    left: &[f32],
+    right: &[f32],
+) -> Result<(), hound::Error> {
+    for (&l, &r) in left.iter().zip(right) {
+        match depth {
+            BitDepth::Int24 => {
+                let scale = 8_388_607.0;
+                writer.write_sample((l.clamp(-1.0, 1.0) * scale) as i32)?;
+                writer.write_sample((r.clamp(-1.0, 1.0) * scale) as i32)?;
+            }
+            BitDepth::Float32 => {
+                writer.write_sample(l)?;
+                writer.write_sample(r)?;
+            }
+        }
+    }
+    Ok(())
 }

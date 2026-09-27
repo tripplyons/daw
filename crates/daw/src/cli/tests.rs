@@ -172,12 +172,59 @@ fn param_assignments_resolve_by_id_or_name() {
     use daw_plugins::ParamInfo;
     let param = |id, name: &str| ParamInfo { id, name: name.into(), units: String::new(), steps: 0, default: 0.0, automatable: true };
     let params = vec![param(1, "Mix"), param(2, "Cutoff"), param(3, "Gain"), param(4, "Gain")];
-    assert_eq!(super::parse_assignment("Sync Mode=1"), Ok(("Sync Mode".into(), 1.0)));
-    assert_eq!(super::parse_assignment("a=b=0.5"), Ok(("a=b".into(), 0.5)));
-    assert!(super::parse_assignment("Mix").is_err());
-    assert!(super::parse_assignment("Mix=1.5").is_err());
-    assert_eq!(super::find_param(&params, "mix").unwrap().id, 1);
-    assert_eq!(super::find_param(&params, "2").unwrap().name, "Cutoff");
-    assert!(super::find_param(&params, "Gain").unwrap_err().contains("use an id"));
-    assert!(super::find_param(&params, "Drive").is_err());
+    assert_eq!(super::plugins::parse_assignment("Sync Mode=1"), Ok(("Sync Mode".into(), 1.0)));
+    assert_eq!(super::plugins::parse_assignment("a=b=0.5"), Ok(("a=b".into(), 0.5)));
+    assert!(super::plugins::parse_assignment("Mix").is_err());
+    assert!(super::plugins::parse_assignment("Mix=1.5").is_err());
+    assert_eq!(super::plugins::find_param(&params, "mix").unwrap().id, 1);
+    assert_eq!(super::plugins::find_param(&params, "2").unwrap().name, "Cutoff");
+    assert!(super::plugins::find_param(&params, "Gain").unwrap_err().contains("use an id"));
+    assert!(super::plugins::find_param(&params, "Drive").is_err());
+}
+
+#[test]
+fn batch_keeps_outputs_as_variables_and_stops_at_errors() {
+    let mut project = Project::new();
+    let script = "
+        # comments and blank lines are skipped
+
+        p = pattern add --name 'lead line' --length 2bar
+        lead = channel add lead --synth square
+        note add $p $lead C4 0 1beat
+        note add ${p} $lead E4 1beat 1beat
+        clip add pattern:$p 3 0
+    ";
+    let output = super::batch::run(&mut project, script).unwrap();
+    let pattern = project.patterns.iter().find(|p| p.name == "lead line").unwrap();
+    let lead = project.channels.iter().find(|c| c.name == "lead").unwrap();
+    assert_eq!(output, format!("p = {}\nlead = {}\n{}", pattern.id.0, lead.id.0, project.playlist.clips[0].id.0));
+    assert_eq!(pattern.notes(lead.id).len(), 2);
+
+    let error = super::batch::run(&mut project, "x = channel add x\nnote add 999 $x C4 0 1beat").unwrap_err();
+    assert!(error.starts_with("line 2: no pattern 999"), "{error}");
+    assert!(super::batch::run(&mut project, "note add $missing 9 C4 0 1beat").unwrap_err().contains("$missing is not set"));
+    assert!(super::batch::run(&mut project, "channel frobnicate").unwrap_err().starts_with("line 1:"));
+}
+
+#[test]
+fn analyze_finds_a_tone_in_its_octave_band() {
+    let path = std::env::temp_dir().join(format!("daw-analyze-{}.wav", std::process::id()));
+    let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+    let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+    for i in 0..48_000 {
+        let s = 0.5 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48_000.0).sin();
+        writer.write_sample(s).unwrap();
+        writer.write_sample(s).unwrap();
+    }
+    writer.finalize().unwrap();
+    let report = super::analyze::analyze(&[&path], None).unwrap();
+    let row = report.lines().nth(2).unwrap();
+    let numbers: Vec<f64> = row.split(|c: char| c.is_whitespace() || c == '|').filter_map(|w| w.parse().ok()).collect();
+    let (peak, rms, width, bands) = (numbers[0], numbers[1], numbers[2], &numbers[3..]);
+    assert!((peak - -6.0).abs() < 0.1, "{row}");
+    assert!((rms - -9.0).abs() < 0.1, "{row}");
+    assert_eq!(width, -99.9, "identical channels have no side signal");
+    let loudest = bands.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+    assert_eq!(loudest, 4, "1 kHz lands in the 1k band: {row}");
+    std::fs::remove_file(path).unwrap();
 }

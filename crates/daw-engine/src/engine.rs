@@ -147,6 +147,10 @@ pub struct Engine {
     /// Frames since song start, for plugins that want a sample position.
     frames: i64,
     scratch: [Box<[f32]>; 2],
+    /// Post-fader output of each insert from the last `render` call, when
+    /// capturing stems offline. Empty otherwise.
+    capture: Vec<[Vec<f32>; 2]>,
+    capturing: bool,
 }
 
 pub fn create(sample_rate: f64) -> (Engine, EngineHandle) {
@@ -169,6 +173,8 @@ pub fn create(sample_rate: f64) -> (Engine, EngineHandle) {
         position: 0.0,
         frames: 0,
         scratch: [vec![0.0; MAX_BLOCK].into_boxed_slice(), vec![0.0; MAX_BLOCK].into_boxed_slice()],
+        capture: Vec::new(),
+        capturing: false,
     };
     let handle = EngineHandle { commands: command_tx, garbage: garbage_rx, shared, sample_rate };
     (engine, handle)
@@ -281,10 +287,20 @@ impl Engine {
     /// Render stereo output. Buffers may be any length; they are split internally.
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         self.handle_commands();
+        if self.capturing {
+            // Offline only, so allocating here is fine.
+            let inserts = self.song.as_ref().map_or(0, |s| s.inserts.len());
+            self.capture.resize_with(inserts, || [Vec::new(), Vec::new()]);
+            for buffers in &mut self.capture {
+                for buffer in buffers {
+                    buffer.resize(left.len(), 0.0);
+                }
+            }
+        }
         let mut start = 0;
         while start < left.len() {
             let end = (start + SUB_BLOCK).min(left.len());
-            self.render_block(&mut left[start..end], &mut right[start..end]);
+            self.render_block(&mut left[start..end], &mut right[start..end], start);
             start = end;
         }
         self.shared.position.store(self.position.to_bits(), Ordering::Relaxed);
@@ -292,7 +308,9 @@ impl Engine {
         self.shared.playing.store(self.playing, Ordering::Relaxed);
     }
 
-    fn render_block(&mut self, left: &mut [f32], right: &mut [f32]) {
+    /// Render one sub-block. `offset` is its position within the `render` call,
+    /// for the stem capture.
+    fn render_block(&mut self, left: &mut [f32], right: &mut [f32], offset: usize) {
         let frames = left.len();
         if self.playing {
             self.apply_automation();
@@ -345,6 +363,10 @@ impl Engine {
                 output.left[i] += l[i];
                 output.right[i] += r[i];
             }
+            if let Some([cl, cr]) = self.capture.get_mut(index) {
+                cl[offset..offset + frames].copy_from_slice(l);
+                cr[offset..offset + frames].copy_from_slice(r);
+            }
             self.shared.raise_peak(index, peak(l), peak(r));
         }
         let master = &mut song.inserts[0];
@@ -359,6 +381,10 @@ impl Engine {
         for i in 0..frames {
             left[i] = l[i] * gl;
             right[i] = r[i] * gr;
+        }
+        if let Some([cl, cr]) = self.capture.get_mut(0) {
+            cl[offset..offset + frames].copy_from_slice(left);
+            cr[offset..offset + frames].copy_from_slice(right);
         }
         self.shared.raise_peak(0, peak(left), peak(right));
         // Nodes not routed anywhere still drop their events each block.
@@ -495,12 +521,27 @@ impl Engine {
         }
     }
 
-    /// Set up for an offline render from the song start, bypassing the queue.
-    pub fn start_offline(&mut self) {
+    /// Keep each insert's post-fader output from every `render` call, to write
+    /// stems offline. Capturing allocates, so it is for offline renders only.
+    pub fn set_capture(&mut self, on: bool) {
+        self.capturing = on;
+        if !on {
+            self.capture = Vec::new();
+        }
+    }
+
+    /// Each insert's post-fader output from the last `render` call, indexed like
+    /// the song's inserts (0 is the master). Empty unless capturing.
+    pub fn captured(&self) -> &[[Vec<f32>; 2]] {
+        &self.capture
+    }
+
+    /// Set up for an offline render from `start` ticks, bypassing the queue.
+    pub fn start_offline(&mut self, start: Ticks) {
         self.handle_commands();
         self.release_all(0);
-        self.position = 0.0;
-        self.frames = 0;
+        self.position = start as f64;
+        self.frames = self.ticks_to_frames(self.position);
         self.playing = true;
         for node in &mut self.nodes {
             node.processor.reset();

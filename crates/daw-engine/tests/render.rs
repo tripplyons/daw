@@ -87,7 +87,7 @@ fn engine_with_probe(project: &Project, mode: PlayMode, dc: bool) -> (Engine, En
     let probe = Probe { dc, value: 0.0, log: log.clone() };
     assert!(handle.send(Command::AddNode(Node::new(key, Box::new(probe)))).is_ok());
     assert!(handle.send(Command::Song(Box::new(compile(project, mode, daw_engine::MAX_BLOCK)))).is_ok());
-    engine.start_offline();
+    engine.start_offline(0);
     (engine, handle, log)
 }
 
@@ -215,7 +215,7 @@ fn builtin_synth_makes_sound() {
     let synth = daw_engine::synth::Synth::new(Default::default(), SAMPLE_RATE);
     assert!(handle.send(Command::AddNode(Node::new(channel.0, Box::new(synth)))).is_ok());
     assert!(handle.send(Command::Song(Box::new(compile(&project, PlayMode::Pattern(pattern), 512)))).is_ok());
-    engine.start_offline();
+    engine.start_offline(0);
     let signal = render(&mut engine, FRAMES_PER_BEAT);
     let peak = signal.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     assert!(peak > 0.05, "peak {peak}");

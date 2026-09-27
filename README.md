@@ -64,8 +64,11 @@ daw new song.dawproj
 daw show song.dawproj                      # overview with ids
 daw edit song.dawproj note add 10 9 E4 1beat 2step
 daw edit song.dawproj clip add pattern:10 0 4bar
+daw batch song.dawproj edits.txt            # many edits with one load and save
 daw plugins                                # installed plugins from the scan cache
-daw export song.dawproj song.wav
+daw params song.dawproj 42 Cutoff=0.3      # set plugin parameters
+daw export song.dawproj song.wav --range 16bar..24bar --stems stems
+daw analyze song.wav stems/*.wav           # levels and octave bands
 ```
 
 `daw --help` lists every command.

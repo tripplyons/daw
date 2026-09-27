@@ -21,13 +21,35 @@ DAW=target/release/daw                        # or, in the repository, after `ca
 ## Workflow
 
 1. Read the project: `$DAW show song.dawproj`. It prints every channel, pattern, automation clip, playlist clip, and mixer insert with its id.
-2. Make changes with `$DAW edit song.dawproj <noun> <verb> ...`. Each call loads, changes, and saves the file. Commands that create something print only the new id, so capture it: `lead=$($DAW edit song.dawproj channel add lead --synth square)`.
+2. Make changes. For more than a few edits, write a batch script and run it with `$DAW batch song.dawproj` (see below): one load and save, and each plugin loads once. Single edits go through `$DAW edit song.dawproj <noun> <verb> ...`, which prints only the new id for commands that create something.
 3. Check the result with `show`, `show --pattern ID`, or `show --automation ID`.
-4. Render to listen or to check levels: `$DAW export song.dawproj out.wav`.
+4. Render and measure instead of guessing (see below). Render only the section you changed with `--range`, and get every mixer insert's stem from the same render with `--stems`.
 
-On error, a command prints `error: ...` to stderr, exits 1, and leaves the file unchanged.
+On error, a command prints `error: ...` to stderr, exits 1, and leaves the file unchanged. A batch reports the failing line and saves nothing.
 
-If the app has the same project open, saving in the app overwrites CLI edits. Ask the user to close it or reopen it after your edits.
+If the app has the same project open, saving in the app overwrites CLI edits, and the app may have saved changes since your last edit. Ask the user to close it or reopen it after your edits, and `show` the project again before relying on ids you read earlier.
+
+## Batch scripts
+
+Each line is what follows `daw edit FILE`, or `params INSTANCE NAME=VALUE ...`, or `presets INSTANCE --load NAME | --load-file PATH`. `NAME = COMMAND` keeps the command's output, such as a new id, and `$NAME` or `${NAME}` uses it on later lines. Words split like a shell's, so quote names with spaces. Lines starting with `#` are comments.
+
+```sh
+$DAW batch song.dawproj <<'EOF'
+p = pattern add --name 'lead line' --length 2bar
+lead = channel add lead --plugin 61756d75-56697461-54797465
+presets $lead --load-file "/Users/me/Music/Vital/Warm Keys.vital"
+params $lead Volume=0.6 'Macro 1'=0.3
+note add $p $lead C4 0 1beat
+clip add pattern:$p 0 0
+EOF
+```
+
+Variables hold only command outputs, not environment variables, so write paths out in full. For computed parts (melodies, loops over bars), generate the script with Python or a shell loop and pipe it in. A 700-line build runs in about 2 seconds, against about 45 seconds as separate `daw edit` calls.
+
+## Rendering and measuring
+
+- `$DAW export FILE OUT.wav --range 64bar..72bar --stems DIR` renders 8 bars in a few seconds and writes `DIR/NN name.wav` for the master and each insert that a channel feeds. A full song with plugins renders at about 2x real time, so save whole-song exports for the end. A range starts silent: notes that began before it are not heard.
+- `$DAW analyze OUT.wav DIR/*.wav` prints peak, RMS, stereo width, and octave-band levels (63 Hz to 16 kHz) per file; add `--bars 4 --bpm 175` for a row per 4 bars. Compare stems' RMS to balance a mix, and the master's bands to judge tone. A smooth mix falls about 3 to 5 dB per octave above 500 Hz; a flat top from 1 kHz up sounds harsh.
 
 ## Model
 
@@ -71,7 +93,9 @@ $DAW params FILE INSTANCE PARAM=VALUE...  # set parameters (normalized 0..1) and
 $DAW presets FILE INSTANCE [--find TEXT]  # list factory presets (Audio Units)
 $DAW presets FILE INSTANCE --load NAME_OR_INDEX
 $DAW presets FILE INSTANCE --load-file PRESET        # e.g. a Vital .vital file (Audio Units)
-$DAW export FILE OUT.wav
+$DAW export FILE OUT.wav [--range START..END] [--stems DIR]
+$DAW analyze WAV... [--bars N --bpm B]
+$DAW batch FILE [SCRIPT]                  # script from a file or standard input
 
 $DAW edit FILE set [--name N] [--bpm B] [--signature 3/4] [--grid 1/16] [--loop 0..8bar | --no-loop]
 $DAW edit FILE channel add NAME [--synth sine|saw|square | --sampler WAV [--root KEY] | --plugin NAME_OR_ID]
@@ -103,7 +127,7 @@ Behavior worth knowing:
 - `clip add` adds tracks up to the index you give. Its length defaults to the source's length.
 - `automation add` makes two points, at 0 and at the clip's length, both at the target's current value or `--value`. Each point sets the shape of the segment that follows it. One clip per target. `point add` past the clip's end grows the clip; `point add` and `point set` print the point's index after sorting by time.
 - `--plugin` and `effect add` match an exact plugin id or a case-insensitive name. When a plugin exists in several formats, pass the id from `$DAW plugins`. If the cache is empty, run `$DAW plugins --scan` (it can take a minute).
-- Instances are the plugin ids `show` prints next to plugin channels and insert effects; `channel add --plugin` and `effect add` print the channel or instance id.
+- INSTANCE in `params` and `presets` is a plugin instance id (as `show` prints next to plugin channels and insert effects, and `effect add` prints) or the id of a plugin channel.
 
 ## Plugin sounds and settings
 
@@ -111,28 +135,30 @@ Behavior worth knowing:
 - Values are normalized. Find the value for a setting with `--describe`, which prints what the plugin displays at evenly spaced values. For example, kHs Filter's cutoff shows 160 Hz at 0.3 and 640 Hz at 0.5, so it maps as 20 Hz × 2^(10 × value).
 - `presets --load` picks an Audio Unit factory preset. Some plugins list only placeholder names (Serum 2 shows "Prog 1" and so on).
 - `presets --load-file` replaces a JUCE-based Audio Unit's state with a file in the plugin's own format, which for Vital is a `.vital` preset. Use the AU version of the plugin; VST3 does not expose this state. Other JUCE plugins need their own state format, for example Dexed expects its XML with a DX7 cartridge inside.
-- Loading a plugin takes about a second, so set several parameters per call.
-- Measure renders instead of guessing: export, then compare levels and spectra per section, or mute channels (`channel set ID --mute true`) on a copy to render stems.
+- Loading a plugin takes about a second. Set several parameters per call, or use a batch, which loads each plugin once.
 
 ## Example: a 4-bar loop
 
 ```sh
 $DAW new beat.dawproj
 $DAW show beat.dawproj                  # synth channel 9, pattern 10 in a new project
-$DAW edit beat.dawproj set --bpm 124 --loop 0..4bar
-kick=$($DAW edit beat.dawproj channel add kick --synth sine)
-$DAW edit beat.dawproj note steps 10 $kick "x...x...x...x..." --key C2
-for n in "C4 0" "E4 1beat" "G4 2beat" "B4 3beat"; do
-  set -- $n
-  $DAW edit beat.dawproj note add 10 9 $1 $2 1beat --velocity 0.7
-done
-for bar in 0 1 2 3; do $DAW edit beat.dawproj clip add pattern:10 0 ${bar}bar; done
-sweep=$($DAW edit beat.dawproj automation add cutoff:9 --value 0.2)
+$DAW batch beat.dawproj <<'EOF'
+set --bpm 124 --loop 0..4bar
+kick = channel add kick --synth sine
+note steps 10 $kick x...x...x...x... --key C2
+note add 10 9 C4 0 1beat --velocity 0.7
+note add 10 9 E4 1beat 1beat --velocity 0.7
+note add 10 9 G4 2beat 1beat --velocity 0.7
+note add 10 9 B4 3beat 1beat --velocity 0.7
+clip add pattern:10 0 0 --length 4bar
+sweep = automation add cutoff:9 --value 0.2
 # A new clip has points 0 and 1 at its start and end. Point 0 owns the shape of the segment after it.
-$DAW edit beat.dawproj point set $sweep 0 --shape curve --tension 0.5
-$DAW edit beat.dawproj point set $sweep 1 --value 0.9
-$DAW edit beat.dawproj clip add automation:$sweep 1 0
-$DAW export beat.dawproj beat.wav
+point set $sweep 0 --shape curve --tension 0.5
+point set $sweep 1 --value 0.9
+clip add automation:$sweep 1 0
+EOF
+$DAW export beat.dawproj beat.wav --stems beat-stems
+$DAW analyze beat.wav beat-stems/*.wav
 ```
 
 Run `show` before using ids in a real project; the ids above only hold for a fresh `new`.

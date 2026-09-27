@@ -13,6 +13,8 @@ log.workspace = true
 env_logger.workspace = true
 rfd = "0.15"
 clap = { version = "4", features = ["derive"] }
+hound.workspace = true
+shell-words = "1"
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
@@ -23,5 +25,3 @@ objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 block2 = "0.6"
 
-[dev-dependencies]
-hound.workspace = true

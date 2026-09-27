@@ -1,8 +1,11 @@
 //! Command-line interface: open the app, or inspect, edit, and render
 //! project files without a window.
 
+mod analyze;
+mod batch;
 mod edit;
 mod parse;
+mod plugins;
 mod show;
 #[cfg(test)]
 mod tests;
@@ -17,6 +20,7 @@ use daw_plugins::PluginKind;
 
 pub use edit::Op;
 use parse::Time;
+use plugins::Plugins;
 
 #[derive(Parser)]
 #[command(name = "daw", about = "A tiling DAW. With no command, opens the app.", args_conflicts_with_subcommands = true)]
@@ -55,12 +59,13 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List a plugin instance's parameters, or set some and save them into the project.
+    /// List a plugin's parameters, or set some and save them into the project.
+    /// INSTANCE is a plugin instance id or the id of a plugin channel.
     Params {
         file: PathBuf,
         instance: u64,
         /// PARAM=VALUE, where PARAM is an id or a case-insensitive name and VALUE is normalized 0..1.
-        #[arg(value_parser = parse_assignment)]
+        #[arg(value_parser = plugins::parse_assignment)]
         set: Vec<(String, f32)>,
         /// List only parameters whose name contains this text, ignoring case.
         #[arg(long, conflicts_with = "set")]
@@ -70,7 +75,8 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["set", "find"])]
         describe: Option<String>,
     },
-    /// List a plugin instance's factory presets, or load one into the project (Audio Units).
+    /// List a plugin's factory presets, or load one into the project (Audio Units).
+    /// INSTANCE is a plugin instance id or the id of a plugin channel.
     Presets {
         file: PathBuf,
         instance: u64,
@@ -86,12 +92,51 @@ pub enum Command {
         load_file: Option<PathBuf>,
     },
     /// Render the song to a 24-bit WAV file, loading its plugins.
-    Export { file: PathBuf, out: PathBuf },
+    Export {
+        file: PathBuf,
+        out: PathBuf,
+        /// Render only this span, e.g. 64bar..72bar, with no tail. Notes that
+        /// start before it are not heard.
+        #[arg(long, value_parser = parse::range)]
+        range: Option<(Time, Time)>,
+        /// Also write each mixer insert's output to its own WAV in this folder,
+        /// from the same render.
+        #[arg(long)]
+        stems: Option<PathBuf>,
+    },
+    /// Print peak, RMS, stereo width, and octave-band levels of WAV files, such
+    /// as an export and its stems.
+    Analyze {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Also print a row per section of this many bars; needs --bpm.
+        #[arg(long, requires = "bpm")]
+        bars: Option<f64>,
+        #[arg(long)]
+        bpm: Option<f64>,
+    },
     /// Change a project file in place. Commands that create something print its id.
     Edit {
         file: PathBuf,
         #[command(subcommand)]
         op: Op,
+    },
+    /// Apply a script of edits with one load and save; the file changes only
+    /// if every line succeeds.
+    ///
+    /// Each line is what follows `daw edit FILE`, or `params INSTANCE NAME=VALUE...`,
+    /// or `presets INSTANCE --load NAME | --load-file PATH`. Plugins load once
+    /// per batch. `NAME = COMMAND` keeps the command's output (such as a new id)
+    /// and `$NAME` uses it on later lines. Words are split like a shell's, and
+    /// `#` starts a comment line. Example:
+    ///
+    ///   lead = channel add lead --plugin Vital
+    ///   presets $lead --load-file "Pads/Warm.vital"
+    ///   note add 10 $lead C4 0 1beat
+    Batch {
+        file: PathBuf,
+        /// Script file; reads standard input when omitted.
+        script: Option<PathBuf>,
     },
 }
 
@@ -136,34 +181,65 @@ fn execute(command: Command) -> Result<String, String> {
             };
             show::plugins(&catalog, json)
         }
-        Command::Params { file, instance, describe: Some(param), .. } => describe_param(&load(&file)?, instance, &param),
-        Command::Params { file, instance, set, find, .. } if set.is_empty() => params(&load(&file)?, instance, find.as_deref()),
+        Command::Params { file, instance, describe: Some(param), .. } => {
+            Plugins::default().describe(&load(&file)?, instance, &param)
+        }
+        Command::Params { file, instance, set, find, .. } if set.is_empty() => {
+            Plugins::default().list(&load(&file)?, instance, find.as_deref())
+        }
         Command::Params { file, instance, set, .. } => {
             let mut project = load(&file)?;
-            let output = set_params(&mut project, instance, &set)?;
+            let mut plugins = Plugins::default();
+            let output = plugins.set(&project, instance, &set)?;
+            plugins.store(&mut project)?;
             save(&file, &project)?;
             Ok(output)
         }
-        Command::Presets { file, instance, find, load: None, load_file: None } => presets(&load(&file)?, instance, find.as_deref()),
+        Command::Presets { file, instance, find, load: None, load_file: None } => {
+            Plugins::default().presets(&load(&file)?, instance, find.as_deref())
+        }
         Command::Presets { file, instance, load: preset, load_file, .. } => {
             let mut project = load(&file)?;
+            let mut plugins = Plugins::default();
             let output = match (preset, load_file) {
-                (Some(preset), _) => load_preset(&mut project, instance, &preset)?,
-                (None, Some(path)) => load_state_file(&mut project, instance, &path)?,
+                (Some(preset), _) => plugins.load_preset(&project, instance, &preset)?,
+                (None, Some(path)) => plugins.load_file(&project, instance, &path)?,
                 (None, None) => unreachable!("handled above"),
             };
+            plugins.store(&mut project)?;
             save(&file, &project)?;
             Ok(output)
         }
-        Command::Export { file, out } => {
+        Command::Export { file, out, range, stems } => {
             // Load here first: the app reports a bad file only in its status bar.
-            load(&file)?;
-            crate::app::export_cli(&file, &out)?;
+            let project = load(&file)?;
+            let range = match range {
+                Some((start, end)) if ticks(&project, end) <= ticks(&project, start) => {
+                    return Err("the range must end after it starts".into());
+                }
+                Some((start, end)) => Some((ticks(&project, start), ticks(&project, end))),
+                None => None,
+            };
+            crate::app::export_cli(&file, &out, range, stems.as_deref())?;
             Ok(format!("exported {}", out.display()))
+        }
+        Command::Analyze { files, bars, bpm } => {
+            let section = bars.zip(bpm).map(|(bars, bpm)| bars * 240.0 / bpm);
+            analyze::analyze(&files, section)
         }
         Command::Edit { file, op } => {
             let mut project = load(&file)?;
             let output = edit::apply(&mut project, op, || scan::cached(&scan::cache_path()))?;
+            save(&file, &project)?;
+            Ok(output)
+        }
+        Command::Batch { file, script } => {
+            let script = match script {
+                Some(path) => std::fs::read_to_string(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?,
+                None => std::io::read_to_string(std::io::stdin()).map_err(|e| format!("could not read standard input: {e}"))?,
+            };
+            let mut project = load(&file)?;
+            let output = batch::run(&mut project, &script)?;
             save(&file, &project)?;
             Ok(output)
         }
@@ -183,157 +259,6 @@ fn save(path: &Path, project: &Project) -> Result<(), String> {
     std::fs::write(&temporary, text)
         .and_then(|_| std::fs::rename(&temporary, path))
         .map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-fn params(project: &Project, instance: u64, find: Option<&str>) -> Result<String, String> {
-    let (_, loaded) = load_plugin(project, instance)?;
-    let controller = loaded.controller;
-    let lines: Vec<String> = controller
-        .params()
-        .iter()
-        .filter(|p| find.is_none_or(|f| contains_ignore_case(&p.name, f)))
-        .map(|p| param_line(&*controller, p))
-        .collect();
-    Ok(lines.join("\n"))
-}
-
-fn describe_param(project: &Project, instance: u64, query: &str) -> Result<String, String> {
-    let (_, loaded) = load_plugin(project, instance)?;
-    let params = loaded.controller.params();
-    let param = find_param(&params, query)?;
-    // Discrete parameters show each step; continuous ones every 0.05.
-    let count = if param.steps > 0 && param.steps <= 64 { param.steps } else { 20 };
-    let mut lines = vec![format!("{}  {:?}", param.id, param.name)];
-    for i in 0..=count {
-        let value = i as f32 / count as f32;
-        lines.push(format!("  {value:.4}  {}", loaded.controller.param_text(param.id, value)));
-    }
-    Ok(lines.join("\n"))
-}
-
-fn presets(project: &Project, instance: u64, find: Option<&str>) -> Result<String, String> {
-    let (plugin, loaded) = load_plugin(project, instance)?;
-    let names = loaded.controller.presets();
-    if names.is_empty() {
-        return Err(format!("{} has no factory presets the host can load", plugin.name));
-    }
-    let lines: Vec<String> = names
-        .iter()
-        .enumerate()
-        .filter(|(_, name)| find.is_none_or(|f| contains_ignore_case(name, f)))
-        .map(|(index, name)| format!("{index}  {name:?}"))
-        .collect();
-    Ok(lines.join("\n"))
-}
-
-fn load_preset(project: &mut Project, instance: u64, preset: &str) -> Result<String, String> {
-    let (plugin, mut loaded) = load_plugin(project, instance)?;
-    let names = loaded.controller.presets();
-    let index = match preset.parse::<usize>() {
-        Ok(index) => index,
-        Err(_) => {
-            let matches: Vec<usize> = (0..names.len()).filter(|&i| names[i].eq_ignore_ascii_case(preset)).collect();
-            match matches.as_slice() {
-                [index] => *index,
-                [] => return Err(format!("{} has no preset named {preset:?}; list them with `daw presets`", plugin.name)),
-                _ => return Err(format!("several presets are named {preset:?}; use an index")),
-            }
-        }
-    };
-    loaded.controller.load_preset(index).map_err(|e| e.to_string())?;
-    let state = loaded.controller.save_state().map_err(|e| format!("could not save {} state: {e}", plugin.name))?;
-    if let Some(instance) = project.plugin_mut(daw_model::InstanceId(instance)) {
-        instance.state = state;
-    }
-    Ok(format!("loaded preset {index} {:?}", names.get(index).map_or("", String::as_str)))
-}
-
-fn load_state_file(project: &mut Project, instance: u64, path: &Path) -> Result<String, String> {
-    let juce = std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    let (plugin, loaded) = load_plugin(project, instance)?;
-    let current = loaded.controller.save_state().map_err(|e| format!("could not save {} state: {e}", plugin.name))?;
-    drop(loaded);
-    let state = daw_plugins::replace_juce_state(&plugin, &current, &juce).map_err(|e| e.to_string())?;
-    // Load the new state and save it again, so the plugin checks it and the
-    // project stores the plugin's own encoding.
-    let loaded = daw_plugins::load(&plugin, &state, 48_000.0, daw_engine::MAX_BLOCK)
-        .map_err(|e| format!("{} rejected {}: {e}", plugin.name, path.display()))?;
-    let state = loaded.controller.save_state().map_err(|e| format!("could not save {} state: {e}", plugin.name))?;
-    if let Some(instance) = project.plugin_mut(daw_model::InstanceId(instance)) {
-        instance.state = state;
-    }
-    Ok(format!("loaded {}", path.display()))
-}
-
-fn contains_ignore_case(text: &str, part: &str) -> bool {
-    text.to_lowercase().contains(&part.to_lowercase())
-}
-
-/// Set parameters and store the plugin's new state in the project. Values go
-/// through the processor as well as the controller, because VST3 saves the
-/// processor's copy.
-fn set_params(project: &mut Project, instance: u64, set: &[(String, f32)]) -> Result<String, String> {
-    let (plugin, mut loaded) = load_plugin(project, instance)?;
-    let params = loaded.controller.params();
-    let mut events = Vec::new();
-    for (name, value) in set {
-        let param = find_param(&params, name)?;
-        events.push(daw_engine::Event { offset: 0, kind: daw_engine::EventKind::Param { id: param.id, value: *value } });
-        loaded.controller.set_param(param.id, *value);
-    }
-    let transport = daw_engine::TransportInfo {
-        sample_rate: 48_000.0,
-        bpm: project.bpm,
-        beats: 0.0,
-        frames: 0,
-        playing: false,
-        numerator: project.signature.numerator,
-        denominator: project.signature.denominator,
-        bar_start: 0.0,
-    };
-    let (mut left, mut right) = (vec![0.0; 64], vec![0.0; 64]);
-    loaded.processor.process(&transport, &events, &mut left, &mut right);
-    let state = loaded.controller.save_state().map_err(|e| format!("could not save {} state: {e}", plugin.name))?;
-    if let Some(instance) = project.plugin_mut(daw_model::InstanceId(instance)) {
-        instance.state = state;
-    }
-    let lines: Vec<String> = set
-        .iter()
-        .filter_map(|(name, _)| find_param(&params, name).ok())
-        .map(|p| param_line(&*loaded.controller, p))
-        .collect();
-    Ok(lines.join("\n"))
-}
-
-fn load_plugin(project: &Project, instance: u64) -> Result<(daw_model::PluginRef, daw_plugins::Loaded), String> {
-    let instance = project.plugin(daw_model::InstanceId(instance)).ok_or(format!("no plugin instance {instance}"))?;
-    let loaded = daw_plugins::load(&instance.plugin, &instance.state, 48_000.0, daw_engine::MAX_BLOCK)
-        .map_err(|e| format!("could not load {}: {e}", instance.plugin.name))?;
-    Ok((instance.plugin.clone(), loaded))
-}
-
-fn param_line(controller: &dyn daw_plugins::Controller, p: &daw_plugins::ParamInfo) -> String {
-    let value = controller.param_value(p.id);
-    let steps = if p.steps > 0 { format!("  steps {}", p.steps) } else { String::new() };
-    let automatable = if p.automatable { "" } else { "  not automatable" };
-    format!("{}  {:?}  value {value:.3} ({}){steps}{automatable}", p.id, p.name, controller.param_text(p.id, value))
-}
-
-fn find_param<'a>(params: &'a [daw_plugins::ParamInfo], query: &str) -> Result<&'a daw_plugins::ParamInfo, String> {
-    if let Some(param) = query.parse::<u32>().ok().and_then(|id| params.iter().find(|p| p.id == id)) {
-        return Ok(param);
-    }
-    let matches: Vec<_> = params.iter().filter(|p| p.name.eq_ignore_ascii_case(query)).collect();
-    match matches.as_slice() {
-        [param] => Ok(param),
-        [] => Err(format!("no parameter {query:?}; list them with `daw params FILE INSTANCE`")),
-        _ => Err(format!("several parameters are named {query:?}; use an id")),
-    }
-}
-
-fn parse_assignment(text: &str) -> Result<(String, f32), String> {
-    let (name, value) = text.rsplit_once('=').ok_or(format!("expected PARAM=VALUE, got {text:?}"))?;
-    Ok((name.to_string(), parse::unit(value)?))
 }
 
 /// Find an installed plugin by exact id or case-insensitive name.
