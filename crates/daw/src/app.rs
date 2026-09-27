@@ -207,7 +207,7 @@ impl App {
 
     pub fn title(&self) -> String {
         let name = self.path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned());
-        format!("{}{} - daw", name.unwrap_or_else(|| self.project.name.clone()), if self.dirty { " *" } else { "" })
+        format!("{}{} - DAW", name.unwrap_or_else(|| self.project.name.clone()), if self.dirty { " *" } else { "" })
     }
 
     pub fn layout(&self) -> &Layout {
