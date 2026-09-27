@@ -79,11 +79,29 @@ pub trait Controller {
     /// Parameter edits from the plugin editor since the last call. Call often
     /// from the UI thread: on Linux this also runs the editor's events.
     fn take_touches(&mut self) -> Vec<Touch>;
+    /// Names of the plugin's factory presets, in the order `load_preset` takes.
+    fn presets(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn load_preset(&mut self, _index: usize) -> Result<(), PluginError> {
+        Err(PluginError::Load("this plugin has no factory presets the host can load".into()))
+    }
 }
 
 pub struct Loaded {
     pub processor: Box<dyn Processor>,
     pub controller: Box<dyn Controller>,
+}
+
+/// Replace the plugin's own state inside a saved `state` with `juce`, the
+/// format a JUCE plugin writes itself, such as a Vital preset file. Only the
+/// Audio Unit wrapper stores that state where the host can reach it.
+pub fn replace_juce_state(plugin: &PluginRef, state: &[u8], juce: &[u8]) -> Result<Vec<u8>, PluginError> {
+    match plugin.format {
+        #[cfg(target_os = "macos")]
+        PluginFormat::AudioUnit => au::replace_juce_state(state, juce),
+        _ => Err(PluginError::Load(format!("load state files into the Audio Unit version of {}", plugin.name))),
+    }
 }
 
 /// Instantiate a plugin, restoring `state` when non-empty. Must run on the main thread.

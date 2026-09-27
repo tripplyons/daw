@@ -65,7 +65,12 @@ Automation values are normalized from 0 to 1:
 $DAW new FILE [--force]
 $DAW show FILE [--pattern ID | --automation ID] [--json]
 $DAW plugins [--scan] [--json]            # installed plugins from the scan cache
-$DAW params FILE INSTANCE                 # load a plugin and list its parameters
+$DAW params FILE INSTANCE [--find TEXT]   # load a plugin and list its parameters
+$DAW params FILE INSTANCE --describe PARAM          # what the plugin shows across PARAM's range
+$DAW params FILE INSTANCE PARAM=VALUE...  # set parameters (normalized 0..1) and save them
+$DAW presets FILE INSTANCE [--find TEXT]  # list factory presets (Audio Units)
+$DAW presets FILE INSTANCE --load NAME_OR_INDEX
+$DAW presets FILE INSTANCE --load-file PRESET        # e.g. a Vital .vital file (Audio Units)
 $DAW export FILE OUT.wav
 
 $DAW edit FILE set [--name N] [--bpm B] [--signature 3/4] [--grid 1/16] [--loop 0..8bar | --no-loop]
@@ -98,7 +103,16 @@ Behavior worth knowing:
 - `clip add` adds tracks up to the index you give. Its length defaults to the source's length.
 - `automation add` makes two points, at 0 and at the clip's length, both at the target's current value or `--value`. Each point sets the shape of the segment that follows it. One clip per target. `point add` past the clip's end grows the clip; `point add` and `point set` print the point's index after sorting by time.
 - `--plugin` and `effect add` match an exact plugin id or a case-insensitive name. When a plugin exists in several formats, pass the id from `$DAW plugins`. If the cache is empty, run `$DAW plugins --scan` (it can take a minute).
-- Plugin channels and effects have no settings in the CLI beyond automation; their sound comes from saved plugin state, which the user edits in the app.
+- Instances are the plugin ids `show` prints next to plugin channels and insert effects; `channel add --plugin` and `effect add` print the channel or instance id.
+
+## Plugin sounds and settings
+
+- `params FILE INSTANCE NAME=VALUE ...` sets any number of parameters in one call and saves them into the plugin's state. PARAM is an id or a case-insensitive name; quote names with spaces: `"Sync Mode"=1`.
+- Values are normalized. Find the value for a setting with `--describe`, which prints what the plugin displays at evenly spaced values. For example, kHs Filter's cutoff shows 160 Hz at 0.3 and 640 Hz at 0.5, so it maps as 20 Hz × 2^(10 × value).
+- `presets --load` picks an Audio Unit factory preset. Some plugins list only placeholder names (Serum 2 shows "Prog 1" and so on).
+- `presets --load-file` replaces a JUCE-based Audio Unit's state with a file in the plugin's own format, which for Vital is a `.vital` preset. Use the AU version of the plugin; VST3 does not expose this state. Other JUCE plugins need their own state format, for example Dexed expects its XML with a DX7 cartridge inside.
+- Loading a plugin takes about a second, so set several parameters per call.
+- Measure renders instead of guessing: export, then compare levels and spectra per section, or mute channels (`channel set ID --mute true`) on a copy to render stems.
 
 ## Example: a 4-bar loop
 

@@ -11,7 +11,7 @@ use block2::RcBlock;
 use daw_engine::{Event, EventKind, Processor, TransportInfo};
 use daw_model::{PluginFormat, PluginRef};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Bool};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{AnyThread, msg_send};
 use objc2_app_kit::NSViewController;
 use objc2_audio_toolbox::{
@@ -22,7 +22,7 @@ use objc2_audio_toolbox::{
 use objc2_avf_audio::{AVAudioFormat, AVAudioUnitComponentManager};
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioTimeStamp, AudioTimeStampFlags};
 use objc2_foundation::{
-    NSData, NSDictionary, NSError, NSPropertyListFormat, NSPropertyListSerialization, NSString,
+    NSData, NSDictionary, NSError, NSMutableDictionary, NSPropertyListFormat, NSPropertyListSerialization, NSString,
 };
 
 use crate::window::EditorWindow;
@@ -381,6 +381,35 @@ fn install_host_blocks(unit: &AUAudioUnit, transport: &Arc<TransportCell>) {
     }
 }
 
+/// Replace the `jucePluginState` entry of a saved JUCE Audio Unit state. That
+/// entry holds the plugin's own state format, e.g. a Vital preset's JSON.
+pub fn replace_juce_state(state: &[u8], juce: &[u8]) -> Result<Vec<u8>, PluginError> {
+    let bad = |what: &str| PluginError::Load(format!("saved AU state {what}"));
+    let plist = unsafe {
+        NSPropertyListSerialization::propertyListWithData_options_format_error(
+            &NSData::with_bytes(state),
+            objc2_foundation::NSPropertyListMutabilityOptions::MutableContainers,
+            std::ptr::null_mut(),
+        )
+    }
+    .map_err(|e| bad(&format!("could not be decoded: {}", e.localizedDescription())))?;
+    let dictionary = plist.downcast::<NSMutableDictionary>().map_err(|_| bad("is not a dictionary"))?;
+    let key = NSString::from_str("jucePluginState");
+    if dictionary.objectForKey(&key).is_none() {
+        return Err(PluginError::Load("this plugin does not store JUCE plugin state".into()));
+    }
+    unsafe { dictionary.setObject_forKey(&NSData::with_bytes(juce), ProtocolObject::from_ref(&*key)) };
+    let data = unsafe {
+        NSPropertyListSerialization::dataWithPropertyList_format_options_error(
+            &dictionary,
+            NSPropertyListFormat::BinaryFormat_v1_0,
+            0,
+        )
+    }
+    .map_err(|e| bad(&format!("could not be encoded: {}", e.localizedDescription())))?;
+    Ok(data.to_vec())
+}
+
 fn restore_state(unit: &AUAudioUnit, state: &[u8]) {
     let data = NSData::with_bytes(state);
     let plist = unsafe {
@@ -531,6 +560,20 @@ impl AuController {
 }
 
 impl Controller for AuController {
+    fn presets(&self) -> Vec<String> {
+        let Some(presets) = (unsafe { self.unit.factoryPresets() }) else { return Vec::new() };
+        presets.iter().map(|p| unsafe { p.name() }.to_string()).collect()
+    }
+
+    fn load_preset(&mut self, index: usize) -> Result<(), PluginError> {
+        let presets = unsafe { self.unit.factoryPresets() }.unwrap_or_default();
+        if index >= presets.len() {
+            return Err(PluginError::Load(format!("no preset {index}; there are {}", presets.len())));
+        }
+        unsafe { self.unit.setCurrentPreset(Some(&presets.objectAtIndex(index))) };
+        Ok(())
+    }
+
     fn params(&self) -> Vec<ParamInfo> {
         parameters(&self.unit)
             .iter()

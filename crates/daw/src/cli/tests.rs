@@ -166,3 +166,18 @@ fn plugins_resolve_by_id_or_unambiguous_name() {
     assert!(project.automation_for(Target::Plugin { instance: daw_model::InstanceId(effect), param: 3 }).is_none());
     assert!(edit(&mut project, "channel add x --plugin vital").unwrap_err().contains("plugin cache is empty"));
 }
+
+#[test]
+fn param_assignments_resolve_by_id_or_name() {
+    use daw_plugins::ParamInfo;
+    let param = |id, name: &str| ParamInfo { id, name: name.into(), units: String::new(), steps: 0, default: 0.0, automatable: true };
+    let params = vec![param(1, "Mix"), param(2, "Cutoff"), param(3, "Gain"), param(4, "Gain")];
+    assert_eq!(super::parse_assignment("Sync Mode=1"), Ok(("Sync Mode".into(), 1.0)));
+    assert_eq!(super::parse_assignment("a=b=0.5"), Ok(("a=b".into(), 0.5)));
+    assert!(super::parse_assignment("Mix").is_err());
+    assert!(super::parse_assignment("Mix=1.5").is_err());
+    assert_eq!(super::find_param(&params, "mix").unwrap().id, 1);
+    assert_eq!(super::find_param(&params, "2").unwrap().name, "Cutoff");
+    assert!(super::find_param(&params, "Gain").unwrap_err().contains("use an id"));
+    assert!(super::find_param(&params, "Drive").is_err());
+}
