@@ -42,6 +42,8 @@ pub enum Message {
     SetPanel(TileId, Panel),
     Action(Action),
     SetBpm(String),
+    /// Enter in the bpm field, or a click elsewhere: drop unfinished text.
+    BpmDone,
     SelectPattern(PatternId),
     NewPattern,
     /// Length of the selected pattern, in bars.
@@ -123,6 +125,9 @@ pub struct App {
     /// Problem reading the config file, shown in settings.
     pub config_error: Option<String>,
     screenshot: Option<PathBuf>,
+    /// Text in the bpm field while it is being typed; valid values apply as
+    /// they are typed.
+    bpm_text: Option<String>,
     /// Cmd+Q has been pointed at the window's close request.
     quit_routed: bool,
     /// A save prompt for closing is showing.
@@ -173,6 +178,7 @@ impl App {
             config_path: config::path(),
             config_error: None,
             screenshot: std::env::var_os("DAW_SCREENSHOT").map(PathBuf::from),
+            bpm_text: None,
             quit_routed: false,
             closing: false,
         };
@@ -465,6 +471,9 @@ impl App {
                 }
             }
             Message::MousePressed => {
+                if self.bpm_text.is_some() {
+                    let _ = self.update(Message::BpmDone);
+                }
                 let point = self.cursor;
                 let area = self.tile_area();
                 let hit = self.layout().rects(area).into_iter().find(|(_, r)| {
@@ -489,11 +498,17 @@ impl App {
             Message::SetBpm(value) => {
                 if let Ok(bpm) = value.trim().parse::<f64>()
                     && (20.0..=400.0).contains(&bpm)
+                    && bpm != self.project.bpm
                 {
-                    self.checkpoint();
+                    self.begin_edit();
                     self.project.bpm = bpm;
                     self.edited();
                 }
+                self.bpm_text = Some(value);
+            }
+            Message::BpmDone => {
+                self.bpm_text = None;
+                self.editing = false;
             }
             Message::SelectPattern(id) => {
                 self.selected_pattern = id;
@@ -1095,8 +1110,8 @@ impl App {
                 .padding([3, 8]),
             button(small(mode_label)).on_press(Message::Action(Action::ToggleMode)).style(theme::control).padding([3, 8]),
             text(position).size(theme::TEXT_SIZE).font(iced::Font::MONOSPACE).width(70),
-            text_input("bpm", &format!("{}", self.project.bpm))
-                .on_submit_maybe(None)
+            text_input("bpm", &self.bpm_text.clone().unwrap_or_else(|| format!("{}", self.project.bpm)))
+                .on_submit(Message::BpmDone)
                 .on_input(Message::SetBpm)
                 .size(theme::SMALL)
                 .width(48)

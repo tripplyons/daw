@@ -245,6 +245,22 @@ fn each_pattern_sets_its_own_length_and_can_shrink() {
 }
 
 #[test]
+fn bpm_field_keeps_partial_text_and_applies_valid_tempos() {
+    let mut app = app();
+    let before = app.project.bpm;
+    for text in ["", "9", "95", "95."] {
+        let _ = app.update(Message::SetBpm(text.into()));
+        assert_eq!(app.bpm_text.as_deref(), Some(text));
+    }
+    assert_eq!(app.project.bpm, 95.0);
+    let _ = app.update(Message::SetBpm("95.5".into()));
+    let _ = app.update(Message::BpmDone);
+    assert_eq!((app.project.bpm, app.bpm_text.clone()), (95.5, None));
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.bpm, before);
+}
+
+#[test]
 fn automation_clips_size_like_patterns() {
     let mut app = app();
     let bar = app.project.signature.ticks_per_bar();
