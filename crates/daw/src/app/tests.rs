@@ -453,7 +453,7 @@ fn delete_key_removes_the_selection_in_each_panel() {
 }
 
 #[test]
-fn play_starts_from_pattern_start_or_song_marker_and_pause_returns_there() {
+fn play_starts_from_pattern_or_song_marker_and_pause_returns_there() {
     let mut app = app();
     assert!(matches!(app.mode, PlayMode::Pattern(_)));
     let _ = app.update(Message::Action(Action::PlayPause));
@@ -486,6 +486,28 @@ fn play_starts_from_pattern_start_or_song_marker_and_pause_returns_there() {
     // Escape stops and moves the marker back to the start.
     let _ = app.update(Message::Action(Action::Stop));
     assert_eq!((app.song_start, app.position), (0.0, 0.0));
+
+    // The piano roll ruler does the same for the pattern and switches back.
+    let _ = app.update(roll::Message::Seek(1000.0).into());
+    assert_eq!(app.mode, PlayMode::Pattern(app.selected_pattern));
+    assert_eq!((app.pattern_start, app.position), (960.0, 960.0));
+    let _ = app.update(Message::Action(Action::PlayPause));
+    app.position = 1500.0;
+    let _ = app.update(Message::Action(Action::PlayPause));
+    assert_eq!((app.pattern_start, app.position), (960.0, 960.0));
+
+    // A marker past a shortened pattern's end plays from the top.
+    let _ = app.update(roll::Message::Seek(bar_ticks(&app) * 1.5).into());
+    let _ = app.update(Message::PatternBars(1));
+    let _ = app.update(Message::Action(Action::PlayPause));
+    assert_eq!(app.position, 0.0);
+    let _ = app.update(Message::Action(Action::PlayPause));
+    let _ = app.update(Message::Action(Action::Stop));
+    assert_eq!(app.pattern_start, 0.0);
+}
+
+fn bar_ticks(app: &App) -> f64 {
+    app.project.signature.ticks_per_bar() as f64
 }
 
 #[test]

@@ -671,17 +671,7 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
         frame.fill_rectangle(Point::ORIGIN, Size::new(HEADER_WIDTH, RULER_HEIGHT), theme::HEADER);
         if app.mode == PlayMode::Song {
             // The start marker stays put; the playhead only moves away from it while playing.
-            let x = HEADER_WIDTH + playlist.time.x(app.song_start).round();
-            if x >= HEADER_WIDTH {
-                let marker = Path::new(|b| {
-                    b.move_to(Point::new(x - 5.0, 0.0));
-                    b.line_to(Point::new(x + 6.0, 0.0));
-                    b.line_to(Point::new(x + 0.5, 7.0));
-                    b.close();
-                });
-                frame.fill(&marker, theme::TEXT);
-                frame.fill_rectangle(Point::new(x, RULER_HEIGHT), Size::new(1.0, size.height), theme::TEXT_FAINT);
-            }
+            timeline::draw_start_marker(&mut frame, playlist.time, HEADER_WIDTH, size.height, app.song_start);
             if app.playing {
                 timeline::draw_playhead(&mut frame, playlist.time, HEADER_WIDTH, size.height, app.position);
             }

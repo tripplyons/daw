@@ -2,7 +2,8 @@
 //!
 //! Left click places a note or drags notes (the right edge resizes), right
 //! click deletes, right or Ctrl drag selects a box, Cmd bypasses snapping.
-//! Clicking or dragging in the ruler sets where the pattern ends.
+//! Clicking in the ruler sets where pattern playback starts; dragging the
+//! handle at the pattern end changes the length.
 
 use daw_engine::song::{PlayMode, channel_node};
 use daw_model::time::{Grid, Ticks};
@@ -63,8 +64,10 @@ pub enum Message {
     Velocity(usize, f32),
     Grid(Grid),
     Channel(ChannelId),
-    /// Drag in the ruler: move the pattern end to this tick, rounded to a bar.
+    /// Drag of the end handle: move the pattern end to this tick, rounded to a bar.
     PatternEnd(f64),
+    /// Click in the ruler: start pattern playback here.
+    Seek(f64),
 }
 
 impl From<Message> for AppMessage {
@@ -130,6 +133,17 @@ pub fn update(app: &mut App, message: Message) {
                 app.project.set_pattern_length(app.selected_pattern, length);
                 app.edited();
             }
+        }
+        Message::Seek(tick) => {
+            if app.mode != PlayMode::Pattern(app.selected_pattern) {
+                app.mode = PlayMode::Pattern(app.selected_pattern);
+                app.refresh();
+            }
+            // Set the start marker; while playing, also jump there.
+            let (grid, signature) = (app.project.grid, app.project.signature);
+            app.pattern_start = grid.snap_floor(tick.max(0.0) as Ticks, signature) as f64;
+            app.session.seek(app.pattern_start);
+            app.position = app.pattern_start;
         }
         Message::Add { start, key } => {
             if app.selected_channel.is_none() {
@@ -375,6 +389,8 @@ enum Drag {
     Box { from: Point, to: Point, additive: bool },
     /// Moving the pattern end in the ruler.
     End,
+    /// Moving the start marker in the ruler.
+    Seek,
 }
 
 #[derive(Debug, Default)]
@@ -416,6 +432,12 @@ impl Roll<'_> {
         Rectangle { x, y: self.key_y(i32::from(note.key)), width, height: self.state().key_height }
     }
 
+    /// Whether `x` is on the pattern end handle in the ruler.
+    fn near_end(&self, x: f32) -> bool {
+        let Some(pattern) = self.app.project.pattern(self.app.selected_pattern) else { return false };
+        (KEYS_WIDTH + self.state().time.x(pattern.length as f64) - x).abs() <= EDGE + 1.0
+    }
+
     fn hit(&self, p: Point) -> Option<(usize, bool)> {
         notes(self.app).iter().enumerate().rev().find_map(|(i, n)| {
             let r = self.note_rect(n);
@@ -442,8 +464,12 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                     if p.x < KEYS_WIDTH || *button != Button::Left {
                         return None;
                     }
-                    state.drag = Some(Drag::End);
-                    return publish(Message::PatternEnd(self.tick_at(p.x)));
+                    if self.near_end(p.x) {
+                        state.drag = Some(Drag::End);
+                        return publish(Message::PatternEnd(self.tick_at(p.x)));
+                    }
+                    state.drag = Some(Drag::Seek);
+                    return publish(Message::Seek(self.tick_at(p.x)));
                 }
                 let key = self.key_at(p.y).clamp(0, 127);
                 if p.x < KEYS_WIDTH {
@@ -488,11 +514,13 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                         Some(canvas::Action::request_redraw())
                     }
                     Drag::End => publish(Message::PatternEnd(self.tick_at(p.x))),
+                    Drag::Seek => publish(Message::Seek(self.tick_at(p.x))),
                 }
             }
             canvas::Event::Mouse(MouseEvent::ButtonReleased(_)) => match state.drag.take()? {
                 Drag::Notes { .. } => publish(Message::End),
                 Drag::End => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
+                Drag::Seek => None,
                 Drag::Box { from, to, additive } => publish(Message::BoxSelect {
                     from: (self.tick_at(from.x), self.key_at(from.y)),
                     to: (self.tick_at(to.x), self.key_at(to.y)),
@@ -606,8 +634,12 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             }
         }
         frame.fill_rectangle(Point::ORIGIN, Size::new(KEYS_WIDTH, RULER_HEIGHT), theme::HEADER);
-        if matches!(app.mode, PlayMode::Pattern(p) if p == app.selected_pattern) && app.playing {
-            timeline::draw_playhead(&mut frame, roll.time, KEYS_WIDTH, size.height, app.position);
+        if app.mode == PlayMode::Pattern(app.selected_pattern) {
+            // The start marker stays put; the playhead only moves away from it while playing.
+            timeline::draw_start_marker(&mut frame, roll.time, KEYS_WIDTH, size.height, app.pattern_start);
+            if app.playing {
+                timeline::draw_playhead(&mut frame, roll.time, KEYS_WIDTH, size.height, app.position);
+            }
         }
         vec![frame.into_geometry()]
     }
@@ -617,7 +649,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
         match (state.drag, self.hit(p)) {
             (Some(Drag::Notes { .. }), _) => mouse::Interaction::Grabbing,
             (Some(Drag::End), _) => mouse::Interaction::ResizingHorizontally,
-            _ if p.x >= KEYS_WIDTH && p.y < RULER_HEIGHT => mouse::Interaction::ResizingHorizontally,
+            _ if p.y < RULER_HEIGHT && p.x >= KEYS_WIDTH && self.near_end(p.x) => mouse::Interaction::ResizingHorizontally,
             (_, Some((_, true))) => mouse::Interaction::ResizingHorizontally,
             (_, Some(_)) => mouse::Interaction::Grab,
             _ if p.x >= KEYS_WIDTH && p.y >= RULER_HEIGHT => mouse::Interaction::Crosshair,

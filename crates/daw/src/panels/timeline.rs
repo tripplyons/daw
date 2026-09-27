@@ -130,6 +130,22 @@ pub fn draw_playhead(frame: &mut Frame<Renderer>, view: TimeView, left: f32, hei
     }
 }
 
+/// Where play starts: a triangle in the ruler and a faint line below it.
+pub fn draw_start_marker(frame: &mut Frame<Renderer>, view: TimeView, left: f32, height: f32, tick: f64) {
+    let x = left + view.x(tick).round();
+    if x < left {
+        return;
+    }
+    let marker = Path::new(|b| {
+        b.move_to(Point::new(x - 5.0, 0.0));
+        b.line_to(Point::new(x + 6.0, 0.0));
+        b.line_to(Point::new(x + 0.5, 7.0));
+        b.close();
+    });
+    frame.fill(&marker, theme::TEXT);
+    frame.fill_rectangle(Point::new(x, RULER_HEIGHT), Size::new(1.0, height - RULER_HEIGHT), theme::TEXT_FAINT);
+}
+
 /// Text helper for canvases.
 pub fn label(frame: &mut Frame<Renderer>, content: impl Into<String>, position: Point, color: Color) {
     frame.fill_text(Text { content: content.into(), position, color, size: theme::SMALL.into(), ..Text::default() });

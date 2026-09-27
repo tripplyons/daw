@@ -96,6 +96,8 @@ pub struct App {
     pub position: f64,
     /// Song-mode start marker: play starts here and pausing returns here.
     pub song_start: f64,
+    /// Where pattern playback starts, set in the piano roll ruler.
+    pub pattern_start: f64,
     pub bind_mode: bool,
     pub record: bool,
     pub split_axis: Axis,
@@ -150,6 +152,7 @@ impl App {
             playing: false,
             position: 0.0,
             song_start: 0.0,
+            pattern_start: 0.0,
             bind_mode: false,
             record: false,
             split_axis: Axis::Horizontal,
@@ -511,6 +514,9 @@ impl App {
                 self.editing = false;
             }
             Message::SelectPattern(id) => {
+                if id != self.selected_pattern {
+                    self.pattern_start = 0.0;
+                }
                 self.selected_pattern = id;
                 self.piano_roll.selected.clear();
                 if let PlayMode::Pattern(_) = self.mode {
@@ -784,6 +790,7 @@ impl App {
                 self.session.stop();
                 self.playing = false;
                 self.song_start = self.project.playlist.loop_range.map(|(s, _)| s as f64).unwrap_or(0.0);
+                self.pattern_start = 0.0;
                 self.return_to_start();
             }
             Action::Undo => {
@@ -808,6 +815,7 @@ impl App {
                 self.redo.clear();
                 self.dirty = false;
                 self.song_start = 0.0;
+                self.pattern_start = 0.0;
                 self.selected_pattern = self.project.patterns[0].id;
                 self.mode = PlayMode::Pattern(self.selected_pattern);
                 self.validate_selection();
@@ -848,7 +856,11 @@ impl App {
     /// song marker.
     pub fn return_to_start(&mut self) {
         let start = match self.mode {
-            PlayMode::Pattern(_) => 0.0,
+            // A marker past a shortened pattern's end starts at the top.
+            PlayMode::Pattern(id) => {
+                let length = self.project.pattern(id).map_or(0.0, |p| p.length as f64);
+                if self.pattern_start < length { self.pattern_start } else { 0.0 }
+            }
             PlayMode::Song => self.song_start,
         };
         self.session.seek(start);
@@ -918,6 +930,7 @@ impl App {
                 self.redo.clear();
                 self.dirty = false;
                 self.song_start = 0.0;
+                self.pattern_start = 0.0;
                 self.selected_pattern = self.project.patterns[0].id;
                 self.mode = PlayMode::Pattern(self.selected_pattern);
                 self.validate_selection();
