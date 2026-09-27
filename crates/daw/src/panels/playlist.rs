@@ -104,6 +104,18 @@ fn source_name(app: &App, source: ClipSource) -> String {
     }
 }
 
+/// Position within an automation clip's envelope of `length` ticks at
+/// `tick` ticks into its looping playback. The end of each loop maps to the
+/// envelope's end, not the next loop's start, so a clip that is exactly one
+/// loop long ends on its last value.
+fn loop_tick(tick: f64, length: f64) -> f64 {
+    if tick <= length {
+        return tick.max(0.0);
+    }
+    let wrapped = tick % length;
+    if wrapped == 0.0 { length } else { wrapped }
+}
+
 fn begin_drag(app: &mut App) {
     let selected = &app.playlist.selected;
     app.playlist.originals = app.project.playlist.clips.iter().filter(|c| selected.contains(&c.id)).cloned().collect();
@@ -485,18 +497,26 @@ impl Arrangement<'_> {
             ClipSource::Automation(id) => {
                 let Some(automation) = app.project.automation_clip(id) else { return };
                 let length = automation.length.max(1) as f64;
+                let right = inner.x + inner.width;
                 let path = Path::new(|b| {
                     let mut x = inner.x;
                     let mut first = true;
-                    while x <= inner.x + inner.width {
-                        let tick = view.tick(x - HEADER_WIDTH) - clip.start as f64 + clip.offset as f64;
-                        let value = automation.envelope.value_at(tick.rem_euclid(length)).unwrap_or(0.5);
-                        let point = Point::new(x, inner.y + inner.height * (1.0 - value));
+                    loop {
+                        let x_end = x.min(right);
+                        // Clamp so rounding at the clip edges cannot land a
+                        // sample outside the clip and wrap it to the other end.
+                        let within = (view.tick(x_end - HEADER_WIDTH) - clip.start as f64).clamp(0.0, clip.length as f64);
+                        let tick = loop_tick(within + clip.offset as f64, length);
+                        let value = automation.envelope.value_at(tick).unwrap_or(0.5);
+                        let point = Point::new(x_end, inner.y + inner.height * (1.0 - value));
                         if first {
                             b.move_to(point);
                             first = false;
                         } else {
                             b.line_to(point);
+                        }
+                        if x >= right {
+                            break;
                         }
                         x += 2.0;
                     }
@@ -696,5 +716,18 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             _ if p.x < HEADER_WIDTH || p.y < RULER_HEIGHT => mouse::Interaction::Pointer,
             _ => mouse::Interaction::Crosshair,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loop_tick;
+
+    #[test]
+    fn loop_tick_keeps_clip_edges() {
+        assert_eq!(loop_tick(-1e-9, 100.0), 0.0);
+        assert_eq!(loop_tick(100.0, 100.0), 100.0);
+        assert_eq!(loop_tick(150.0, 100.0), 50.0);
+        assert_eq!(loop_tick(200.0, 100.0), 100.0);
     }
 }
