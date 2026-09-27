@@ -405,9 +405,6 @@ fn restore_state(unit: &AUAudioUnit, state: &[u8]) {
 pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize) -> Result<Loaded, PluginError> {
     let description = parse_component_id(&plugin.id).ok_or_else(|| PluginError::NotFound(plugin.id.clone()))?;
     let unit = instantiate(description)?;
-    if !state.is_empty() {
-        restore_state(&unit, state);
-    }
 
     let is_effect = description.componentType != INSTRUMENT;
     set_bus_format(&unit, true, sample_rate)?;
@@ -430,6 +427,11 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
     install_host_blocks(&unit, &transport);
     unsafe { unit.allocateRenderResourcesAndReturnError() }
         .map_err(|e| PluginError::Load(format!("allocate render resources: {}", e.localizedDescription())))?;
+    // Restore after allocating, as hosts like Logic do: some plugins, such as
+    // Dexed, reset their patch while allocating.
+    if !state.is_empty() {
+        restore_state(&unit, state);
+    }
 
     let mut ranges: Vec<ParamRange> = parameters(&unit)
         .iter()
