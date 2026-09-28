@@ -245,6 +245,10 @@ impl Engine {
                 Command::Stop => {
                     self.playing = false;
                     self.release_all(0);
+                    // Cut reverb and delay tails too, so stopping is silent.
+                    for node in &mut self.nodes {
+                        node.processor.reset();
+                    }
                 }
                 Command::Seek(tick) => {
                     self.position = tick.max(0.0);

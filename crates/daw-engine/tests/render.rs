@@ -243,3 +243,46 @@ fn inserts_send_through_their_outputs() {
     project.mixer.insert_mut(bus).unwrap().mute = true;
     assert_eq!(peak(&project), 0.0);
 }
+
+/// An effect with a long tail: adds a slowly decaying copy of its loudest input.
+struct Ring {
+    level: f32,
+}
+
+impl Processor for Ring {
+    fn process(&mut self, _: &TransportInfo, _: &[Event], left: &mut [f32], right: &mut [f32]) {
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            self.level = (self.level * 0.9999).max(l.abs());
+            *l += self.level;
+            *r += self.level;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.level = 0.0;
+    }
+}
+
+#[test]
+fn stop_cuts_effect_tails() {
+    let mut project = unity_project();
+    let channel = project.channels[0].id;
+    let pattern = project.patterns[0].id;
+    project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    let effect = project.add_plugin(daw_model::PluginRef {
+        format: daw_model::PluginFormat::Vst3,
+        id: "ring".into(),
+        path: String::new(),
+        name: "ring".into(),
+        vendor: String::new(),
+    });
+    project.mixer.inserts[0].effects.push(effect);
+    let (mut engine, mut handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    assert!(handle.send(Command::AddNode(Node::new(effect.0, Box::new(Ring { level: 0.0 })))).is_ok());
+    let playing = render(&mut engine, 1024);
+    assert!(playing[1000] > 0.5, "the tail rings while playing");
+
+    assert!(handle.send(Command::Stop).is_ok());
+    let stopped = render(&mut engine, 1024);
+    assert!(stopped.iter().all(|s| *s == 0.0), "tail after stop: {}", stopped[0]);
+}
