@@ -3,6 +3,7 @@ mod capture;
 mod cli;
 mod config;
 mod keys;
+mod menu;
 mod open_files;
 mod panels;
 mod quit;

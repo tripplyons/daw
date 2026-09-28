@@ -50,6 +50,10 @@ Each plugin is scanned in a separate process, so a plugin that crashes or hangs 
 
 Click a plugin in the browser panel to use it: an instrument gets a new channel in the channel rack, and an effect goes on the selected mixer insert.
 
+## Renaming
+
+Right-click a channel name, a mixer strip, or a playlist track name to open a menu with rename and delete; channels also have preview. Right-click the pattern picker in the top bar or the clip picker in the automation editor to rename a pattern or automation clip. Enter or clicking away saves the name, Escape cancels, and Cmd+Z undoes it. Right-clicking a playlist clip still deletes it.
+
 ## Files
 
 - Projects are saved as `.dawproj` files. Closing, starting a new project, or opening another one asks to save unsaved changes first.

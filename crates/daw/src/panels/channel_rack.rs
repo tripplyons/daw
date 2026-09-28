@@ -9,14 +9,15 @@ use iced::{Element, Length, Task};
 
 use super::{InsertChoice, label, pick, tool};
 use crate::app::{App, Message as AppMessage};
+use crate::menu;
 use crate::theme;
 
 const MAX_STEPS: u64 = 64;
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Select a channel and show or hide its plugin window, if it has one.
     Select(ChannelId),
-    Open(ChannelId),
     Step(ChannelId, u64),
     Mute(ChannelId),
     Volume(ChannelId, f32),
@@ -64,13 +65,10 @@ pub fn delete_selected(app: &mut App) -> bool {
 
 pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     match message {
-        Message::Select(id) => select(app, id),
-        Message::Open(id) => {
+        Message::Select(id) => {
             select(app, id);
-            match app.project.channel(id).map(|c| c.source.clone()) {
-                Some(Source::Plugin(instance)) => return Task::done(AppMessage::TogglePlugin(instance)),
-                Some(_) => app.show_panel(daw_model::layout::Panel::Parameters),
-                None => {}
+            if let Some(Source::Plugin(instance)) = app.project.channel(id).map(|c| &c.source) {
+                return Task::done(AppMessage::TogglePlugin(*instance));
             }
         }
         Message::Step(id, step) => {
@@ -188,15 +186,16 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
     for channel in &app.project.channels {
         let id = channel.id;
         let selected = app.selected_channel == Some(id);
+        // Lit like an effect button while the plugin window is showing.
+        let open = matches!(channel.source, Source::Plugin(instance) if app.session.editor_open(instance));
         let name = mouse_area(
             button(text(channel.name.clone()).size(theme::SMALL))
                 .on_press(Message::Select(id).into())
-                .style(theme::plain(selected))
+                .style(move |t, status| if open { theme::toggle(true)(t, status) } else { theme::plain(selected)(t, status) })
                 .padding([1, 6])
                 .width(110),
         )
-        .on_double_click(Message::Open(id).into())
-        .on_right_press(Message::Preview(id).into());
+        .on_right_press(menu::Message::Open(menu::Item::Channel(id)).into());
         let volume = mouse_area(
             slider(0.0..=1.0, channel.volume, move |v| Message::Volume(id, v).into())
                 .step(0.001_f32)
@@ -224,15 +223,7 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                 let color = if muted { theme::FILL_DIM } else { theme::SELECTED };
                 button::Style { background: Some(color.into()), ..button::Style::default() }
             });
-        // Plugin channels get a button that shows or hides the plugin window.
-        let window: Element<'_, AppMessage> = match channel.source {
-            Source::Plugin(instance) => {
-                super::toggle("ui", app.session.editor_open(instance), AppMessage::TogglePlugin(instance))
-            }
-            _ => Space::new().width(24).into(),
-        };
-        let window = container(window).width(24);
-        rows = rows.push(row![mute, name, window, volume, route, step_row].spacing(4).align_y(iced::Alignment::Center));
+        rows = rows.push(row![mute, name, volume, route, step_row].spacing(4).align_y(iced::Alignment::Center));
     }
     super::scroll(rows, true, true).width(Length::Fill).height(Length::Fill).into()
 }

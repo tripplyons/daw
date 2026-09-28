@@ -17,12 +17,13 @@ use daw_model::time::{Grid, Ticks};
 use daw_model::{AutomationId, ClipSource, Target};
 use iced::keyboard::{Key, Modifiers, key::Named};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
-use iced::widget::row;
+use iced::widget::{mouse_area, row};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
 use super::{label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage};
+use crate::menu;
 use crate::theme;
 
 const AXIS_WIDTH: f32 = 56.0;
@@ -631,8 +632,12 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
         bar_choices.push(bars);
     }
     let selected_shape = state.selected.first().and_then(|&i| points(app).get(i)).map(|p| p.shape);
+    let mut clip_picker = mouse_area(super::pick_or(clips, current, "clip", |c| Message::Clip(c).into()));
+    if let Some(id) = state.clip {
+        clip_picker = clip_picker.on_right_press(menu::Message::Open(menu::Item::Automation(id)).into());
+    }
     row![
-        super::pick_or(clips, current, "clip", |c| Message::Clip(c).into()),
+        clip_picker,
         super::pick_or(touched, None, "automate last touched", |t| Message::Bind(t).into()),
         toggle("edit", state.tool == Tool::Edit, Message::Tool(Tool::Edit).into()),
         toggle("draw", state.tool == Tool::Draw, Message::Tool(Tool::Draw).into()),

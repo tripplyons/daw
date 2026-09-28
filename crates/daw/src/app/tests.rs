@@ -627,3 +627,53 @@ fn closing_prompts_only_with_unsaved_changes_and_saves_before_quitting() {
     assert!(clean.dirty);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn right_click_menu_renames_and_deletes() {
+    use crate::menu::{Item, Message as Menu};
+    let mut app = app();
+    let rename = |app: &mut App, item: Item, name: &str| {
+        let _ = app.update(Menu::Open(item).into());
+        let _ = app.update(Menu::Rename.into());
+        let _ = app.update(Menu::Input(name.into()).into());
+        let _ = app.update(Menu::Close.into());
+    };
+
+    let channel = app.project.channels[0].id;
+    rename(&mut app, Item::Channel(channel), "  bass ");
+    assert_eq!(app.project.channel(channel).unwrap().name, "bass");
+    assert!(app.menu.is_none());
+
+    let pattern = app.project.patterns[0].id;
+    rename(&mut app, Item::Pattern(pattern), "verse");
+    assert_eq!(app.project.pattern(pattern).unwrap().name, "verse");
+
+    let insert = app.project.mixer.inserts[2].id;
+    rename(&mut app, Item::Insert(insert), "drums bus");
+    assert_eq!(app.project.mixer.insert(insert).unwrap().name, "drums bus");
+    assert_eq!(app.selected_insert, insert, "right click selects the insert");
+
+    rename(&mut app, Item::Track(3), "lead");
+    assert_eq!(app.project.playlist.tracks[3].name, "lead");
+
+    // Blank names and Escape leave the name alone.
+    rename(&mut app, Item::Track(3), "   ");
+    assert_eq!(app.project.playlist.tracks[3].name, "lead");
+    let _ = app.update(Menu::Open(Item::Track(3)).into());
+    let _ = app.update(Menu::Rename.into());
+    let _ = app.update(Menu::Input("nope".into()).into());
+    let _ = app.update(press(Code::Escape, Key::Named(keyboard::key::Named::Escape), Modifiers::empty()));
+    assert!(app.menu.is_none());
+    assert_eq!(app.project.playlist.tracks[3].name, "lead");
+
+    // Each rename is one undo step.
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.playlist.tracks[3].name, "track 4");
+
+    // Menu entries act on the item that was right-clicked.
+    let tracks = app.project.playlist.tracks.len();
+    let _ = app.update(Menu::Open(Item::Track(5)).into());
+    let _ = app.update(Menu::Choose(Box::new(list::Message::DeleteTrack.into())).into());
+    assert_eq!(app.project.playlist.tracks.len(), tracks - 1);
+    assert!(app.menu.is_none());
+}

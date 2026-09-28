@@ -7,6 +7,7 @@ use iced::{Element, Length, Task, mouse};
 
 use super::{InsertChoice, label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage, gain_text, pan_text};
+use crate::menu;
 use crate::theme;
 
 const STRIP_WIDTH: f32 = 58.0;
@@ -210,7 +211,11 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         .width(STRIP_WIDTH)
         .align_x(iced::Alignment::Center);
         let background = if selected { theme::HEADER } else { theme::BG };
-        strips = strips.push(mouse_area(container(strip).height(Length::Fill).style(theme::fill(background))).on_press(Message::Select(id).into()));
+        strips = strips.push(
+            mouse_area(container(strip).height(Length::Fill).style(theme::fill(background)))
+                .on_press(Message::Select(id).into())
+                .on_right_press(menu::Message::Open(menu::Item::Insert(id)).into()),
+        );
     }
 
     let mut chain = column![label("effects")].spacing(2).padding(4).width(190);

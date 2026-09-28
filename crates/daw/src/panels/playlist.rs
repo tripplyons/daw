@@ -3,7 +3,8 @@
 //! Left click places the brush clip or drags clips (the right edge resizes),
 //! double click opens a clip, right click deletes, right drag (or Ctrl drag
 //! on macOS) selects a box, Alt click splits a clip. Click a track name to
-//! select the track, or its square to mute it. In the ruler, left click seeks and right drag sets the loop.
+//! select the track, or its square to mute it; right click it for its menu.
+//! In the ruler, left click seeks and right drag sets the loop.
 
 use daw_engine::song::PlayMode;
 use daw_model::time::{Grid, Ticks};
@@ -16,6 +17,7 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mous
 use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
 use super::{label, pick};
 use crate::app::{App, Message as AppMessage};
+use crate::menu;
 use crate::theme;
 
 const HEADER_WIDTH: f32 = 84.0;
@@ -567,6 +569,10 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                     let track = track as usize;
                     if track >= self.app.project.playlist.tracks.len() {
                         return None;
+                    }
+                    if *button == Button::Right {
+                        let open = AppMessage::from(menu::Message::Open(menu::Item::Track(track)));
+                        return Some(canvas::Action::publish(open).and_capture());
                     }
                     return publish(if p.x < MUTE_WIDTH { Message::Mute(track) } else { Message::SelectTrack(track) });
                 }

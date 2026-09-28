@@ -13,11 +13,12 @@ use daw_model::{AutomationId, ChannelId, ClipSource, InsertId, InstanceId, Patte
 use daw_plugins::scan::{Catalog, Progress};
 use iced::futures::channel::mpsc::{self, UnboundedReceiver};
 use iced::futures::{Stream, StreamExt, stream};
-use iced::widget::{button, column, container, mouse_area, pick_list, row, rule, text, text_input};
+use iced::widget::{button, column, container, mouse_area, pick_list, row, rule, stack, text, text_input};
 use iced::{Element, Length, Point, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::config;
 use crate::keys::{Action, Keymap};
+use crate::menu::{self, Menu};
 use crate::panels::{automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
 use crate::session::Session;
 use crate::theme;
@@ -61,6 +62,7 @@ pub enum Message {
     Params(parameters::Message),
     Automation(automation::Message),
     Settings(settings::Message),
+    Menu(menu::Message),
     /// Create (or open) an automation clip for a target, from any panel.
     Automate(Target),
     OpenPlugin(InstanceId),
@@ -142,6 +144,8 @@ pub struct App {
     pub automation: automation::State,
     pub params: parameters::State,
     pub settings: settings::State,
+    /// The open right-click menu.
+    pub menu: Option<Menu>,
     pub keymap: Keymap,
     pub config: config::Config,
     pub config_path: PathBuf,
@@ -197,6 +201,7 @@ impl App {
             automation: automation::State::default(),
             params: parameters::State::default(),
             settings: settings::State::default(),
+            menu: None,
             keymap: Keymap::default(),
             config: config::Config::default(),
             config_path: config::path(),
@@ -308,6 +313,8 @@ impl App {
     }
 
     fn validate_selection(&mut self) {
+        // The menu's item may be gone.
+        self.menu = None;
         if self.project.pattern(self.selected_pattern).is_none() {
             self.selected_pattern = self.project.patterns[0].id;
         }
@@ -470,6 +477,12 @@ impl App {
                     settings::key(self, &event);
                     return Task::none();
                 }
+                if self.menu.is_some()
+                    && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. } = &event
+                {
+                    self.menu = None;
+                    return Task::none();
+                }
                 if let Some(action) = self.keymap.action(&event, typing) {
                     return self.update(Message::Action(action));
                 }
@@ -572,6 +585,7 @@ impl App {
             Message::Params(message) => parameters::update(self, message),
             Message::Automation(message) => automation::update(self, message),
             Message::Settings(message) => settings::update(self, message),
+            Message::Menu(message) => return menu::update(self, message),
             Message::Automate(target) => {
                 self.checkpoint();
                 self.bind(target);
@@ -1012,7 +1026,11 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let layout = self.layout();
         let tiles = if layout.zoomed { self.tile(layout.focused) } else { self.node(&layout.root, &mut Vec::new()) };
-        column![self.transport(), tiles].into()
+        let base = column![self.transport(), tiles];
+        match &self.menu {
+            Some(open) => stack![base, menu::view(self, open)].into(),
+            None => base.into(),
+        }
     }
 
     fn node<'a>(&'a self, node: &daw_model::layout::Node, path: &mut Vec<bool>) -> Element<'a, Message> {
@@ -1169,11 +1187,14 @@ impl App {
                 .padding([3, 4])
                 .style(theme::input),
             small("bpm").color(theme::TEXT_DIM),
-            pick_list(pattern_names, selected, |p: PatternChoice| Message::SelectPattern(p.id))
-                .text_size(theme::SMALL)
-                .padding([3, 6])
-                .style(theme::pick)
-                .menu_style(theme::menu),
+            mouse_area(
+                pick_list(pattern_names, selected, |p: PatternChoice| Message::SelectPattern(p.id))
+                    .text_size(theme::SMALL)
+                    .padding([3, 6])
+                    .style(theme::pick)
+                    .menu_style(theme::menu)
+            )
+            .on_right_press(menu::Message::Open(menu::Item::Pattern(self.selected_pattern)).into()),
             pick_list(bar_choices, bars, Message::PatternBars)
                 .text_size(theme::SMALL)
                 .padding([3, 6])

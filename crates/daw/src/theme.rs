@@ -86,6 +86,24 @@ pub fn plain(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style
     }
 }
 
+/// Right-click menu row, highlighted like a pick list menu row.
+pub fn menu_entry(_: &Theme, status: button::Status) -> button::Style {
+    match status {
+        button::Status::Hovered | button::Status::Pressed => flat(SELECTED, BG),
+        _ => button::Style { background: None, text_color: TEXT, ..button::Style::default() },
+    }
+}
+
+/// Right-click menu box, matching pick list menus.
+pub fn popup(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(CONTROL)),
+        border: Border { color: LINE, width: 1.0, radius: 0.0.into() },
+        text_color: Some(TEXT),
+        ..container::Style::default()
+    }
+}
+
 pub fn panel(_: &Theme) -> container::Style {
     container::Style { background: Some(Background::Color(BG)), text_color: Some(TEXT), ..container::Style::default() }
 }
