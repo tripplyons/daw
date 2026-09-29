@@ -75,6 +75,8 @@ cat > "$app/Contents/Info.plist" <<EOF
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>DAW records audio clips from your microphone while the song plays.</string>
 </dict>
 </plist>
 EOF

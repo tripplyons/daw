@@ -1,12 +1,14 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use daw_engine::song::{PlayMode, compile};
 use daw_engine::{Command, Engine, EngineHandle, Event, EventKind, Node, Processor, TransportInfo, create};
 use daw_model::automation::{Envelope, Point};
 use daw_model::time::TICKS_PER_BEAT;
-use daw_model::{ClipSource, Note, Project, Target};
+use daw_engine::synth::Sample;
+use daw_model::{ClipSource, Note, Project, Source, Target};
 
 struct CountingAllocator;
 
@@ -86,7 +88,7 @@ fn engine_with_probe(project: &Project, mode: PlayMode, dc: bool) -> (Engine, En
     let key = project.channels[0].id.0;
     let probe = Probe { dc, value: 0.0, log: log.clone() };
     assert!(handle.send(Command::AddNode(Node::new(key, Box::new(probe)))).is_ok());
-    assert!(handle.send(Command::Song(Box::new(compile(project, mode, daw_engine::MAX_BLOCK)))).is_ok());
+    assert!(handle.send(Command::Song(Box::new(compile(project, mode, daw_engine::MAX_BLOCK, &HashMap::new())))).is_ok());
     engine.start_offline(0);
     (engine, handle, log)
 }
@@ -214,7 +216,7 @@ fn builtin_synth_makes_sound() {
     let (mut engine, mut handle) = create(SAMPLE_RATE);
     let synth = daw_engine::synth::Synth::new(Default::default(), SAMPLE_RATE);
     assert!(handle.send(Command::AddNode(Node::new(channel.0, Box::new(synth)))).is_ok());
-    assert!(handle.send(Command::Song(Box::new(compile(&project, PlayMode::Pattern(pattern), 512)))).is_ok());
+    assert!(handle.send(Command::Song(Box::new(compile(&project, PlayMode::Pattern(pattern), 512, &HashMap::new())))).is_ok());
     engine.start_offline(0);
     let signal = render(&mut engine, FRAMES_PER_BEAT);
     let peak = signal.iter().fold(0.0f32, |m, s| m.max(s.abs()));
@@ -285,4 +287,71 @@ fn stop_cuts_effect_tails() {
     assert!(handle.send(Command::Stop).is_ok());
     let stopped = render(&mut engine, 1024);
     assert!(stopped.iter().all(|s| *s == 0.0), "tail after stop: {}", stopped[0]);
+}
+
+/// An engine playing `project` in song mode, where every audio channel's
+/// file is a rising ramp: frame `i` of the file holds `i / 48000`.
+fn engine_with_ramp(project: &Project) -> Engine {
+    let ramp: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
+    let sample = Arc::new(Sample { sample_rate: 24_000.0, left: ramp.clone(), right: ramp });
+    let samples: HashMap<String, Arc<Sample>> =
+        project.channels.iter().filter_map(|c| match &c.source {
+            Source::Audio { path } => Some((path.clone(), sample.clone())),
+            _ => None,
+        }).collect();
+    let (mut engine, mut handle) = create(SAMPLE_RATE);
+    assert!(handle.send(Command::Song(Box::new(compile(project, PlayMode::Song, 512, &samples)))).is_ok());
+    engine.start_offline(0);
+    engine
+}
+
+fn audio_project() -> (Project, daw_model::ChannelId) {
+    let mut project = unity_project();
+    let channel = project.add_channel("take", Source::Audio { path: "ramp.wav".into() });
+    project.channel_mut(channel).unwrap().volume = 1.0;
+    (project, channel)
+}
+
+#[test]
+fn audio_clips_play_their_part_of_the_file_at_its_own_rate() {
+    let (mut project, channel) = audio_project();
+    let beat = TICKS_PER_BEAT as u64;
+    // One beat of the file, starting a quarter second (half a beat) in.
+    let clip = project.add_audio_clip(0, beat, channel, beat);
+    project.playlist.clips.iter_mut().find(|c| c.id == clip).unwrap().offset = beat / 2;
+    let mut engine = engine_with_ramp(&project);
+    let signal = render(&mut engine, FRAMES_PER_BEAT * 3);
+    assert!(signal[..FRAMES_PER_BEAT].iter().all(|s| *s == 0.0), "silent before the clip");
+    // The edge fade takes the clip's last frames to silence; rounding in the
+    // position may leave one nearly silent frame at the end.
+    assert!(signal[FRAMES_PER_BEAT * 2].abs() < 1e-3, "faded out: {}", signal[FRAMES_PER_BEAT * 2]);
+    assert!(signal[FRAMES_PER_BEAT * 2 + 1..].iter().all(|s| *s == 0.0), "silent after the clip");
+    // The file runs at 24 kHz, so each output frame advances half a file frame.
+    for j in [1000, 10_000, 20_000] {
+        let expected = (6000.0 + j as f32 / 2.0) / 48_000.0;
+        let actual = signal[FRAMES_PER_BEAT + j];
+        assert!((actual - expected).abs() < 1e-4, "frame {j}: {actual} vs {expected}");
+    }
+}
+
+#[test]
+fn audio_clips_restart_at_the_loop_start() {
+    let (mut project, channel) = audio_project();
+    let beat = TICKS_PER_BEAT as u64;
+    project.add_audio_clip(0, 0, channel, beat * 2);
+    project.playlist.loop_range = Some((0, beat));
+    let mut engine = engine_with_ramp(&project);
+    let signal = render(&mut engine, FRAMES_PER_BEAT * 2);
+    for j in [500, 5000, 20_000] {
+        assert_eq!(signal[FRAMES_PER_BEAT + j], signal[j], "frame {j} after the wrap");
+    }
+}
+
+#[test]
+fn muted_tracks_silence_audio_clips() {
+    let (mut project, channel) = audio_project();
+    project.add_audio_clip(0, 0, channel, TICKS_PER_BEAT as u64);
+    project.playlist.tracks[0].mute = true;
+    let mut engine = engine_with_ramp(&project);
+    assert!(render(&mut engine, FRAMES_PER_BEAT).iter().all(|s| *s == 0.0));
 }

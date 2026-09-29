@@ -2,13 +2,13 @@
 //! to it only through `EngineHandle`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
 use daw_model::automation::tempo_from_normalized;
 use daw_model::time::{TICKS_PER_BEAT, Ticks};
 
 use crate::processor::{Event, EventKind, Processor, TransportInfo};
-use crate::song::{EngineTarget, InsertPlan, Song};
+use crate::song::{AudioPlan, EngineTarget, InsertPlan, Song};
 
 /// Largest block the engine renders at once; larger host buffers are split.
 pub const MAX_BLOCK: usize = 512;
@@ -17,6 +17,8 @@ const SUB_BLOCK: usize = 128;
 const MAX_NODES: usize = 4096;
 const EVENT_CAPACITY: usize = 2048;
 pub const MAX_METERS: usize = 256;
+/// Output frames faded at each edge of an audio clip, so cuts do not click.
+const DECLICK_FRAMES: f64 = 64.0;
 
 pub struct Node {
     pub key: u64,
@@ -79,6 +81,77 @@ pub struct Shared {
     playing: AtomicBool,
     /// Peak per insert and side, as f32 bits; the UI resets them when read.
     peaks: Vec<AtomicU32>,
+    clock: Clock,
+}
+
+/// The song position of the last live output buffer and the host time its
+/// first frame is heard, so input captured at a known host time can be
+/// placed on the song.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClockReading {
+    pub tick: f64,
+    /// Host clock nanoseconds, as cpal's stream instants count them.
+    pub nanos: u64,
+    pub ticks_per_second: f64,
+    pub playing: bool,
+}
+
+impl ClockReading {
+    /// The song position heard at host time `nanos`. Timestamps more than a
+    /// second away mean the input and output clocks differ; then this falls
+    /// back to the buffer's position without latency compensation.
+    pub fn tick_at(&self, nanos: u64) -> f64 {
+        let seconds = (nanos as f64 - self.nanos as f64) / 1e9;
+        if seconds.abs() > 1.0 { self.tick } else { self.tick + seconds * self.ticks_per_second }
+    }
+}
+
+/// A sequence lock around a `ClockReading`: the audio thread is the only
+/// writer, and readers retry when a write was in progress.
+#[derive(Default)]
+struct Clock {
+    sequence: AtomicU64,
+    tick: AtomicU64,
+    nanos: AtomicU64,
+    ticks_per_second: AtomicU64,
+    playing: AtomicBool,
+}
+
+impl Clock {
+    fn publish(&self, reading: ClockReading) {
+        let sequence = self.sequence.load(Ordering::Relaxed);
+        self.sequence.store(sequence + 1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        self.tick.store(reading.tick.to_bits(), Ordering::Relaxed);
+        self.nanos.store(reading.nanos, Ordering::Relaxed);
+        self.ticks_per_second.store(reading.ticks_per_second.to_bits(), Ordering::Relaxed);
+        self.playing.store(reading.playing, Ordering::Relaxed);
+        self.sequence.store(sequence + 2, Ordering::Release);
+    }
+
+    fn read(&self) -> Option<ClockReading> {
+        for _ in 0..16 {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before == 0 {
+                return None;
+            }
+            if before % 2 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let reading = ClockReading {
+                tick: f64::from_bits(self.tick.load(Ordering::Relaxed)),
+                nanos: self.nanos.load(Ordering::Relaxed),
+                ticks_per_second: f64::from_bits(self.ticks_per_second.load(Ordering::Relaxed)),
+                playing: self.playing.load(Ordering::Relaxed),
+            };
+            fence(Ordering::Acquire);
+            if self.sequence.load(Ordering::Relaxed) == before {
+                return Some(reading);
+            }
+        }
+        None
+    }
 }
 
 impl Shared {
@@ -92,6 +165,11 @@ impl Shared {
 
     pub fn playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed)
+    }
+
+    /// The latest live output clock, once audio output has started.
+    pub fn clock(&self) -> Option<ClockReading> {
+        self.clock.read()
     }
 
     /// Peak since the last call, for the insert at `index`.
@@ -161,6 +239,7 @@ pub fn create(sample_rate: f64) -> (Engine, EngineHandle) {
         bpm: AtomicU64::new(0f64.to_bits()),
         playing: AtomicBool::new(false),
         peaks: (0..MAX_METERS * 2).map(|_| AtomicU32::new(0)).collect(),
+        clock: Clock::default(),
     });
     let engine = Engine {
         sample_rate,
@@ -199,6 +278,36 @@ fn pair_mut(inserts: &mut [InsertPlan], index: usize) -> (&mut InsertPlan, &mut 
 
 fn peak(buffer: &[f32]) -> f32 {
     buffer.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+}
+
+/// Add the audio clips heard from tick `from` on to `left` and `right`, one
+/// frame every `per_frame` ticks. Files play at their own speed, so the read
+/// position follows the song's tempo rather than stretching.
+fn mix_audio(plan: &AudioPlan, from: f64, per_frame: f64, bpm: f64, left: &mut [f32], right: &mut [f32]) {
+    let to = from + per_frame * left.len() as f64;
+    let sample = &*plan.sample;
+    let frames_per_tick = sample.sample_rate * 60.0 / (bpm * f64::from(TICKS_PER_BEAT));
+    let fade = per_frame * DECLICK_FRAMES;
+    for clip in plan.clips.iter().take_while(|c| (c.start as f64) < to) {
+        let (start, end) = (clip.start as f64, clip.end as f64);
+        if end <= from {
+            continue;
+        }
+        let first = ((start - from) / per_frame).ceil().max(0.0) as usize;
+        let last = (((end - from) / per_frame).ceil().max(0.0) as usize).min(left.len());
+        for frame in first..last {
+            let tick = from + per_frame * frame as f64;
+            let position = (tick - start + clip.offset as f64) * frames_per_tick;
+            let index = position as usize;
+            if index + 1 >= sample.left.len() {
+                break;
+            }
+            let t = (position - index as f64) as f32;
+            let gain = ((tick - start).min(end - tick) / fade).min(1.0) as f32;
+            left[frame] += (sample.left[index] + (sample.left[index + 1] - sample.left[index]) * t) * gain;
+            right[frame] += (sample.right[index] + (sample.right[index + 1] - sample.right[index]) * t) * gain;
+        }
+    }
 }
 
 impl Engine {
@@ -291,6 +400,23 @@ impl Engine {
     /// Render stereo output. Buffers may be any length; they are split internally.
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         self.handle_commands();
+        self.render_commanded(left, right);
+    }
+
+    /// Render a live output buffer whose first frame is heard at host time
+    /// `heard`, in nanoseconds, and publish that pairing for recording.
+    pub fn render_live(&mut self, left: &mut [f32], right: &mut [f32], heard: u64) {
+        self.handle_commands();
+        self.shared.clock.publish(ClockReading {
+            tick: self.position,
+            nanos: heard,
+            ticks_per_second: self.ticks_per_frame() * self.sample_rate,
+            playing: self.playing,
+        });
+        self.render_commanded(left, right);
+    }
+
+    fn render_commanded(&mut self, left: &mut [f32], right: &mut [f32]) {
         if self.capturing {
             // Offline only, so allocating here is fine.
             let inserts = self.song.as_ref().map_or(0, |s| s.inserts.len());
@@ -321,6 +447,16 @@ impl Engine {
             self.schedule_notes(frames);
         }
         let transport = self.transport();
+        let per_frame = self.ticks_per_frame();
+        // The song ticks this block covers: `from` until frame `split`, then
+        // from the loop start when the block crosses the loop end.
+        let (from, split, wrapped) = match self.song.as_ref().and_then(|s| s.loop_range) {
+            Some((loop_start, loop_end)) if loop_end > loop_start && self.position + per_frame * frames as f64 > loop_end as f64 => {
+                let split = ((loop_end as f64 - self.position) / per_frame).ceil().clamp(0.0, frames as f64) as usize;
+                (self.position, split, loop_start as f64)
+            }
+            _ => (self.position, frames, 0.0),
+        };
         let Some(mut song) = self.song.take() else {
             left.fill(0.0);
             right.fill(0.0);
@@ -337,11 +473,25 @@ impl Engine {
         let [scratch_l, scratch_r] = &mut self.scratch;
         let (scratch_l, scratch_r) = (&mut scratch_l[..frames], &mut scratch_r[..frames]);
         for channel in &song.channels {
-            let Some(node) = self.nodes.iter_mut().find(|n| n.key == channel.node) else { continue };
-            node.processor.process(&transport, &node.events, scratch_l, scratch_r);
-            node.events.clear();
+            match self.nodes.iter_mut().find(|n| n.key == channel.node) {
+                Some(node) => {
+                    node.processor.process(&transport, &node.events, scratch_l, scratch_r);
+                    node.events.clear();
+                }
+                None if channel.audio.is_some() => {
+                    scratch_l.fill(0.0);
+                    scratch_r.fill(0.0);
+                }
+                None => continue,
+            }
             if channel.mute {
                 continue;
+            }
+            if let Some(audio) = channel.audio.as_ref().filter(|_| self.playing) {
+                let (before_l, after_l) = scratch_l.split_at_mut(split);
+                let (before_r, after_r) = scratch_r.split_at_mut(split);
+                mix_audio(audio, from, per_frame, song.bpm, before_l, before_r);
+                mix_audio(audio, wrapped, per_frame, song.bpm, after_l, after_r);
             }
             let (gl, gr) = apply_pan(channel.pan, channel.volume);
             let Some(insert) = song.inserts.get_mut(channel.insert) else { continue };

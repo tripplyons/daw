@@ -1,9 +1,14 @@
 //! Compiled playback plan. Built on the UI thread from a `Project` and handed to
 //! the audio thread whole, so the audio thread never walks the project model.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use daw_model::automation::Envelope;
 use daw_model::time::{TimeSignature, Ticks};
 use daw_model::{ClipSource, Project, Source, Target};
+
+use crate::synth::Sample;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NoteEvent {
@@ -22,6 +27,22 @@ pub struct ChannelPlan {
     pub mute: bool,
     /// Sorted by tick; note-offs sort before note-ons at the same tick.
     pub events: Vec<NoteEvent>,
+    /// The file and playlist clips of an audio channel.
+    pub audio: Option<AudioPlan>,
+}
+
+pub struct AudioPlan {
+    pub sample: Arc<Sample>,
+    /// Sorted by start.
+    pub clips: Vec<AudioClip>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioClip {
+    pub start: Ticks,
+    pub end: Ticks,
+    /// Ticks into the file at the clip's start.
+    pub offset: Ticks,
 }
 
 pub struct InsertPlan {
@@ -96,11 +117,13 @@ pub enum PlayMode {
 pub fn channel_node(source: &Source, channel: daw_model::ChannelId) -> u64 {
     match source {
         Source::Plugin(instance) => instance.0,
-        Source::Synth(_) | Source::Sampler { .. } => channel.0,
+        Source::Synth(_) | Source::Sampler { .. } | Source::Audio { .. } => channel.0,
     }
 }
 
-pub fn compile(project: &Project, mode: PlayMode, max_block: usize) -> Song {
+/// Build the plan for `project`. `samples` holds the loaded files of audio
+/// channels by path; channels whose file is missing stay silent.
+pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &HashMap<String, Arc<Sample>>) -> Song {
     let insert_index = |id| project.mixer.inserts.iter().position(|i| i.id == id).unwrap_or(0);
     let mut channels: Vec<ChannelPlan> = project
         .channels
@@ -112,6 +135,10 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize) -> Song {
             pan: c.pan,
             mute: c.mute,
             events: Vec::new(),
+            audio: match &c.source {
+                Source::Audio { path } => samples.get(path).map(|sample| AudioPlan { sample: sample.clone(), clips: Vec::new() }),
+                _ => None,
+            },
         })
         .collect();
     let channel_index = |id| project.channels.iter().position(|c| c.id == id);
@@ -132,6 +159,7 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize) -> Song {
     };
 
     let mut automation: Vec<AutomationPlan> = Vec::new();
+    let mut audio_clips = Vec::new();
     let loop_range = match mode {
         PlayMode::Pattern(id) => {
             let pattern = project.pattern(id);
@@ -166,6 +194,10 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize) -> Song {
                             None => automation.push(AutomationPlan { target, segments: vec![segment], last: f32::NAN }),
                         }
                     }
+                    ClipSource::Audio(id) => {
+                        let Some(index) = channel_index(id) else { continue };
+                        audio_clips.push((index, AudioClip { start: clip.start, end: clip.end(), offset: clip.offset }));
+                    }
                 }
             }
             project.playlist.loop_range
@@ -174,7 +206,15 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize) -> Song {
     for plan in &mut automation {
         plan.segments.sort_by_key(|s| s.start);
     }
+    for (index, clip) in audio_clips {
+        if let Some(audio) = &mut channels[index].audio {
+            audio.clips.push(clip);
+        }
+    }
     for channel in &mut channels {
+        if let Some(audio) = &mut channel.audio {
+            audio.clips.sort_by_key(|c| c.start);
+        }
         channel.events.sort_by(|a, b| a.tick.cmp(&b.tick).then((a.velocity > 0.0).cmp(&(b.velocity > 0.0))));
     }
 

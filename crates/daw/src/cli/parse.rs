@@ -184,14 +184,15 @@ pub fn target_name(target: Target) -> String {
     }
 }
 
-/// `pattern:ID` or `automation:ID`.
+/// `pattern:ID`, `automation:ID`, or `audio:CHANNEL`.
 pub fn clip_source(text: &str) -> Result<ClipSource, String> {
-    let bad = || format!("bad clip source {text:?}; use pattern:ID or automation:ID");
+    let bad = || format!("bad clip source {text:?}; use pattern:ID, automation:ID, or audio:CHANNEL");
     let (kind, id) = text.split_once(':').ok_or_else(bad)?;
     let id: u64 = id.parse().map_err(|_| bad())?;
     match kind {
         "pattern" => Ok(ClipSource::Pattern(PatternId(id))),
         "automation" => Ok(ClipSource::Automation(AutomationId(id))),
+        "audio" => Ok(ClipSource::Audio(ChannelId(id))),
         _ => Err(bad()),
     }
 }
@@ -200,6 +201,7 @@ pub fn clip_source_name(source: ClipSource) -> String {
     match source {
         ClipSource::Pattern(id) => format!("pattern:{}", id.0),
         ClipSource::Automation(id) => format!("automation:{}", id.0),
+        ClipSource::Audio(id) => format!("audio:{}", id.0),
     }
 }
 

@@ -82,6 +82,10 @@ pub enum Source {
     /// One-shot sample; the root key plays at original pitch.
     Sampler { path: String, root_key: u8 },
     Plugin(InstanceId),
+    /// A recorded or imported audio file, heard through the channel's
+    /// playlist clips as in FL Studio's audio clips. Notes play it from the
+    /// start at its original pitch, for previews.
+    Audio { path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,6 +190,8 @@ pub struct AutomationClip {
 pub enum ClipSource {
     Pattern(PatternId),
     Automation(AutomationId),
+    /// Part of an audio channel's file, played at its original speed.
+    Audio(ChannelId),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -432,9 +438,20 @@ impl Project {
         let length = match source {
             ClipSource::Pattern(p) => self.pattern(p).map(|p| p.length),
             ClipSource::Automation(a) => self.automation_clip(a).map(|a| a.length),
+            ClipSource::Audio(_) => None,
         }
         .unwrap_or(self.signature.ticks_per_bar());
         self.playlist.clips.push(Clip { id, track, start, length, offset: 0, source });
+        id
+    }
+
+    /// Add a clip playing the first `length` ticks of an audio channel's
+    /// file. The model does not read audio files, so the caller measures it.
+    pub fn add_audio_clip(&mut self, track: usize, start: Ticks, channel: ChannelId, length: Ticks) -> ClipId {
+        let id = self.add_clip(track, start, ClipSource::Audio(channel));
+        if let Some(clip) = self.playlist.clips.iter_mut().find(|c| c.id == id) {
+            clip.length = length.max(1);
+        }
         id
     }
 
@@ -545,6 +562,7 @@ impl Project {
             self.remove_plugin(instance);
         }
         self.channels.retain(|c| c.id != id);
+        self.playlist.clips.retain(|c| c.source != ClipSource::Audio(id));
         for pattern in &mut self.patterns {
             pattern.lanes.retain(|l| l.channel != id);
         }
@@ -721,6 +739,8 @@ mod tests {
         });
         project.add_clip(0, 0, ClipSource::Pattern(pattern));
         project.add_clip(1, 0, ClipSource::Automation(automation));
+        let audio = project.add_channel("take", Source::Audio { path: "/tmp/take.wav".into() });
+        project.add_audio_clip(2, 960, audio, 5000);
         project.mixer.inserts[1].effects.push(instance);
         project.workspaces.layouts[1].split(Axis::Horizontal, Panel::Mixer);
 
@@ -763,6 +783,16 @@ mod tests {
         project.add_clip(0, 0, ClipSource::Automation(automation));
         project.remove_plugin(instance);
         assert!(project.automation.is_empty());
+        assert!(project.playlist.clips.is_empty());
+    }
+
+    #[test]
+    fn removing_an_audio_channel_removes_its_clips() {
+        let mut project = Project::new();
+        let audio = project.add_channel("take", Source::Audio { path: "take.wav".into() });
+        let clip = project.add_audio_clip(0, 0, audio, 1234);
+        assert_eq!(project.playlist.clips.iter().find(|c| c.id == clip).unwrap().length, 1234);
+        project.remove_channel(audio);
         assert!(project.playlist.clips.is_empty());
     }
 

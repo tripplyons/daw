@@ -23,6 +23,8 @@ use crate::panels::{automation, browser, channel_rack, mixer, parameters, piano_
 use crate::session::Session;
 use crate::theme;
 
+pub mod audio;
+
 /// Project given on the command line, set by `main` before the app starts.
 pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
@@ -70,6 +72,10 @@ pub enum Message {
     /// parameters instead.
     TogglePlugin(InstanceId),
     Opened(Option<PathBuf>),
+    /// A WAV file to import as an audio clip at the song start marker.
+    ImportAudio(Option<PathBuf>),
+    /// A file dropped on the window: a project to open or audio to import.
+    Dropped(PathBuf),
     SavedAs(Option<PathBuf>),
     Exported(Option<PathBuf>),
     Screenshot,
@@ -619,6 +625,24 @@ impl App {
                     return self.guard(Pending::Open(path));
                 }
             }
+            Message::ImportAudio(path) => {
+                if let Some(path) = path
+                    && let Err(error) = self.import_audio(&path, self.song_start.max(0.0).round() as Ticks)
+                {
+                    self.set_status(error);
+                }
+            }
+            Message::Dropped(path) => {
+                let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase());
+                return match extension.as_deref() {
+                    Some("wav" | "wave") => self.update(Message::ImportAudio(Some(path))),
+                    Some("dawproj") => self.guard(Pending::Open(path)),
+                    _ => {
+                        self.set_status(format!("cannot open {}; drop a .wav or .dawproj file", path.display()));
+                        Task::none()
+                    }
+                };
+            }
             Message::SavedAs(path) => {
                 if let Some(path) = path {
                     self.path = Some(path);
@@ -663,6 +687,8 @@ impl App {
             Message::Exported(path) => {
                 if let Some(path) = path {
                     let path = if path.extension().is_none() { path.with_extension("wav") } else { path };
+                    // Export renders offline, so the input would record silence.
+                    self.stop_audio_recording();
                     match self.session.export(&self.project, &path, BitDepth::Int24, self.mode, None, &[]) {
                         Ok(()) => self.set_status(format!("exported {}", path.display())),
                         Err(error) => self.set_status(format!("export failed: {error}")),
@@ -704,6 +730,7 @@ impl App {
                 self.param_instance = Some(instance);
             }
         }
+        self.collect_takes();
     }
 
     fn drag_split(&mut self, path: &[bool], point: Point) {
@@ -766,6 +793,19 @@ impl App {
                 });
             }
             Action::ToggleRecord => self.record = !self.record,
+            Action::ToggleAudioRecord => self.toggle_audio_recording(),
+            Action::ImportAudio => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("wav", &["wav", "wave"])
+                            .pick_file()
+                            .await
+                            .map(|f| f.path().to_owned())
+                    },
+                    Message::ImportAudio,
+                );
+            }
             Action::Delete => {
                 let deleted = match self.focused_panel() {
                     Panel::ChannelRack => channel_rack::delete_selected(self),
@@ -791,7 +831,10 @@ impl App {
             }
             Action::ToggleMode => {
                 self.mode = match self.mode {
-                    PlayMode::Song => PlayMode::Pattern(self.selected_pattern),
+                    PlayMode::Song => {
+                        self.stop_audio_recording();
+                        PlayMode::Pattern(self.selected_pattern)
+                    }
                     PlayMode::Pattern(_) => PlayMode::Song,
                 };
                 self.refresh();
@@ -902,6 +945,7 @@ impl App {
     }
 
     fn new_project(&mut self) {
+        self.stop_audio_recording();
         self.session.clear();
         self.project = Project::new();
         self.path = None;
@@ -974,6 +1018,7 @@ impl App {
             .and_then(|text| Project::from_ron(&text).map_err(|e| e.to_string()));
         match loaded {
             Ok(project) => {
+                self.stop_audio_recording();
                 self.session.clear();
                 self.project = project;
                 self.path = Some(path);
@@ -1001,6 +1046,7 @@ impl App {
         let events = event::listen_with(|event, status, _| match event {
             iced::Event::Keyboard(event) => Some(Message::Key(event, status == event::Status::Captured)),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
+            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::MouseMoved(position)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
             _ => None,
@@ -1204,6 +1250,10 @@ impl App {
             button(small("+ pattern")).on_press(Message::NewPattern).style(theme::control).padding([3, 8]),
             button(small("bind")).on_press(Message::Action(Action::ToggleBind)).style(theme::toggle(self.bind_mode)).padding([3, 8]),
             button(small("rec")).on_press(Message::Action(Action::ToggleRecord)).style(theme::toggle(self.record)).padding([3, 8]),
+            button(small("rec audio"))
+                .on_press(Message::Action(Action::ToggleAudioRecord))
+                .style(theme::toggle(self.session.recording_armed()))
+                .padding([3, 8]),
             text(self.status.clone()).size(theme::SMALL).color(theme::TEXT_DIM).width(Length::Fill),
             small(&scan).color(theme::TEXT_DIM),
             button(small("export")).on_press(Message::Action(Action::Export)).style(theme::control).padding([3, 8]),

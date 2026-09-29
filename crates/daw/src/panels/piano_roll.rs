@@ -149,6 +149,7 @@ pub fn update(app: &mut App, message: Message) {
         }
         Message::Seek(tick) => {
             if app.mode != PlayMode::Pattern(app.selected_pattern) {
+                app.stop_audio_recording();
                 app.mode = PlayMode::Pattern(app.selected_pattern);
                 app.refresh();
             }

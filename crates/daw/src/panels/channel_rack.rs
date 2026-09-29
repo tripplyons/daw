@@ -208,6 +208,8 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         let current = inserts.iter().find(|i| i.id == channel.insert).cloned();
         let route = container(pick(inserts.clone(), current, move |i: InsertChoice| Message::Route(id, i.id).into())).width(76);
         let mut step_row = row![].spacing(1);
+        // Audio channels play from playlist clips, not steps.
+        let steps = if matches!(channel.source, Source::Audio { .. }) { 0 } else { steps };
         for step in 0..steps {
             if step > 0 && step % 4 == 0 {
                 step_row = step_row.push(Space::new().width(3));

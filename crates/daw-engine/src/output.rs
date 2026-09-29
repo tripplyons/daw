@@ -34,14 +34,17 @@ pub fn start(engine: Arc<Mutex<Engine>>) -> Result<cpal::Stream, OutputError> {
         let engine = engine.clone();
         device.build_output_stream::<f32, _, _>(
             config,
-            move |data: &mut [f32], _| {
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 let Ok(mut engine) = engine.try_lock() else {
                     data.fill(0.0);
                     return;
                 };
+                let mut heard = info.timestamp().playback.as_nanos() as u64;
+                let nanos_per_frame = 1e9 / engine.sample_rate();
                 for chunk in data.chunks_mut(MAX_BLOCK * channels) {
                     let frames = chunk.len() / channels;
-                    engine.render(&mut left[..frames], &mut right[..frames]);
+                    engine.render_live(&mut left[..frames], &mut right[..frames], heard);
+                    heard += (frames as f64 * nanos_per_frame) as u64;
                     for (frame, out) in chunk.chunks_mut(channels).enumerate() {
                         out[0] = left[frame];
                         if channels > 1 {

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use daw_engine::input::{Recorder, Take};
 use daw_engine::output::{self, BitDepth, Stem};
 use daw_engine::song::{PlayMode, channel_node, compile};
 use daw_engine::synth::{PARAM_ATTACK, PARAM_CUTOFF, PARAM_RELEASE, PARAM_WAVEFORM, Sample, Sampler, Synth};
@@ -11,6 +12,9 @@ use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
 use daw_model::time::{Ticks, ticks_to_seconds};
 use daw_model::{InstanceId, Project, Source, SynthParams, Waveform};
 use daw_plugins::{Controller, ParamInfo, Touch};
+
+/// Frames summarized by each waveform peak.
+pub const PEAK_FRAMES: usize = 256;
 
 /// What a built-in node was created from, to know when to rebuild it.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +33,11 @@ pub struct Session {
     pub load_errors: HashMap<InstanceId, String>,
     built_in: HashMap<u64, BuiltIn>,
     samples: HashMap<String, Arc<Sample>>,
+    /// Waveform summaries of loaded samples: the largest absolute value per
+    /// `PEAK_FRAMES` frames, across both sides.
+    peaks: HashMap<String, Vec<f32>>,
+    /// Microphone input, while audio recording is armed.
+    recorder: Option<Recorder>,
 }
 
 impl Session {
@@ -59,6 +68,8 @@ impl Session {
             load_errors: HashMap::new(),
             built_in: HashMap::new(),
             samples: HashMap::new(),
+            peaks: HashMap::new(),
+            recorder: None,
         }
     }
 
@@ -110,6 +121,8 @@ impl Session {
             let wanted = match &channel.source {
                 Source::Synth(params) => BuiltIn::Synth(*params),
                 Source::Sampler { path, root_key } => BuiltIn::Sampler(path.clone(), *root_key),
+                // Audio channels get a sampler too, so the channel rack can preview them.
+                Source::Audio { path } => BuiltIn::Sampler(path.clone(), daw_model::DEFAULT_KEY),
                 Source::Plugin(_) => continue,
             };
             match (self.built_in.get(&key), &wanted) {
@@ -123,9 +136,13 @@ impl Session {
                 _ => {
                     let node = match &wanted {
                         BuiltIn::Synth(params) => Some(Node::new(key, Box::new(Synth::new(*params, self.sample_rate())))),
-                        BuiltIn::Sampler(path, root) => self.sample(path).map(|sample| {
-                            Node::new(key, Box::new(Sampler::new(sample, *root, self.handle.sample_rate)) as Box<_>)
-                        }),
+                        BuiltIn::Sampler(path, root) => match self.sample(path) {
+                            Ok(sample) => Some(Node::new(key, Box::new(Sampler::new(sample, *root, self.sample_rate())))),
+                            Err(error) => {
+                                log::error!("{error}");
+                                None
+                            }
+                        },
                     };
                     if let Some(node) = node {
                         self.send(Command::AddNode(node));
@@ -166,25 +183,30 @@ impl Session {
         }
     }
 
-    fn sample(&mut self, path: &str) -> Option<Arc<Sample>> {
+    /// Load a WAV file, or take it from the cache.
+    pub fn sample(&mut self, path: &str) -> Result<Arc<Sample>, String> {
         if let Some(sample) = self.samples.get(path) {
-            return Some(sample.clone());
+            return Ok(sample.clone());
         }
-        match Sample::load(path) {
-            Ok(sample) => {
-                let sample = Arc::new(sample);
-                self.samples.insert(path.to_owned(), sample.clone());
-                Some(sample)
-            }
-            Err(error) => {
-                log::error!("could not load sample {path}: {error}");
-                None
-            }
-        }
+        let sample = Arc::new(Sample::load(path).map_err(|e| format!("could not load {path}: {e}"))?);
+        let peaks = sample
+            .left
+            .chunks(PEAK_FRAMES)
+            .zip(sample.right.chunks(PEAK_FRAMES))
+            .map(|(l, r)| l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs())))
+            .collect();
+        self.peaks.insert(path.to_owned(), peaks);
+        self.samples.insert(path.to_owned(), sample.clone());
+        Ok(sample)
+    }
+
+    /// A loaded file and its waveform peaks, for drawing.
+    pub fn waveform(&self, path: &str) -> Option<(&Sample, &[f32])> {
+        Some((self.samples.get(path)?, self.peaks.get(path)?))
     }
 
     pub fn update_song(&mut self, project: &Project, mode: PlayMode) {
-        let song = compile(project, mode, MAX_BLOCK);
+        let song = compile(project, mode, MAX_BLOCK, &self.samples);
         self.send(Command::Song(Box::new(song)));
     }
 
@@ -202,6 +224,36 @@ impl Session {
 
     pub fn note(&mut self, node: u64, key: u8, velocity: f32) {
         self.send(Command::Note { node, key, velocity });
+    }
+
+    /// Open the default input device; audio is recorded whenever the song plays.
+    pub fn arm_recording(&mut self) -> Result<(), String> {
+        if self.recorder.is_none() {
+            self.recorder = Some(Recorder::start(self.handle.shared.clone()).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
+
+    /// Close the input device, returning the takes not yet collected.
+    pub fn disarm_recording(&mut self) -> Vec<Take> {
+        self.recorder.take().map(Recorder::finish).unwrap_or_default()
+    }
+
+    pub fn recording_armed(&self) -> bool {
+        self.recorder.is_some()
+    }
+
+    /// Takes that ended since the last call, and whether input was dropped.
+    pub fn collect_takes(&mut self) -> (Vec<Take>, bool) {
+        match &mut self.recorder {
+            Some(recorder) => (recorder.poll(), recorder.take_overflow()),
+            None => (Vec::new(), false),
+        }
+    }
+
+    /// The take being recorded, as collected so far.
+    pub fn current_take(&self) -> Option<&Take> {
+        self.recorder.as_ref()?.current()
     }
 
     /// Set a plugin parameter from the app: updates the plugin's controller and

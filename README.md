@@ -35,7 +35,7 @@ open target/release/DAW.app
 
 The script builds a release binary and wraps it in `target/release/DAW.app` with an ad-hoc code signature, which is enough to run it on your own Mac. Pass `--install` to also copy it to `/Applications`; it refuses to replace a different app already at that path.
 
-The bundle declares the `.dawproj` file type, so double-clicking a project in Finder (or dropping one on the Dock icon) opens it in DAW. After `--install`, only the copy in `/Applications` handles these files.
+The bundle declares the `.dawproj` file type, so double-clicking a project in Finder (or dropping one on the Dock icon) opens it in DAW. After `--install`, only the copy in `/Applications` handles these files. It also carries the microphone usage text that macOS shows before audio recording.
 
 ## Plugins
 
@@ -49,6 +49,16 @@ A Linux VST3 bundle needs a binary for your CPU, such as `Contents/x86_64-linux/
 Each plugin is scanned in a separate process, so a plugin that crashes or hangs during the scan is listed as failed instead of closing the app. Results are cached in `~/Library/Application Support/daw/plugins.ron` on macOS and `~/.local/share/daw/plugins.ron` on Linux; later scans only probe new or updated plugins. The browser panel's "rescan" button scans again.
 
 Click a plugin in the browser panel to use it: an instrument gets a new channel in the channel rack, and an effect goes on the selected mixer insert.
+
+## Audio clips
+
+Audio clips play part of a WAV file at its own speed, without following tempo changes. Each file gets an audio channel in the channel rack, which sets its volume, pan, and mixer insert; double-click an audio clip to select its channel.
+
+- Import: press Cmd+I, click "+ audio" in the playlist toolbar, or drop WAV files on the window. The clip starts at the song start marker on the first free track.
+- Record: press Alt+Shift+R or click "rec audio" to arm the default input device, then play in song mode. Each stretch of playback becomes a take, saved as `recordings/take N.wav` next to the project, or in the app's data folder for an unsaved project, and placed on the first free track. Input latency is compensated. Click "rec audio" again to disarm. The app asks for microphone access the first time.
+- Edit: drag a clip's left or right edge to trim it, Alt-click to split it, and Cmd+C, Cmd+V, and Cmd+D to copy, paste, and duplicate it. After an import or a take, the playlist brush is that file, so a click places the whole file again.
+
+A take recorded over a loop keeps going past the loop end as one clip.
 
 ## Renaming
 
@@ -109,10 +119,12 @@ Alt is the tiling modifier. Keys match by physical position, so they work on any
 | Alt+S | Switch between pattern and song mode |
 | Alt+A | Bind mode: the next control you touch gets an automation clip |
 | Alt+R | Record automation |
+| Alt+Shift+R | Arm audio recording from the microphone |
 | Delete | Delete the selection in the focused panel |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo |
 | Cmd+N / Cmd+O / Cmd+S / Cmd+Shift+S | New / open / save / save as |
 | Cmd+E | Export WAV |
+| Cmd+I | Import a WAV file as an audio clip |
 | Cmd+comma | Settings |
 
 On macOS, bound keys also work while a plugin window is in front, as long as the plugin does not use the key itself.

@@ -23,6 +23,8 @@ pub enum Action {
     Workspace(usize),
     ToggleBind,
     ToggleRecord,
+    ToggleAudioRecord,
+    ImportAudio,
     ToggleMode,
     PlayPause,
     Stop,
@@ -85,6 +87,7 @@ pub const BINDINGS: &[Binding] = &[
     bind("toggle-mode", "pattern or song mode", "transport", Action::ToggleMode, &["alt+s"]),
     bind("toggle-bind", "bind mode", "automation", Action::ToggleBind, &["alt+a"]),
     bind("toggle-record", "record automation", "automation", Action::ToggleRecord, &["alt+r"]),
+    bind("toggle-audio-record", "record audio", "transport", Action::ToggleAudioRecord, &["alt+shift+r"]),
     bind("delete", "delete selected", "edit", Action::Delete, &["delete", "forwarddelete"]),
     bind("undo", "undo", "edit", Action::Undo, &["cmd+z"]),
     bind("redo", "redo", "edit", Action::Redo, &["cmd+shift+z"]),
@@ -93,6 +96,7 @@ pub const BINDINGS: &[Binding] = &[
     bind("save", "save", "file", Action::Save, &["cmd+s"]),
     bind("save-as", "save as", "file", Action::SaveAs, &["cmd+shift+s"]),
     bind("export", "export wav", "file", Action::Export, &["cmd+e"]),
+    bind("import-audio", "import audio", "file", Action::ImportAudio, &["cmd+i"]),
     bind("settings", "settings", "file", Action::Settings, &["cmd+comma"]),
 ];
 

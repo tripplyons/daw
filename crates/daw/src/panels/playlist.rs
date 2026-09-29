@@ -1,14 +1,15 @@
-//! Song arrangement: pattern and automation clips on tracks.
+//! Song arrangement: pattern, automation, and audio clips on tracks.
 //!
-//! Left click places the brush clip or drags clips (the right edge resizes),
+//! Left click places the brush clip or drags clips (either edge trims),
 //! double click opens a clip, right click deletes, right drag (or Ctrl drag
 //! on macOS) selects a box, Alt click splits a clip. Click a track name to
 //! select the track, or its square to mute it; right click it for its menu.
 //! In the ruler, left click seeks and right drag sets the loop.
 
 use daw_engine::song::PlayMode;
-use daw_model::time::{Grid, Ticks};
-use daw_model::{Clip, ClipId, ClipSource};
+use daw_engine::input::Take;
+use daw_model::time::{Grid, TICKS_PER_BEAT, Ticks, seconds_to_ticks};
+use daw_model::{Clip, ClipId, ClipSource, Source};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::row;
@@ -17,7 +18,9 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mous
 use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
 use super::{label, pick};
 use crate::app::{App, Message as AppMessage};
+use crate::keys::Action;
 use crate::menu;
+use crate::session::PEAK_FRAMES;
 use crate::theme;
 
 const HEADER_WIDTH: f32 = 84.0;
@@ -37,8 +40,17 @@ pub struct State {
     /// What a click on empty space places.
     pub brush: Option<ClipSource>,
     originals: Vec<Clip>,
-    resizing: bool,
+    /// The edge being dragged, or `None` when moving clips.
+    resizing: Option<Edge>,
     clipboard: Vec<Clip>,
+}
+
+/// A clip edge. Dragging the start trims the clip's beginning and keeps its
+/// content in place; dragging the end changes its length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Edge {
+    Start,
+    End,
 }
 
 impl Default for State {
@@ -51,7 +63,7 @@ impl Default for State {
             selected_track: None,
             brush: None,
             originals: Vec::new(),
-            resizing: false,
+            resizing: None,
             clipboard: Vec::new(),
         }
     }
@@ -64,7 +76,7 @@ pub enum Message {
     /// Alt+scroll: track height, keeping the track under `y` in place.
     ZoomTracks { steps: f32, y: f32 },
     Add { start: Ticks, track: usize },
-    Begin { id: ClipId, resize: bool, additive: bool },
+    Begin { id: ClipId, edge: Option<Edge>, additive: bool },
     Drag { ticks: f64, tracks: i32, bypass: bool },
     End,
     Delete(ClipId),
@@ -103,6 +115,7 @@ fn source_name(app: &App, source: ClipSource) -> String {
     match source {
         ClipSource::Pattern(id) => app.project.pattern(id).map(|p| p.name.clone()).unwrap_or_default(),
         ClipSource::Automation(id) => app.project.automation_clip(id).map(|a| a.name.clone()).unwrap_or_default(),
+        ClipSource::Audio(id) => app.project.channel(id).map(|c| c.name.clone()).unwrap_or_default(),
     }
 }
 
@@ -149,13 +162,19 @@ pub fn update(app: &mut App, message: Message) {
             let brush = app.playlist.brush.unwrap_or(ClipSource::Pattern(app.selected_pattern));
             app.checkpoint();
             grow_tracks(app, track + 1);
-            let id = app.project.add_clip(track, start, brush);
+            let id = match brush {
+                ClipSource::Audio(channel) => {
+                    let length = app.audio_length(channel).unwrap_or(app.project.signature.ticks_per_bar());
+                    app.project.add_audio_clip(track, start, channel, length)
+                }
+                _ => app.project.add_clip(track, start, brush),
+            };
             app.playlist.selected = vec![id];
-            app.playlist.resizing = false;
+            app.playlist.resizing = None;
             begin_drag(app);
             app.edited();
         }
-        Message::Begin { id, resize, additive } => {
+        Message::Begin { id, edge, additive } => {
             app.checkpoint();
             let selected = &mut app.playlist.selected;
             if additive {
@@ -170,7 +189,7 @@ pub fn update(app: &mut App, message: Message) {
             if let Some(clip) = app.project.playlist.clips.iter().find(|c| c.id == id) {
                 app.playlist.brush = Some(clip.source);
             }
-            app.playlist.resizing = resize;
+            app.playlist.resizing = edge;
             begin_drag(app);
         }
         Message::Drag { ticks, tracks, bypass } => {
@@ -182,12 +201,30 @@ pub fn update(app: &mut App, message: Message) {
             let max_track = originals.iter().map(|c| c.track as i32 + tracks).max().unwrap_or(0);
             grow_tracks(app, (max_track + 1).max(0) as usize);
             for original in originals {
+                // Audio clips end where their file does.
+                let file_end = match original.source {
+                    ClipSource::Audio(channel) => app.audio_length(channel),
+                    _ => None,
+                };
                 let Some(clip) = app.project.playlist.clips.iter_mut().find(|c| c.id == original.id) else { continue };
-                if resizing {
-                    clip.length = (original.length as i64 + delta).max(min_length as i64) as Ticks;
-                } else {
-                    clip.start = (original.start as i64 + delta).max(0) as Ticks;
-                    clip.track = (original.track as i32 + tracks).max(0) as usize;
+                match resizing {
+                    Some(Edge::End) => {
+                        let length = (original.length as i64 + delta).max(min_length as i64) as Ticks;
+                        clip.length = file_end.map_or(length, |end| length.min(end.saturating_sub(original.offset).max(1)));
+                    }
+                    Some(Edge::Start) => {
+                        // The start cannot go before the song or the source's start.
+                        let earliest = -(original.offset.min(original.start) as i64);
+                        let latest = (original.length as i64 - min_length as i64).max(0);
+                        let delta = delta.clamp(earliest, latest);
+                        clip.start = (original.start as i64 + delta) as Ticks;
+                        clip.offset = (original.offset as i64 + delta) as Ticks;
+                        clip.length = (original.length as i64 - delta) as Ticks;
+                    }
+                    None => {
+                        clip.start = (original.start as i64 + delta).max(0) as Ticks;
+                        clip.track = (original.track as i32 + tracks).max(0) as usize;
+                    }
                 }
             }
             app.edited();
@@ -232,6 +269,10 @@ pub fn update(app: &mut App, message: Message) {
                     app.show_panel(daw_model::layout::Panel::PianoRoll);
                 }
                 ClipSource::Automation(automation) => app.open_automation(automation),
+                ClipSource::Audio(channel) => {
+                    super::channel_rack::select(app, channel);
+                    app.show_panel(daw_model::layout::Panel::ChannelRack);
+                }
             }
         }
         Message::BoxSelect { from, to, additive } => {
@@ -381,6 +422,10 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     choices.extend(
         app.project.automation.iter().map(|a| BrushChoice { source: ClipSource::Automation(a.id), name: a.name.clone() }),
     );
+    choices.extend(app.project.channels.iter().filter(|c| matches!(c.source, Source::Audio { .. })).map(|c| BrushChoice {
+        source: ClipSource::Audio(c.id),
+        name: c.name.clone(),
+    }));
     let brush = app.playlist.brush.unwrap_or(ClipSource::Pattern(app.selected_pattern));
     let current = choices.iter().find(|c| c.source == brush).cloned();
     let delete: Element<'_, AppMessage> = match app.playlist.selected_track {
@@ -390,6 +435,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     row![
         super::tool("+ track", Message::AddTrack.into()),
         delete,
+        super::tool("+ audio", AppMessage::Action(Action::ImportAudio)),
         label("brush"),
         pick(choices, current, |c| Message::Brush(c).into()),
         label("snap"),
@@ -447,10 +493,17 @@ impl Arrangement<'_> {
         Rectangle { x, y: self.track_y(clip.track), width, height: self.state().track_height }
     }
 
-    fn hit(&self, p: Point) -> Option<(ClipId, bool)> {
+    /// The clip under `p`, and the edge when `p` is on one.
+    fn hit(&self, p: Point) -> Option<(ClipId, Option<Edge>)> {
         self.app.project.playlist.clips.iter().rev().find_map(|c| {
             let r = self.clip_rect(c);
-            r.contains(p).then_some((c.id, p.x > r.x + r.width - EDGE && r.width > EDGE * 2.0))
+            let edge = match p.x {
+                _ if r.width <= EDGE * 3.0 => None,
+                x if x > r.x + r.width - EDGE => Some(Edge::End),
+                x if x < r.x + EDGE => Some(Edge::Start),
+                _ => None,
+            };
+            r.contains(p).then_some((c.id, edge))
         })
     }
 
@@ -525,11 +578,88 @@ impl Arrangement<'_> {
                 });
                 frame.stroke(&path, Stroke::default().with_color(content).with_width(1.0));
             }
+            ClipSource::Audio(channel) => {
+                let Some(Source::Audio { path }) = app.project.channel(channel).map(|c| &c.source) else { return };
+                let Some((sample, peaks)) = app.session.waveform(path) else { return };
+                let frames_per_tick = sample.sample_rate * 60.0 / (app.project.bpm * f64::from(TICKS_PER_BEAT));
+                let frame_at = |x: f32| (view.tick(x - HEADER_WIDTH) - clip.start as f64 + clip.offset as f64) * frames_per_tick;
+                let level = |from: usize, to: usize| {
+                    let peaks = peaks.get(from / PEAK_FRAMES..(to - 1) / PEAK_FRAMES + 1).unwrap_or_default();
+                    peaks.iter().fold(0.0f32, |m, &p| m.max(p))
+                };
+                draw_waveform(frame, inner, sample.left.len(), frame_at, level, content);
+            }
         }
         let name = source_name(app, clip.source);
         let visible_x = body.x.max(HEADER_WIDTH);
         let name = timeline::fit(&name, body.x + body.width - visible_x - 4.0);
         timeline::label(frame, name, Point::new(visible_x + 3.0, body.y), text);
+    }
+}
+
+impl Arrangement<'_> {
+    /// The take being recorded, on the track it will land on.
+    fn draw_take(&self, frame: &mut Frame<Renderer>, take: &Take) {
+        let app = self.app;
+        let channels = usize::from(take.channels.max(1));
+        let frames = take.samples.len() / channels;
+        let rate = f64::from(take.sample_rate);
+        let start = take.start.max(app.song_start.max(0.0));
+        let end = take.start + seconds_to_ticks(frames as f64 / rate, app.project.bpm);
+        if end <= start {
+            return;
+        }
+        let clips = &app.project.playlist.clips;
+        let busy = |track: usize| clips.iter().any(|c| c.track == track && (c.start as f64) < end && (c.end() as f64) > start);
+        let track = (0..app.project.playlist.tracks.len()).find(|&t| !busy(t)).unwrap_or(app.project.playlist.tracks.len());
+        let view = self.state().time;
+        let x = HEADER_WIDTH + view.x(start);
+        let body = Rectangle {
+            x,
+            y: self.track_y(track) + 1.0,
+            width: (HEADER_WIDTH + view.x(end) - x).max(1.0),
+            height: self.state().track_height - 2.0,
+        };
+        frame.fill_rectangle(body.position(), body.size(), theme::CONTROL_HOVER);
+        let inner = Rectangle { y: body.y + 13.0, height: (body.height - 15.0).max(1.0), ..body };
+        let frames_per_tick = rate * 60.0 / (app.project.bpm * f64::from(TICKS_PER_BEAT));
+        let frame_at = |x: f32| (view.tick(x - HEADER_WIDTH) - take.start) * frames_per_tick;
+        // Look at a bounded number of frames per column: the take has no
+        // peak summary yet and grows every tick.
+        let level = |from: usize, to: usize| {
+            let stride = ((to - from) / 64).max(1);
+            let samples = take.samples[from * channels..to * channels].chunks(channels).step_by(stride);
+            samples.flatten().fold(0.0f32, |m, s| m.max(s.abs()))
+        };
+        draw_waveform(frame, inner, frames, frame_at, level, theme::FILL);
+        let visible_x = body.x.max(HEADER_WIDTH);
+        let name = timeline::fit("recording", body.x + body.width - visible_x - 4.0);
+        timeline::label(frame, name, Point::new(visible_x + 3.0, body.y), theme::TEXT);
+    }
+}
+
+/// Draw a waveform across `area`, two pixels per column. `frame_at` maps a
+/// canvas x to a frame of the file, which has `frames` frames, and `level`
+/// gives the peak of frames `from..to`, where `from < to`.
+fn draw_waveform(
+    frame: &mut Frame<Renderer>,
+    area: Rectangle,
+    frames: usize,
+    frame_at: impl Fn(f32) -> f64,
+    level: impl Fn(usize, usize) -> f32,
+    color: Color,
+) {
+    const COLUMN: f32 = 2.0;
+    let middle = area.y + area.height / 2.0;
+    let mut x = area.x.max(HEADER_WIDTH);
+    while x < area.x + area.width {
+        let from = frame_at(x).max(0.0) as usize;
+        let to = (frame_at(x + COLUMN).max(0.0) as usize).max(from + 1).min(frames);
+        if from < to {
+            let half = (level(from, to).min(1.0) * area.height / 2.0).max(0.5);
+            frame.fill_rectangle(Point::new(x, middle - half), Size::new(COLUMN - 0.5, half * 2.0), color);
+        }
+        x += COLUMN;
     }
 }
 
@@ -580,9 +710,9 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                 match (button, self.hit(p)) {
                     (Button::Left, Some((id, _))) if state.modifiers.alt() => publish(Message::Split(id, tick)),
                     (Button::Left, Some((id, _))) if double => publish(Message::Open(id)),
-                    (Button::Left, Some((id, resize))) => {
+                    (Button::Left, Some((id, edge))) => {
                         state.drag = Some(Drag::Clips { tick, track });
-                        publish(Message::Begin { id, resize, additive: state.modifiers.shift() })
+                        publish(Message::Begin { id, edge, additive: state.modifiers.shift() })
                     }
                     (Button::Left, None) if !timeline::box_select_modifier(state.modifiers) => {
                         let app = self.app;
@@ -668,6 +798,9 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             let selected = playlist.selected.contains(&clip.id);
             self.draw_clip(&mut frame, clip, selected);
         }
+        if let Some(take) = app.session.current_take() {
+            self.draw_take(&mut frame, take);
+        }
 
         if let Some(Drag::Box { from, to, .. }) = state.drag {
             let top_left = Point::new(from.x.min(to.x), from.y.min(to.y));
@@ -717,7 +850,7 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
         let Some(p) = cursor.position_in(bounds) else { return mouse::Interaction::default() };
         match (state.drag, self.hit(p)) {
             (Some(Drag::Clips { .. }), _) => mouse::Interaction::Grabbing,
-            (_, Some((_, true))) => mouse::Interaction::ResizingHorizontally,
+            (_, Some((_, Some(_)))) => mouse::Interaction::ResizingHorizontally,
             (_, Some(_)) => mouse::Interaction::Grab,
             _ if p.x < HEADER_WIDTH || p.y < RULER_HEIGHT => mouse::Interaction::Pointer,
             _ => mouse::Interaction::Crosshair,

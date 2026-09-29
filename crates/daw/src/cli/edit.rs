@@ -11,6 +11,7 @@ use daw_plugins::PluginKind;
 use daw_plugins::scan::Catalog;
 
 use super::parse::{self, Time};
+use crate::app::audio::file_length;
 use super::{find_plugin, ticks};
 
 #[derive(Subcommand)]
@@ -73,6 +74,9 @@ pub enum ChannelOp {
         /// One-shot WAV sample.
         #[arg(long, group = "source")]
         sampler: Option<String>,
+        /// WAV file for audio clips, which play it at its own speed. Place it with `clip add audio:ID`.
+        #[arg(long, group = "source")]
+        audio: Option<String>,
         /// Instrument plugin, by id or name from `daw plugins`.
         #[arg(long, group = "source")]
         plugin: Option<String>,
@@ -107,7 +111,7 @@ pub enum ChannelOp {
         /// Synth only: 0 to 1, from 40 Hz to 18 kHz.
         #[arg(long, value_parser = parse::unit)]
         cutoff: Option<f32>,
-        /// Sampler only: WAV path.
+        /// Sampler or audio channel: WAV path.
         #[arg(long)]
         sample: Option<String>,
         /// Sampler only.
@@ -176,9 +180,9 @@ pub enum NoteOp {
 
 #[derive(Subcommand)]
 pub enum ClipOp {
-    /// Place a pattern or automation clip, whole by default. Missing tracks are added.
+    /// Place a pattern, automation, or audio clip, whole by default. Missing tracks are added.
     Add {
-        /// pattern:ID or automation:ID.
+        /// pattern:ID, automation:ID, or audio:CHANNEL.
         #[arg(value_parser = parse::clip_source)]
         source: ClipSource,
         track: usize,
@@ -365,14 +369,21 @@ pub fn apply(project: &mut Project, op: Op, catalog: impl FnOnce() -> Catalog) -
 
 fn channel(project: &mut Project, op: ChannelOp, catalog: impl FnOnce() -> Catalog) -> Result<String, String> {
     match op {
-        ChannelOp::Add { name, synth, sampler, plugin, root } => {
-            let source = match (synth, sampler, plugin) {
-                (_, Some(path), _) => Source::Sampler { path, root_key: root },
-                (_, _, Some(query)) => {
+        ChannelOp::Add { name, synth, sampler, audio, plugin, root } => {
+            let source = match (synth, sampler, audio, plugin) {
+                (_, Some(path), _, _) => Source::Sampler { path, root_key: root },
+                (_, _, Some(path), _) => {
+                    // The app may run from another folder, so keep the absolute path.
+                    let path = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
+                    let path = path.to_string_lossy().into_owned();
+                    file_length(&path, project.bpm)?;
+                    Source::Audio { path }
+                }
+                (_, _, _, Some(query)) => {
                     let plugin = find_plugin(&catalog(), &query, PluginKind::Instrument)?;
                     Source::Plugin(project.add_plugin(plugin))
                 }
-                (waveform, None, None) => {
+                (waveform, None, None, None) => {
                     Source::Synth(SynthParams { waveform: waveform.unwrap_or(Waveform::Saw), ..SynthParams::default() })
                 }
             };
@@ -416,6 +427,12 @@ fn channel(project: &mut Project, op: ChannelOp, catalog: impl FnOnce() -> Catal
                     }
                     *path = sample.unwrap_or(std::mem::take(path));
                     *root_key = root.unwrap_or(*root_key);
+                }
+                Source::Audio { path } => {
+                    if synth_edit || root.is_some() {
+                        return Err(format!("channel {id} is audio; only --sample applies"));
+                    }
+                    *path = sample.unwrap_or(std::mem::take(path));
                 }
                 Source::Plugin(_) if synth_edit || sampler_edit => {
                     return Err(format!("channel {id} is a plugin; its settings live in the plugin"));
@@ -514,6 +531,10 @@ fn clip(project: &mut Project, op: ClipOp) -> Result<String, String> {
             let source_length = match source {
                 ClipSource::Pattern(id) => find_pattern(project, id.0)?.length,
                 ClipSource::Automation(id) => find_automation(project, id.0)?.length,
+                ClipSource::Audio(id) => match find_channel(project, id.0)?.source.clone() {
+                    Source::Audio { path } => file_length(&path, project.bpm)?,
+                    _ => return Err(format!("channel {} is not an audio channel", id.0)),
+                },
             };
             while project.playlist.tracks.len() <= track {
                 let number = project.playlist.tracks.len() + 1;

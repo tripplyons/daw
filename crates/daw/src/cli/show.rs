@@ -54,6 +54,7 @@ fn overview(project: &Project) -> String {
                 p.cutoff
             ),
             Source::Sampler { path, root_key } => format!("sampler {path:?} root {}", key_name(*root_key)),
+            Source::Audio { path } => format!("audio {path:?}"),
             Source::Plugin(instance) => match project.plugin(*instance) {
                 Some(p) => format!("plugin {} {:?} ({} {})", instance.0, p.plugin.name, p.plugin.format, p.plugin.id),
                 None => format!("missing plugin {}", instance.0),

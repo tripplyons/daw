@@ -228,3 +228,34 @@ fn analyze_finds_a_tone_in_its_octave_band() {
     assert_eq!(loudest, 4, "1 kHz lands in the 1k band: {row}");
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn audio_channels_place_clips_as_long_as_their_file() {
+    let dir = std::env::temp_dir().join(format!("daw-cli-audio-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("loop.wav");
+    let spec = hound::WavSpec { channels: 2, sample_rate: 44_100, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let mut writer = hound::WavWriter::create(&wav, spec).unwrap();
+    for _ in 0..44_100 * 2 {
+        writer.write_sample(0i16).unwrap();
+    }
+    writer.finalize().unwrap();
+
+    let mut project = Project::new();
+    project.bpm = 120.0;
+    let channel = id(edit(&mut project, &format!("channel add loop --audio {}", wav.display())));
+    let path = std::fs::canonicalize(&wav).unwrap().to_string_lossy().into_owned();
+    assert_eq!(project.channel(daw_model::ChannelId(channel)).unwrap().source, Source::Audio { path });
+    assert!(edit(&mut project, &format!("channel set {channel} --root C3")).is_err());
+
+    // One second at 120 bpm is two beats; the offset comes off the length.
+    let clip = id(edit(&mut project, &format!("clip add audio:{channel} 0 1bar --offset 1beat")));
+    let placed = project.playlist.clips.iter().find(|c| c.id.0 == clip).unwrap();
+    assert_eq!((placed.start, placed.length, placed.offset), (3840, 960, 960));
+    assert_eq!(parse::clip_source_name(placed.source), format!("audio:{channel}"));
+
+    let synth = project.channels[0].id.0;
+    assert!(edit(&mut project, &format!("clip add audio:{synth} 0 0")).is_err());
+    assert!(edit(&mut project, "channel add missing --audio /no/such/file.wav").is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

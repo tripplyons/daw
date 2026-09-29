@@ -677,3 +677,80 @@ fn right_click_menu_renames_and_deletes() {
     assert_eq!(app.project.playlist.tracks.len(), tracks - 1);
     assert!(app.menu.is_none());
 }
+
+/// Write a mono WAV of `frames` frames at 48 kHz.
+fn write_wav(path: &std::path::Path, frames: usize) {
+    let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+    let mut writer = hound::WavWriter::create(path, spec).unwrap();
+    for i in 0..frames {
+        writer.write_sample((i as f32 * 0.01).sin() * 0.5).unwrap();
+    }
+    writer.finalize().unwrap();
+}
+
+#[test]
+fn recorded_takes_start_at_the_song_marker_and_undo() {
+    let dir = std::env::temp_dir().join(format!("daw-take-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = app();
+    app.path = Some(dir.join("song.dawproj"));
+    app.project.bpm = 120.0;
+    app.song_start = 1920.0;
+    let channels = app.project.channels.len();
+    // One second of stereo input whose first quarter second came before the
+    // marker, because of input latency.
+    let take = daw_engine::input::Take { start: 1440.0, channels: 2, sample_rate: 48_000, samples: vec![0.25; 96_000] };
+    let path = app.place_take(take).unwrap().expect("a take");
+    assert_eq!(path, dir.join("recordings").join("take 1.wav"));
+
+    let reader = hound::WavReader::open(&path).unwrap();
+    assert_eq!((reader.spec().channels, reader.duration()), (2, 36_000));
+    let channel = app.project.channels.last().unwrap();
+    assert_eq!(channel.source, daw_model::Source::Audio { path: path.to_string_lossy().into_owned() });
+    let clip = app.project.playlist.clips.last().unwrap();
+    assert_eq!((clip.source, clip.start, clip.length, clip.offset), (ClipSource::Audio(channel.id), 1920, 1440, 0));
+
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.channels.len(), channels);
+    assert!(app.project.playlist.clips.is_empty());
+
+    // Audio that all came before the marker is dropped.
+    let early = daw_engine::input::Take { start: 0.0, channels: 1, sample_rate: 48_000, samples: vec![0.0; 100] };
+    assert_eq!(app.place_take(early), Ok(None));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn dropped_audio_places_a_clip_that_trims_from_both_edges() {
+    let dir = std::env::temp_dir().join(format!("daw-import-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("vocal.wav");
+    write_wav(&wav, 48_000);
+    let mut app = app();
+    app.project.bpm = 120.0;
+    let _ = app.update(Message::Dropped(wav.clone()));
+    let channel = app.project.channels.last().unwrap().clone();
+    assert_eq!(channel.name, "vocal");
+    let clip = app.project.playlist.clips[0].clone();
+    // One second at 120 bpm is two beats.
+    assert_eq!((clip.start, clip.length, clip.source), (0, 1920, ClipSource::Audio(channel.id)));
+
+    let drag = |app: &mut App, edge, ticks| {
+        let _ = app.update(list::Message::Begin { id: clip.id, edge, additive: false }.into());
+        let _ = app.update(list::Message::Drag { ticks, tracks: 0, bypass: true }.into());
+        let _ = app.update(list::Message::End.into());
+        let clip = &app.project.playlist.clips[0];
+        (clip.start, clip.length, clip.offset)
+    };
+    assert_eq!(drag(&mut app, Some(list::Edge::Start), 480.0), (480, 1440, 480));
+    assert_eq!(drag(&mut app, Some(list::Edge::End), 5000.0), (480, 1440, 480), "stops at the file end");
+    assert_eq!(drag(&mut app, Some(list::Edge::Start), -2000.0), (0, 1920, 0), "stops at the file start");
+    assert_eq!(drag(&mut app, None, 960.0), (960, 1920, 0));
+
+    // The brush is now the audio channel, so a click places the whole file.
+    let _ = app.update(list::Message::Add { start: 7680, track: 0 }.into());
+    let _ = app.update(list::Message::End.into());
+    let added = app.project.playlist.clips.last().unwrap();
+    assert_eq!((added.start, added.length, added.source), (7680, 1920, ClipSource::Audio(channel.id)));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
