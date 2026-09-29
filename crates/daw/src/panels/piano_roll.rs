@@ -154,8 +154,7 @@ pub fn update(app: &mut App, message: Message) {
                 app.refresh();
             }
             // Set the start marker; while playing, also jump there.
-            let (grid, signature) = (app.project.grid, app.project.signature);
-            app.pattern_start = grid.snap_floor(tick.max(0.0) as Ticks, signature) as f64;
+            app.pattern_start = timeline::marker_tick(tick, app.project.grid, app.project.signature) as f64;
             app.session.seek(app.pattern_start);
             app.position = app.pattern_start;
         }
@@ -403,8 +402,8 @@ enum Drag {
     Box { from: Point, to: Point, additive: bool },
     /// Moving the pattern end in the ruler.
     End,
-    /// Moving the start marker in the ruler.
-    Seek,
+    /// Moving the start marker in the ruler; it is set on release.
+    Seek { tick: f64 },
 }
 
 #[derive(Debug, Default)]
@@ -437,6 +436,10 @@ impl Roll<'_> {
 
     fn tick_at(&self, x: f32) -> f64 {
         self.state().time.tick(x - KEYS_WIDTH)
+    }
+
+    fn marker_tick(&self, tick: f64) -> Ticks {
+        timeline::marker_tick(tick, self.app.project.grid, self.app.project.signature)
     }
 
     fn note_rect(&self, note: &Note) -> Rectangle {
@@ -482,8 +485,8 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                         state.drag = Some(Drag::End);
                         return publish(Message::PatternEnd(self.tick_at(p.x)));
                     }
-                    state.drag = Some(Drag::Seek);
-                    return publish(Message::Seek(self.tick_at(p.x)));
+                    state.drag = Some(Drag::Seek { tick: self.tick_at(p.x) });
+                    return Some(canvas::Action::request_redraw().and_capture());
                 }
                 let key = self.key_at(p.y).clamp(0, 127);
                 if p.x < KEYS_WIDTH {
@@ -528,13 +531,16 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                         Some(canvas::Action::request_redraw())
                     }
                     Drag::End => publish(Message::PatternEnd(self.tick_at(p.x))),
-                    Drag::Seek => publish(Message::Seek(self.tick_at(p.x))),
+                    Drag::Seek { tick } => {
+                        *tick = self.tick_at(p.x);
+                        Some(canvas::Action::request_redraw())
+                    }
                 }
             }
             canvas::Event::Mouse(MouseEvent::ButtonReleased(_)) => match state.drag.take()? {
                 Drag::Notes { .. } => publish(Message::End),
                 Drag::End => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
-                Drag::Seek => None,
+                Drag::Seek { tick } => publish(Message::Seek(tick)),
                 Drag::Box { from, to, additive } => publish(Message::BoxSelect {
                     from: (self.tick_at(from.x), self.key_at(from.y)),
                     to: (self.tick_at(to.x), self.key_at(to.y)),
@@ -641,9 +647,19 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             }
         }
         frame.fill_rectangle(Point::ORIGIN, Size::new(KEYS_WIDTH, RULER_HEIGHT), theme::HEADER);
+        // While dragging in the ruler, the marker follows the pointer.
+        let seeking = match state.drag {
+            Some(Drag::Seek { tick }) => Some(self.marker_tick(tick) as f64),
+            _ => None,
+        };
+        if let Some(tick) = seeking {
+            timeline::draw_start_marker(&mut frame, roll.time, KEYS_WIDTH, size.height, tick);
+        }
         if app.mode == PlayMode::Pattern(app.selected_pattern) {
             // The start marker stays put; the playhead only moves away from it while playing.
-            timeline::draw_start_marker(&mut frame, roll.time, KEYS_WIDTH, size.height, app.pattern_start);
+            if seeking.is_none() {
+                timeline::draw_start_marker(&mut frame, roll.time, KEYS_WIDTH, size.height, app.pattern_start);
+            }
             if app.playing {
                 timeline::draw_playhead(&mut frame, roll.time, KEYS_WIDTH, size.height, app.position);
             }

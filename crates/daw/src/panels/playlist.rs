@@ -301,8 +301,7 @@ pub fn update(app: &mut App, message: Message) {
                 app.refresh();
             }
             // Set the start marker; while playing, also jump there.
-            let (grid, signature) = (app.project.grid, app.project.signature);
-            app.song_start = grid.snap_floor(tick.max(0.0) as Ticks, signature) as f64;
+            app.song_start = timeline::marker_tick(tick, app.project.grid, app.project.signature) as f64;
             app.session.seek(app.song_start);
             app.position = app.song_start;
         }
@@ -458,7 +457,8 @@ struct Arrangement<'a> {
 enum Drag {
     Clips { tick: f64, track: i32 },
     Box { from: Point, to: Point, additive: bool },
-    Seek,
+    /// Moving the start marker in the ruler; it is set on release.
+    Seek { tick: f64 },
     Loop { from: f64, to: f64 },
 }
 
@@ -484,6 +484,10 @@ impl Arrangement<'_> {
 
     fn tick_at(&self, x: f32) -> f64 {
         self.state().time.tick(x - HEADER_WIDTH)
+    }
+
+    fn marker_tick(&self, tick: f64) -> Ticks {
+        timeline::marker_tick(tick, self.app.project.grid, self.app.project.signature)
     }
 
     fn clip_rect(&self, clip: &Clip) -> Rectangle {
@@ -684,8 +688,8 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                     }
                     return match button {
                         Button::Left => {
-                            state.drag = Some(Drag::Seek);
-                            publish(Message::Seek(tick))
+                            state.drag = Some(Drag::Seek { tick });
+                            Some(canvas::Action::request_redraw().and_capture())
                         }
                         Button::Right => {
                             state.drag = Some(Drag::Loop { from: tick, to: tick });
@@ -745,8 +749,7 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                         *to = p;
                         Some(canvas::Action::request_redraw())
                     }
-                    Drag::Seek => publish(Message::Seek(tick)),
-                    Drag::Loop { to, .. } => {
+                    Drag::Seek { tick: to } | Drag::Loop { to, .. } => {
                         *to = tick;
                         Some(canvas::Action::request_redraw())
                     }
@@ -759,7 +762,7 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                     to: (self.tick_at(to.x), self.track_at(to.y).max(0) as usize),
                     additive,
                 }),
-                Drag::Seek => None,
+                Drag::Seek { tick } => publish(Message::Seek(tick)),
                 Drag::Loop { from, to } => {
                     let tiny = (self.state().time.x(to) - self.state().time.x(from)).abs() < 3.0;
                     publish(Message::Loop((!tiny).then_some((from, to))))
@@ -836,9 +839,19 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             }
         }
         frame.fill_rectangle(Point::ORIGIN, Size::new(HEADER_WIDTH, RULER_HEIGHT), theme::HEADER);
+        // While dragging in the ruler, the marker follows the pointer.
+        let seeking = match state.drag {
+            Some(Drag::Seek { tick }) => Some(self.marker_tick(tick) as f64),
+            _ => None,
+        };
+        if let Some(tick) = seeking {
+            timeline::draw_start_marker(&mut frame, playlist.time, HEADER_WIDTH, size.height, tick);
+        }
         if app.mode == PlayMode::Song {
             // The start marker stays put; the playhead only moves away from it while playing.
-            timeline::draw_start_marker(&mut frame, playlist.time, HEADER_WIDTH, size.height, app.song_start);
+            if seeking.is_none() {
+                timeline::draw_start_marker(&mut frame, playlist.time, HEADER_WIDTH, size.height, app.song_start);
+            }
             if app.playing {
                 timeline::draw_playhead(&mut frame, playlist.time, HEADER_WIDTH, size.height, app.position);
             }

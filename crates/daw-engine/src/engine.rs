@@ -353,16 +353,14 @@ impl Engine {
                 Command::Play => self.playing = true,
                 Command::Stop => {
                     self.playing = false;
-                    self.release_all(0);
-                    // Cut reverb and delay tails too, so stopping is silent.
-                    for node in &mut self.nodes {
-                        node.processor.reset();
-                    }
+                    self.silence();
                 }
                 Command::Seek(tick) => {
+                    // Stop the old playback fully before playing from the new
+                    // position, as stopping does.
+                    self.silence();
                     self.position = tick.max(0.0);
                     self.frames = self.ticks_to_frames(self.position);
-                    self.release_all(0);
                 }
                 Command::Param { node, id, value } => {
                     if let Some(node) = self.node_mut(node) {
@@ -382,6 +380,14 @@ impl Engine {
     fn release_all(&mut self, offset: u32) {
         for node in &mut self.nodes {
             node.release_all(offset);
+        }
+    }
+
+    /// Release held notes and cut voices and reverb and delay tails.
+    fn silence(&mut self) {
+        self.release_all(0);
+        for node in &mut self.nodes {
+            node.processor.reset();
         }
     }
 
@@ -693,13 +699,10 @@ impl Engine {
     /// Set up for an offline render from `start` ticks, bypassing the queue.
     pub fn start_offline(&mut self, start: Ticks) {
         self.handle_commands();
-        self.release_all(0);
+        self.silence();
         self.position = start as f64;
         self.frames = self.ticks_to_frames(self.position);
         self.playing = true;
-        for node in &mut self.nodes {
-            node.processor.reset();
-        }
     }
 
     pub fn stop_offline(&mut self) {

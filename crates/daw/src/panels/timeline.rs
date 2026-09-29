@@ -214,6 +214,12 @@ pub fn snap_delta(delta: f64, grid: Grid, signature: TimeSignature, bypass: bool
     }
 }
 
+/// The start marker position for a ruler click at `tick`: snapped down to
+/// the grid, never before the song start.
+pub fn marker_tick(tick: f64, grid: Grid, signature: TimeSignature) -> Ticks {
+    grid.snap_floor(tick.max(0.0) as Ticks, signature)
+}
+
 /// Detects double clicks inside a canvas.
 #[derive(Debug, Default)]
 pub struct Clicks {

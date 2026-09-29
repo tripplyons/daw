@@ -265,8 +265,8 @@ impl Processor for Ring {
     }
 }
 
-#[test]
-fn stop_cuts_effect_tails() {
+/// An engine playing a note on step 0 into a `Ring` on the master.
+fn engine_with_ring() -> (Engine, EngineHandle) {
     let mut project = unity_project();
     let channel = project.channels[0].id;
     let pattern = project.patterns[0].id;
@@ -283,10 +283,27 @@ fn stop_cuts_effect_tails() {
     assert!(handle.send(Command::AddNode(Node::new(effect.0, Box::new(Ring { level: 0.0 })))).is_ok());
     let playing = render(&mut engine, 1024);
     assert!(playing[1000] > 0.5, "the tail rings while playing");
+    (engine, handle)
+}
 
+#[test]
+fn stop_cuts_effect_tails() {
+    let (mut engine, mut handle) = engine_with_ring();
     assert!(handle.send(Command::Stop).is_ok());
     let stopped = render(&mut engine, 1024);
     assert!(stopped.iter().all(|s| *s == 0.0), "tail after stop: {}", stopped[0]);
+}
+
+#[test]
+fn seek_cuts_effect_tails_and_keeps_playing() {
+    let (mut engine, mut handle) = engine_with_ring();
+    assert!(handle.send(Command::Seek(1.0)).is_ok());
+    let moved = render(&mut engine, 1024);
+    assert!(moved.iter().all(|s| *s == 0.0), "tail after seek: {}", moved[0]);
+
+    assert!(handle.send(Command::Seek(0.0)).is_ok());
+    let replayed = render(&mut engine, 1024);
+    assert!(replayed[1000] > 0.5, "playback continues from the new position");
 }
 
 /// An engine playing `project` in song mode, where every audio channel's
