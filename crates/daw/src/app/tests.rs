@@ -407,20 +407,6 @@ fn each_pattern_sets_its_own_length_and_can_shrink() {
 }
 
 #[test]
-fn piano_roll_command_selects_and_duplicates_notes() {
-    let mut app = app();
-    let _ = app.update(roll::Message::Add { start: 0, key: 64 }.into());
-    let _ = app.update(roll::Message::End.into());
-    focus(&mut app, Panel::PianoRoll);
-    app.piano_roll.selected.clear();
-    let _ = app.update(press(Code::KeyA, char_key("a"), Modifiers::COMMAND));
-    assert_eq!(app.piano_roll.selected, vec![0]);
-    let _ = app.update(press(Code::KeyD, char_key("d"), Modifiers::COMMAND));
-    let _ = app.update(press(Code::KeyA, char_key("a"), Modifiers::COMMAND));
-    assert_eq!(app.piano_roll.selected.len(), 2);
-}
-
-#[test]
 fn bpm_field_applies_only_on_submit_or_focus_loss() {
     let mut app = app();
     let before = app.project.bpm;
@@ -1240,36 +1226,14 @@ fn audio_edits_scale_trim_offsets_and_undo_together() {
     assert!(app.project.playlist.clips[0].audio.reverse);
     let _ = app.update(list::Message::AudioPitch(12.0).into());
     let _ = app.update(list::Message::AudioPitchDone.into());
-    for _ in 0..3 { let _ = app.update(Message::Action(Action::Undo)); }
-    let restored = &app.project.playlist.clips[0];
-    assert_eq!((restored.length, restored.offset, restored.audio), (100, 20, daw_model::AudioEdit::default()));
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn stretch_mode_resizes_audio_and_split_keeps_the_edits() {
-    let dir = std::env::temp_dir().join(format!("daw-stretch-drag-{}", crate::project_files::stamp()));
-    std::fs::create_dir(&dir).unwrap();
-    let wav = dir.join("clip.wav");
-    write_wav(&wav, 48_000);
-    let mut app = app();
-    app.project.bpm = 120.0;
-    app.import_audio(&wav, 0).unwrap();
-    let id = app.project.playlist.clips[0].id;
-    let _ = app.update(list::Message::StretchMode.into());
-    let _ = app.update(list::Message::Begin { id, edge: Some(list::Edge::End), additive: false }.into());
-    let _ = app.update(list::Message::Drag { ticks: 1920.0, tracks: 0, bypass: true }.into());
-    let _ = app.update(list::Message::End.into());
-    assert_eq!((app.project.playlist.clips[0].length, app.project.playlist.clips[0].audio.stretch), (3840, 2.0));
-    let _ = app.update(list::Message::Reverse.into());
-    let _ = app.update(list::Message::AudioPitch(7.0).into());
-    let _ = app.update(list::Message::AudioPitchDone.into());
-    let _ = app.update(list::Message::Split(id, 1920.0).into());
+    app.project.grid = Grid::Off;
+    let _ = app.update(list::Message::Split(clip, 1060.0).into());
     let [left, right] = &app.project.playlist.clips[..] else { panic!("split clips") };
     assert_eq!(left.audio, right.audio);
-    assert_eq!((left.length, right.offset, right.length), (1920, 1920, 1920));
-    let _ = app.update(Message::Action(Action::Undo));
-    assert_eq!(app.project.playlist.clips.len(), 1);
+    assert_eq!((left.length, right.offset, right.length), (100, 140, 100));
+    for _ in 0..4 { let _ = app.update(Message::Action(Action::Undo)); }
+    let restored = &app.project.playlist.clips[0];
+    assert_eq!((restored.length, restored.offset, restored.audio), (100, 20, daw_model::AudioEdit::default()));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

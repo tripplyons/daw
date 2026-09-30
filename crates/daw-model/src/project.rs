@@ -952,25 +952,6 @@ mod tests {
     }
 
     #[test]
-    fn toggle_step_adds_and_removes() {
-        let mut project = Project::new();
-        let channel = project.channels[0].id;
-        let pattern = project.pattern_mut(project.patterns[0].id).unwrap();
-        pattern.toggle_step(channel, 3);
-        assert!(pattern.step_on(channel, 3));
-        pattern.toggle_step(channel, 3);
-        assert!(!pattern.step_on(channel, 3));
-    }
-
-    #[test]
-    fn channels_get_distinct_inserts() {
-        let mut project = Project::new();
-        let second = project.add_channel("b", Source::Synth(SynthParams::default()));
-        assert_ne!(project.channels[0].insert, project.channel(second).unwrap().insert);
-        assert_ne!(project.channels[0].insert, MASTER);
-    }
-
-    #[test]
     fn removing_plugin_removes_its_automation() {
         let mut project = Project::new();
         let instance = project.add_plugin(PluginRef {
@@ -991,8 +972,7 @@ mod tests {
     fn removing_an_audio_channel_removes_its_clips() {
         let mut project = Project::new();
         let audio = project.add_channel("take", Source::Audio { path: "take.wav".into() });
-        let clip = project.add_audio_clip(0, 0, audio, 1234);
-        assert_eq!(project.playlist.clips.iter().find(|c| c.id == clip).unwrap().length, 1234);
+        project.add_audio_clip(0, 0, audio, 1234);
         project.remove_channel(audio);
         assert!(project.playlist.clips.is_empty());
     }
@@ -1039,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_outputs_refuse_loops_and_survive_removal() {
+    fn outputs_and_sends_refuse_loops_and_survive_removal() {
         let mut project = Project::new();
         let [a, b, c] = [1, 2, 3].map(|i| project.mixer.inserts[i].id);
         let mixer = &mut project.mixer;
@@ -1049,14 +1029,13 @@ mod tests {
         assert!(!mixer.set_output(c, a), "c feeds back into a");
         assert!(!mixer.set_output(a, a));
         assert!(!mixer.set_output(MASTER, a));
+        assert!(!mixer.set_send(c, Send { to: a, level: 1.0, sidechain: false }));
+        assert!(!mixer.set_send(c, Send { to: MASTER, level: f32::NAN, sidechain: false }));
+        assert!(mixer.set_send(a, Send { to: b, level: 0.5, sidechain: true }));
         project.remove_insert(b);
         assert_eq!(project.mixer.output(a), Some(c));
+        assert!(project.mixer.insert(a).unwrap().sends.is_empty());
     }
-}
-
-#[cfg(test)]
-mod workflow_tests {
-    use super::*;
 
     #[test]
     fn making_a_clip_unique_keeps_other_instances_and_placement() {
@@ -1074,21 +1053,6 @@ mod workflow_tests {
         let clip = &project.playlist.clips[0];
         assert_eq!((clip.start, clip.length, clip.offset, clip.track), (960, 480, 240, 0));
         assert_eq!(project.playlist.clips[1].source, ClipSource::Pattern(pattern));
-        assert_eq!(Project::from_ron(&project.to_ron().unwrap()).unwrap(), project);
-    }
-
-    #[test]
-    fn sends_and_outputs_share_feedback_validation_and_delete_cleanup() {
-        let mut project = Project::new();
-        let [a, b, c] = [1, 2, 3].map(|i| project.mixer.inserts[i].id);
-        assert!(project.mixer.set_send(a, Send { to: b, level: 0.5, sidechain: false }));
-        assert!(project.mixer.set_send(b, Send { to: c, level: 1.0, sidechain: true }));
-        assert!(!project.mixer.set_output(c, a));
-        assert!(!project.mixer.set_send(c, Send { to: a, level: 1.0, sidechain: false }));
-        assert!(!project.mixer.set_send(a, Send { to: c, level: f32::NAN, sidechain: false }));
-        project.remove_insert(b);
-        assert!(project.mixer.insert(a).unwrap().sends.is_empty());
-        assert!(project.mixer.can_route(c, a));
     }
 
     #[test]

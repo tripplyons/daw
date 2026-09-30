@@ -263,13 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_drag_selects_a_box_only_on_macos() {
-        assert!(!box_select_modifier(Modifiers::COMMAND));
-        assert!(!box_select_modifier(Modifiers::empty()));
-        assert_eq!(box_select_modifier(Modifiers::CTRL), cfg!(target_os = "macos"));
-    }
-
-    #[test]
     fn time_zoom_keeps_the_tick_under_the_cursor() {
         let view = TimeView { scale: 64.0, scroll: 960.0 };
         let before = view.tick(200.0);

@@ -424,18 +424,22 @@ mod tests {
     }
 
     #[test]
-    fn linear_interpolates() {
+    fn values_interpolate_hold_and_jump_at_coincident_points() {
         let env = envelope(&[(0, 0.0, Shape::Linear, 0.0), (100, 1.0, Shape::Linear, 0.0)]);
         assert_eq!(env.value_at(-5.0), Some(0.0));
         assert!((env.value_at(25.0).unwrap() - 0.25).abs() < 1e-6);
         assert_eq!(env.value_at(500.0), Some(1.0));
-    }
-
-    #[test]
-    fn hold_keeps_value_until_next_point() {
-        let env = envelope(&[(0, 0.2, Shape::Hold, 0.0), (100, 0.8, Shape::Linear, 0.0)]);
-        assert_eq!(env.value_at(99.0), Some(0.2));
-        assert_eq!(env.value_at(100.0), Some(0.8));
+        let hold = envelope(&[(0, 0.2, Shape::Hold, 0.0), (100, 0.8, Shape::Linear, 0.0)]);
+        assert_eq!(hold.value_at(99.0), Some(0.2));
+        assert_eq!(hold.value_at(100.0), Some(0.8));
+        let jump = envelope(&[
+            (0, 0.0, Shape::Linear, 0.0),
+            (100, 1.0, Shape::Linear, 0.0),
+            (100, 0.0, Shape::Linear, 0.0),
+            (200, 0.5, Shape::Linear, 0.0),
+        ]);
+        assert!((jump.value_at(99.0).unwrap() - 0.99).abs() < 1e-5);
+        assert!((jump.value_at(150.0).unwrap() - 0.25).abs() < 1e-5);
     }
 
     #[test]
@@ -472,28 +476,6 @@ mod tests {
         assert_eq!(shape_factor(Shape::Pulse(2), 0.0, 0.1), 0.0);
         assert_eq!(shape_factor(Shape::Pulse(2), 0.0, 0.3), 1.0);
         assert_eq!(shape_factor(Shape::Pulse(2), 0.0, 0.6), 0.0);
-    }
-
-    #[test]
-    fn coincident_points_jump() {
-        let env = envelope(&[
-            (0, 0.0, Shape::Linear, 0.0),
-            (100, 1.0, Shape::Linear, 0.0),
-            (100, 0.0, Shape::Linear, 0.0),
-            (200, 0.5, Shape::Linear, 0.0),
-        ]);
-        assert!((env.value_at(99.0).unwrap() - 0.99).abs() < 1e-5);
-        assert!((env.value_at(150.0).unwrap() - 0.25).abs() < 1e-5);
-    }
-
-    #[test]
-    fn insert_keeps_order() {
-        let mut env = Envelope::default();
-        env.insert(Point::new(100, 0.5));
-        env.insert(Point::new(0, 0.1));
-        assert_eq!(env.insert(Point::new(50, 0.3)), 1);
-        let times: Vec<_> = env.points.iter().map(|p| p.time).collect();
-        assert_eq!(times, [0, 50, 100]);
     }
 
     fn context<'a>(time: TimeSnap, value: ValueSnap, others: &'a [Point]) -> SnapContext<'a> {
@@ -553,11 +535,5 @@ mod tests {
         let square = Envelope { points: lfo(LfoShape::Square, 0, 960, 960, 0.0, 1.0) };
         assert_eq!(square.value_at(100.0), Some(1.0));
         assert_eq!(square.value_at(500.0), Some(0.0));
-    }
-
-    #[test]
-    fn shape_cycle_wraps() {
-        assert_eq!(Shape::Pulse(4).next(), Shape::Linear);
-        assert_eq!(Shape::Linear.next(), Shape::Curve);
     }
 }

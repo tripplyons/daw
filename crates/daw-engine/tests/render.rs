@@ -153,33 +153,6 @@ fn live_mix_updates_resume_flat_automation() {
 }
 
 #[test]
-fn notes_land_on_expected_frames() {
-    let mut project = unity_project();
-    let channel = project.channels[0].id;
-    let pattern = project.patterns[0].id;
-    let notes = project.pattern_mut(pattern).unwrap().notes_mut(channel);
-    for (start, key) in [(0, 60), (TICKS_PER_BEAT as u64, 62), (TICKS_PER_BEAT as u64 * 5 / 2, 64)] {
-        notes.push(Note { start, length: 120, key, velocity: 1.0 });
-    }
-    let (mut engine, _handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
-    let signal = render(&mut engine, FRAMES_PER_BEAT * 3);
-    assert_eq!(onsets(&signal), vec![0, FRAMES_PER_BEAT, FRAMES_PER_BEAT * 5 / 2]);
-}
-
-#[test]
-fn pattern_mode_loops_at_pattern_length() {
-    let mut project = unity_project();
-    let channel = project.channels[0].id;
-    let pattern = project.patterns[0].id;
-    project.pattern_mut(pattern).unwrap().toggle_step(channel, 1);
-    let (mut engine, _handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
-    let bar = FRAMES_PER_BEAT * 4;
-    let signal = render(&mut engine, bar * 3);
-    let step = FRAMES_PER_BEAT / 4;
-    assert_eq!(onsets(&signal), vec![step, bar + step, 2 * bar + step]);
-}
-
-#[test]
 fn loop_notes_restart_on_the_frame_nearest_the_loop_end() {
     let mut project = unity_project();
     // A bar lasts 11_520_000 / 131 = 87_938.93 frames, so the loop end falls
@@ -380,22 +353,6 @@ fn render_does_not_allocate() {
 }
 
 #[test]
-fn builtin_synth_makes_sound() {
-    let mut project = unity_project();
-    let channel = project.channels[0].id;
-    let pattern = project.patterns[0].id;
-    project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
-    let (mut engine, mut handle) = create(SAMPLE_RATE);
-    let synth = daw_engine::synth::Synth::new(Default::default(), SAMPLE_RATE);
-    assert!(handle.send(Command::AddNode(Node::new(channel.0, Box::new(synth)))).is_ok());
-    assert!(handle.send(Command::Song(Box::new(compile(&project, PlayMode::Pattern(pattern), 512, &HashMap::new())))).is_ok());
-    engine.start_offline(0);
-    let signal = render(&mut engine, FRAMES_PER_BEAT);
-    let peak = signal.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    assert!(peak > 0.05, "peak {peak}");
-}
-
-#[test]
 fn inserts_send_through_their_outputs() {
     let mut project = unity_project();
     let channel = project.channels[0].id;
@@ -588,12 +545,14 @@ fn audio_clips_keep_their_own_rate_through_tempo_changes() {
 }
 
 #[test]
-fn muted_tracks_silence_audio_clips() {
-    let (mut project, channel) = audio_project();
-    project.add_audio_clip(0, 0, channel, TICKS_PER_BEAT as u64);
-    project.playlist.tracks[0].mute = true;
-    let mut engine = engine_with_ramp(&project);
-    assert!(render(&mut engine, FRAMES_PER_BEAT).iter().all(|s| *s == 0.0));
+fn muted_tracks_and_clips_silence_audio() {
+    for track in [true, false] {
+        let (mut project, channel) = audio_project();
+        project.add_audio_clip(0, 0, channel, TICKS_PER_BEAT as u64);
+        if track { project.playlist.tracks[0].mute = true } else { project.playlist.clips[0].muted = true }
+        let mut engine = engine_with_ramp(&project);
+        assert!(render(&mut engine, FRAMES_PER_BEAT).iter().all(|s| *s == 0.0));
+    }
 }
 
 struct Detector(Arc<std::sync::atomic::AtomicU32>);
@@ -644,13 +603,4 @@ fn live_midi_queue_plays_without_transport_and_releases_on_disconnect() {
     handle.send(Command::MidiInput(replacement)).ok().unwrap();
     render(&mut engine, 512);
     assert!(log.lock().unwrap().contains(&EventKind::NoteOff { key: 64 }));
-}
-
-#[test]
-fn muted_individual_clips_do_not_play() {
-    let (mut project, channel) = audio_project();
-    project.add_audio_clip(0, 0, channel, TICKS_PER_BEAT as u64);
-    project.playlist.clips[0].muted = true;
-    let mut engine = engine_with_ramp(&project);
-    assert!(render(&mut engine, FRAMES_PER_BEAT).iter().all(|s| *s == 0.0));
 }

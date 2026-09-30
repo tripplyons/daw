@@ -113,7 +113,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grid_steps() {
+    fn grid_steps_and_snapping() {
         let sig = TimeSignature::default();
         assert_eq!(Grid::Bar.step(sig), Some(3840));
         assert_eq!(Grid::Beat.step(sig), Some(960));
@@ -121,11 +121,6 @@ mod tests {
         assert_eq!(Grid::Triplet(8).step(sig), Some(320));
         assert_eq!(Grid::Dotted(8).step(sig), Some(720));
         assert_eq!(Grid::Off.step(sig), None);
-    }
-
-    #[test]
-    fn snapping_rounds_to_nearest() {
-        let sig = TimeSignature::default();
         assert_eq!(Grid::Beat.snap(470, sig), 0);
         assert_eq!(Grid::Beat.snap(490, sig), 960);
         assert_eq!(Grid::Beat.snap_floor(1900, sig), 960);

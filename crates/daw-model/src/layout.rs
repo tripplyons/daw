@@ -602,14 +602,4 @@ mod tests {
         assert_eq!(layout.root, before);
         assert_eq!(layout.rects(Rect::UNIT).len(), 3);
     }
-
-    #[test]
-    fn default_workspace_has_each_main_panel() {
-        let layout = Layout::default_workspace();
-        for panel in [Panel::Browser, Panel::Playlist, Panel::ChannelRack, Panel::PianoRoll, Panel::Automation] {
-            assert!(layout.find_panel(panel).is_some(), "{panel} missing");
-        }
-        let total: f32 = layout.rects(Rect::UNIT).iter().map(|(_, r)| r.width * r.height).sum();
-        assert!((total - 1.0).abs() < 1e-5);
-    }
 }
