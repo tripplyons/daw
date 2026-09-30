@@ -5,28 +5,31 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use daw_engine::output::BitDepth;
 use daw_engine::song::PlayMode;
 use daw_model::layout::{Axis, Layout, Panel, Rect, TileId};
 use daw_model::time::Ticks;
-use daw_model::{AutomationId, ChannelId, ClipSource, InsertId, InstanceId, PatternId, Project, Target};
+use daw_model::{ChannelId, ClipSource, InsertId, InstanceId, PatternId, Project, Target};
 use daw_plugins::scan::{Catalog, Progress};
 use iced::futures::channel::mpsc::{self, UnboundedReceiver};
 use iced::futures::{Stream, StreamExt, stream};
-use iced::widget::{button, column, container, mouse_area, pick_list, progress_bar, row, rule, stack, text, text_input};
-use iced::{Element, Length, Point, Size, Subscription, Task, event, keyboard, mouse, window};
+use iced::{Point, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::config;
+use crate::dialogs;
 use crate::keys::{Action, Keymap};
 use crate::menu::{self, Menu};
-use crate::panels::{self, automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
+use crate::panels::{automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
 use crate::session::Session;
-use crate::theme;
 
 pub mod audio;
+mod closing;
 mod history;
 mod rendering;
 mod saving;
+mod targets;
+mod view;
+
+use closing::Pending;
 
 /// Project given on the command line, set by `main` before the app starts.
 pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
@@ -34,7 +37,6 @@ pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::On
 pub const TRANSPORT_HEIGHT: f32 = 26.0;
 /// Height of the background job bar under the transport, while it shows.
 const JOBS_HEIGHT: f32 = 26.0;
-const GUTTER: f32 = 3.0;
 const UNDO_LIMIT: usize = 200;
 const LAST_TOUCHED: usize = 16;
 
@@ -105,27 +107,6 @@ pub enum SaveChoice {
     Save,
     Discard,
     Cancel,
-}
-
-/// What replaces the current project once its unsaved changes are saved or
-/// discarded.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Pending {
-    Close,
-    New,
-    Open(PathBuf),
-    Recover(PathBuf),
-}
-
-impl Pending {
-    fn verb(&self) -> String {
-        match self {
-            Pending::Close => "closing".into(),
-            Pending::New => "starting a new project".into(),
-            Pending::Open(path) => format!("opening \"{}\"", path.file_name().unwrap_or_default().to_string_lossy()),
-            Pending::Recover(_) => "recovering a backup".into(),
-        }
-    }
 }
 
 pub struct App {
@@ -415,107 +396,6 @@ impl App {
         self.status = status.into();
     }
 
-    pub fn target_name(&self, target: Target) -> String {
-        let insert_name = |id| self.project.mixer.insert(id).map(|i| i.name.clone()).unwrap_or_default();
-        let channel_name = |id| self.project.channel(id).map(|c| c.name.clone()).unwrap_or_default();
-        match target {
-            Target::Plugin { instance, param } => {
-                let plugin = self.project.plugin(instance).map(|p| p.plugin.name.clone()).unwrap_or_default();
-                format!("{plugin}: {}", self.session.param_name(instance, param))
-            }
-            Target::InsertVolume(id) => format!("{} volume", insert_name(id)),
-            Target::InsertPan(id) => format!("{} pan", insert_name(id)),
-            Target::ChannelVolume(id) => format!("{} volume", channel_name(id)),
-            Target::ChannelPan(id) => format!("{} pan", channel_name(id)),
-            Target::SynthCutoff(id) => format!("{} cutoff", channel_name(id)),
-            Target::Tempo => "tempo".into(),
-        }
-    }
-
-    /// Current normalized value of a target, for new automation clips.
-    pub fn target_value(&self, target: Target) -> f32 {
-        match target {
-            Target::Plugin { instance, param } => self.session.param_value(instance, param),
-            _ => self.project.target_value(target).unwrap_or(0.5),
-        }
-    }
-
-    /// Text for a target value in the parameter's own units.
-    pub fn value_text(&self, target: Target, value: f32) -> String {
-        match target {
-            Target::Plugin { instance, param } => self.session.param_text(instance, param, value),
-            Target::InsertVolume(_) => gain_text(value * 2.0),
-            Target::ChannelVolume(_) => gain_text(value),
-            Target::InsertPan(_) | Target::ChannelPan(_) => pan_text(value * 2.0 - 1.0),
-            Target::SynthCutoff(_) => format!("{:.0} Hz", 40.0 * (18000.0f32 / 40.0).powf(value)),
-            Target::Tempo => format!("{:.1} bpm", daw_model::automation::tempo_from_normalized(value)),
-        }
-    }
-
-    pub fn target_steps(&self, target: Target) -> u32 {
-        match target {
-            Target::Plugin { instance, param } => self.session.param_steps(instance, param),
-            _ => 0,
-        }
-    }
-
-    /// Note that a parameter was touched: feeds the last-touched list, bind
-    /// mode, and automation recording.
-    pub fn touched(&mut self, target: Target, value: f32) {
-        // Plugin parameters live in plugin state, which is saved with the project.
-        self.dirty = true;
-        if matches!(target, Target::Plugin { .. }) { self.revision += 1; }
-        self.last_touched.retain(|(t, _)| *t != target);
-        self.last_touched.push_front((target, value));
-        self.last_touched.truncate(LAST_TOUCHED);
-        if self.bind_mode && self.project.automation_for(target).is_none() {
-            self.checkpoint_parameter(target);
-            self.bind_at(target, value);
-        }
-        if self.record && self.playing {
-            automation::record(self, target, value);
-        }
-    }
-
-    /// Create an automation clip for `target` at the playhead (or loop range)
-    /// on a free playlist track, and open it in the automation editor.
-    pub fn bind(&mut self, target: Target) -> AutomationId {
-        let value = self.target_value(target);
-        self.bind_at(target, value)
-    }
-
-    /// Like `bind`, starting the new clip flat at `value`.
-    pub fn bind_at(&mut self, target: Target, value: f32) -> AutomationId {
-        if let Some(existing) = self.project.automation_for(target) {
-            self.open_automation(existing);
-            return existing;
-        }
-        let name = self.target_name(target);
-        let id = self.project.add_automation(&name, target, value);
-        let bar = self.project.signature.ticks_per_bar();
-        let (start, length) = match self.project.playlist.loop_range {
-            Some((start, end)) => (start, end - start),
-            None => (self.project.grid.snap_floor(self.position as Ticks, self.project.signature) / bar * bar, bar * 4),
-        };
-        if let Some(clip) = self.project.automation_clip_mut(id) {
-            clip.length = length;
-            clip.envelope.points[1].time = length;
-        }
-        let track = self.project.free_track(start, start + length);
-        self.project.add_clip(track, start, ClipSource::Automation(id));
-        self.set_status(format!("bound {name}"));
-        self.open_automation(id);
-        self.edited();
-        id
-    }
-
-    pub fn open_automation(&mut self, id: AutomationId) {
-        self.automation.clip = Some(id);
-        self.automation.values = automation::ValueRange::FULL;
-        self.automation.selected.clear();
-        self.show_panel(Panel::Automation);
-    }
-
     /// Make sure a panel is visible, replacing the focused tile if needed.
     pub fn show_panel(&mut self, panel: Panel) {
         let layout = self.layout_mut();
@@ -541,10 +421,10 @@ impl App {
                     _ => {}
                 }
                 let saves = self.poll_saves();
-                if self.bpm_text.is_some() {
-                    return Task::batch([saves, iced::widget::operation::is_focused("tempo").map(Message::BpmFocused)]);
+                if self.bpm_text.is_none() {
+                    return saves;
                 }
-                return saves;
+                return Task::batch([saves, iced::widget::operation::is_focused("tempo").map(Message::BpmFocused)]);
             }
             Message::CancelAudio => self.session.cancel_audio(),
             Message::RetryAudio => { self.refresh(); if self.session.audio_progress().is_some() { self.set_status("processing audio"); } }
@@ -641,7 +521,6 @@ impl App {
                 let path = if path.extension().is_none() { path.with_extension("dawzip") } else { path };
                 self.pack(path);
             }
-            Message::PackPicked(None) => {}
             Message::NewPattern => {
                 self.checkpoint();
                 let id = self.project.add_pattern();
@@ -680,13 +559,13 @@ impl App {
             }
             Message::OpenPlugin(instance) => {
                 self.param_instance = Some(instance);
+                if !self.session.has_editor(instance) {
+                    self.show_panel(Panel::Parameters);
+                    return Task::none();
+                }
                 let title = self.project.plugin(instance).map(|p| p.plugin.name.clone()).unwrap_or_default();
-                if self.session.has_editor(instance) {
-                    if let Err(error) = self.session.open_editor(instance, &title) {
-                        self.set_status(error);
-                        self.show_panel(Panel::Parameters);
-                    }
-                } else {
+                if let Err(error) = self.session.open_editor(instance, &title) {
+                    self.set_status(error);
                     self.show_panel(Panel::Parameters);
                 }
             }
@@ -702,15 +581,9 @@ impl App {
                     self.show_panel(Panel::Parameters);
                 }
             }
-            Message::Opened(path) => {
-                if let Some(path) = path {
-                    return self.guard(Pending::Open(path));
-                }
-            }
-            Message::ImportAudio(path) => {
-                if let Some(path) = path
-                    && let Err(error) = self.import_audio(&path, self.song_start.max(0.0).round() as Ticks)
-                {
+            Message::Opened(Some(path)) => return self.guard(Pending::Open(path)),
+            Message::ImportAudio(Some(path)) => {
+                if let Err(error) = self.import_audio(&path, self.song_start.max(0.0).round() as Ticks) {
                     self.set_status(error);
                 }
             }
@@ -726,12 +599,9 @@ impl App {
                 };
             }
             Message::RecoverPicked(Some(path)) => return self.guard(Pending::Recover(path)),
-            Message::RecoverPicked(None) => {},
-            Message::SavedAs(path) => {
-                if let Some(path) = path {
-                    self.path = Some(path);
-                    self.save();
-                }
+            Message::SavedAs(Some(path)) | Message::SavedAsThenContinue(Some(path)) => {
+                self.path = Some(path);
+                self.save();
             }
             Message::Screenshot => {
                 return window::latest().and_then(window::screenshot).map(Message::Captured);
@@ -754,7 +624,7 @@ impl App {
             }
             Message::SaveChoice(SaveChoice::Save) => {
                 if self.path.is_none() {
-                    return Task::perform(save_dialog(), Message::SavedAsThenContinue);
+                    return save_as(Message::SavedAsThenContinue);
                 }
                 // `save_finished` runs the pending step once the save works.
                 self.save();
@@ -769,23 +639,19 @@ impl App {
                 self.pending = None;
                 self.saving.cancel_wait();
             }
-            Message::SavedAsThenContinue(Some(path)) => {
-                self.path = Some(path);
-                self.save();
-            }
-            Message::Exported(path) => {
-                if let Some(path) = path {
-                    let path = if path.extension().is_none() { path.with_extension("wav") } else { path };
-                    self.session.store_states(&mut self.project);
-                    let options = crate::session::RenderOptions { depth: BitDepth::Int24, range: None, tail_seconds: self.project.render.export_tail_seconds };
-                    let started = if self.rendering.busy() { Err("an audio render is already running".into()) }
-                        else { self.session.renderer(&self.project).and_then(|renderer| self.rendering.start(renderer, rendering::Kind::Export, path, options, self.revision)) };
-                    match started {
-                        Ok(()) => self.set_status("exporting audio"),
-                        Err(error) => self.set_status(format!("export failed: {error}")),
-                    }
+            Message::Exported(Some(path)) => {
+                let path = if path.extension().is_none() { path.with_extension("wav") } else { path };
+                match self.export(path) {
+                    Ok(()) => self.set_status("exporting audio"),
+                    Err(error) => self.set_status(format!("export failed: {error}")),
                 }
             }
+            Message::Opened(None)
+            | Message::ImportAudio(None)
+            | Message::PackPicked(None)
+            | Message::RecoverPicked(None)
+            | Message::SavedAs(None)
+            | Message::Exported(None) => {}
         }
         Task::none()
     }
@@ -806,10 +672,11 @@ impl App {
         }
         let shared = self.session.shared();
         self.position = shared.position();
-        let was_playing = self.playing;
-        self.playing = shared.playing();
+        let playing = shared.playing();
+        let stopped = self.playing && !playing;
+        self.playing = playing;
         self.meters = (0..self.project.mixer.inserts.len()).map(|i| shared.take_peak(i)).collect();
-        if was_playing && !self.playing {
+        if stopped {
             automation::stopped(self);
         }
         for (instance, touch) in self.session.poll() {
@@ -818,7 +685,7 @@ impl App {
         self.finish_idle_plugin_edits();
         self.collect_takes();
         self.poll_midi();
-        if was_playing && !self.playing { self.finish_midi(); }
+        if stopped { self.finish_midi(); }
         let minutes = self.config.autosave_minutes;
         if minutes > 0 && self.dirty && self.revision != self.autosaved_revision
             && self.last_autosave.elapsed() >= Duration::from_secs(minutes.saturating_mul(60)) {
@@ -888,18 +755,7 @@ impl App {
             Action::ToggleRecord => self.record = !self.record,
             Action::ToggleMidiRecord => self.toggle_midi_recording(),
             Action::ToggleAudioRecord => self.toggle_audio_recording(),
-            Action::ImportAudio => {
-                return Task::perform(
-                    async {
-                        rfd::AsyncFileDialog::new()
-                            .add_filter("wav", &["wav", "wave"])
-                            .pick_file()
-                            .await
-                            .map(|f| f.path().to_owned())
-                    },
-                    Message::ImportAudio,
-                );
-            }
+            Action::ImportAudio => return Task::perform(dialogs::open("wav", &["wav", "wave"], None), Message::ImportAudio),
             Action::Delete => {
                 let deleted = match self.focused_panel() {
                     Panel::ChannelRack => channel_rack::delete_selected(self),
@@ -980,45 +836,15 @@ impl App {
                 }
             }
             Action::New => return self.guard(Pending::New),
-            Action::Open => {
-                return Task::perform(
-                    async {
-                        rfd::AsyncFileDialog::new()
-                            .add_filter("project", &["dawproj", "dawzip"])
-                            .pick_file()
-                            .await
-                            .map(|f| f.path().to_owned())
-                    },
-                    Message::Opened,
-                );
-            }
+            Action::Open => return Task::perform(dialogs::open("project", &["dawproj", "dawzip"], None), Message::Opened),
             Action::Save if self.path.is_some() => self.save(),
-            Action::Save | Action::SaveAs => return Task::perform(save_dialog(), Message::SavedAs),
-            Action::Pack => {
-                return Task::perform(async {
-                    rfd::AsyncFileDialog::new().add_filter("portable project", &["dawzip"])
-                        .set_file_name("project.dawzip").save_file().await.map(|f| f.path().to_owned())
-                }, Message::PackPicked);
-            }
+            Action::Save | Action::SaveAs => return save_as(Message::SavedAs),
+            Action::Pack => return Task::perform(dialogs::save("portable project", &["dawzip"], "project.dawzip"), Message::PackPicked),
             Action::Recover => {
-                return Task::perform(async {
-                    rfd::AsyncFileDialog::new().add_filter("backup", &["dawproj"])
-                        .set_directory(crate::project_files::backups_dir()).pick_file().await.map(|f| f.path().to_owned())
-                }, Message::RecoverPicked);
+                let backups = crate::project_files::backups_dir();
+                return Task::perform(dialogs::open("backup", &["dawproj"], Some(backups)), Message::RecoverPicked);
             }
-            Action::Export => {
-                return Task::perform(
-                    async {
-                        rfd::AsyncFileDialog::new()
-                            .add_filter("wav", &["wav"])
-                            .set_file_name("export.wav")
-                            .save_file()
-                            .await
-                            .map(|f| f.path().to_owned())
-                    },
-                    Message::Exported,
-                );
-            }
+            Action::Export => return Task::perform(dialogs::save("wav", &["wav"], "export.wav"), Message::Exported),
         }
         Task::none()
     }
@@ -1036,119 +862,6 @@ impl App {
         };
         self.session.seek(start);
         self.position = start;
-    }
-
-    /// Run `next` now, or first ask to save unsaved changes. Ignored while
-    /// the prompt is already showing.
-    fn guard(&mut self, next: Pending) -> Task<Message> {
-        let _ = self.update(Message::BpmDone);
-        self.poll_midi();
-        self.finish_midi();
-        if self.pending.is_some() {
-            return Task::none();
-        }
-        if self.saving.wait_for(self.path.as_ref(), self.revision) {
-            self.pending = Some(next);
-            return Task::none();
-        }
-        if !self.dirty {
-            return self.proceed(next);
-        }
-        let prompt = self.ask_to_save(&next);
-        self.pending = Some(next);
-        prompt
-    }
-
-    fn proceed(&mut self, next: Pending) -> Task<Message> {
-        match next {
-            Pending::Close => return iced::exit(),
-            Pending::New => self.new_project(),
-            Pending::Open(path) => self.open(path),
-            Pending::Recover(path) => {
-                self.open(path.clone());
-                if self.path.as_ref() == Some(&path) {
-                    self.path = None;
-                    self.dirty = true;
-                    self.revision = self.revision.wrapping_add(1);
-                    self.set_status("backup recovered; Save As to keep the recovered project");
-                }
-            }
-        }
-        Task::none()
-    }
-
-    fn new_project(&mut self) {
-        self.replace_project(Project::new(), None, crate::project_files::stamp());
-    }
-
-    /// Close the current project, with its jobs, recordings, and history,
-    /// and start editing `project`.
-    fn replace_project(&mut self, project: Project, path: Option<PathBuf>, backup_key: String) {
-        self.saving.new_project();
-        self.rendering.new_project();
-        self.suspend_midi_input();
-        if self.midi.recording { self.toggle_midi_recording(); }
-        self.backup_key = backup_key;
-        self.last_autosave = Instant::now();
-        self.stop_audio_recording();
-        self.session.clear();
-        self.project = project;
-        self.path = path;
-        self.undo.clear();
-        self.redo.clear();
-        self.dirty = false;
-        self.song_start = 0.0;
-        self.pattern_start = 0.0;
-        self.selected_pattern = self.project.patterns[0].id;
-        self.mode = PlayMode::Song;
-        self.validate_selection();
-        self.refresh();
-        self.reset_midi_input();
-    }
-
-    fn ask_to_save(&self, next: &Pending) -> Task<Message> {
-        let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-        let name = name.unwrap_or_else(|| self.project.name.clone());
-        let verb = next.verb();
-        Task::perform(
-            async move {
-                let result = rfd::AsyncMessageDialog::new()
-                    .set_level(rfd::MessageLevel::Warning)
-                    .set_title("Unsaved changes")
-                    .set_description(format!("Save changes to \"{name}\" before {verb}?"))
-                    .set_buttons(rfd::MessageButtons::YesNoCancelCustom("Save".into(), "Don't Save".into(), "Cancel".into()))
-                    .show()
-                    .await;
-                match result {
-                    rfd::MessageDialogResult::Custom(label) if label == "Save" => SaveChoice::Save,
-                    rfd::MessageDialogResult::Custom(label) if label == "Don't Save" => SaveChoice::Discard,
-                    rfd::MessageDialogResult::Yes => SaveChoice::Save,
-                    rfd::MessageDialogResult::No => SaveChoice::Discard,
-                    _ => SaveChoice::Cancel,
-                }
-            },
-            Message::SaveChoice,
-        )
-    }
-
-    pub fn open(&mut self, path: PathBuf) {
-        let project = match crate::project_files::load(&path) {
-            Ok(project) => project,
-            Err(error) => {
-                self.set_status(format!("open failed: {error}"));
-                return;
-            }
-        };
-        let backup_key = crate::project_files::backup_key(&project.name, &path);
-        self.replace_project(project, Some(path), backup_key);
-        let failures = self.session.load_errors.len();
-        self.set_status(if let Some(error) = &self.session.preparation_error {
-            format!("opened; audio preparation failed: {error}")
-        } else if failures == 0 {
-            "opened".to_string()
-        } else {
-            format!("opened; {failures} plugins failed to load")
-        });
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -1179,252 +892,6 @@ impl App {
         }
         Subscription::batch(subscriptions)
     }
-
-    pub fn view(&self) -> Element<'_, Message> {
-        let layout = self.layout();
-        let tiles = if layout.zoomed { self.tile(layout.focused) } else { self.node(&layout.root, &mut Vec::new()) };
-        let mut base = column![self.transport()];
-        if self.showing_jobs() { base = base.push(self.jobs()); }
-        let base = base.push(tiles);
-        match &self.menu {
-            Some(open) => stack![base, menu::view(self, open)].into(),
-            None => base.into(),
-        }
-    }
-
-    fn jobs(&self) -> Element<'_, Message> {
-        let mut jobs = row![].spacing(8).align_y(iced::Alignment::Center);
-        if let Some(progress) = self.session.audio_progress() {
-            jobs = jobs.push(job("audio", progress, Message::CancelAudio));
-        } else if self.session.preparation_error.is_some() {
-            jobs = jobs.push(panels::tool("retry audio processing", Message::RetryAudio));
-        }
-        if let Some((label, progress)) = self.rendering.progress() {
-            jobs = jobs.push(job(label, progress, Message::CancelRender));
-        }
-        container(jobs).height(JOBS_HEIGHT).padding([2, 4]).into()
-    }
-
-    fn node<'a>(&'a self, node: &daw_model::layout::Node, path: &mut Vec<bool>) -> Element<'a, Message> {
-        match node {
-            daw_model::layout::Node::Leaf(id) => self.tile(*id),
-            daw_model::layout::Node::Split { axis, ratio, first, second } => {
-                let a = ((ratio * 1000.0).round() as u16).max(1);
-                let b = (1000u16.saturating_sub(a)).max(1);
-                path.push(false);
-                let first = self.node(first, path);
-                path.pop();
-                path.push(true);
-                let second = self.node(second, path);
-                path.pop();
-                let handle = path.clone();
-                match axis {
-                    Axis::Horizontal => {
-                        let gutter = mouse_area(
-                            container(rule::vertical(1).style(|_| rule_style()))
-                                .width(GUTTER)
-                                .height(Length::Fill)
-                                .center_x(GUTTER),
-                        )
-                        .on_press(Message::SplitDrag(handle))
-                        .interaction(mouse::Interaction::ResizingHorizontally);
-                        row![
-                            container(first).width(Length::FillPortion(a)),
-                            gutter,
-                            container(second).width(Length::FillPortion(b))
-                        ]
-                        .height(Length::Fill)
-                        .into()
-                    }
-                    Axis::Vertical => {
-                        let gutter = mouse_area(
-                            container(rule::horizontal(1).style(|_| rule_style()))
-                                .height(GUTTER)
-                                .width(Length::Fill)
-                                .center_y(GUTTER),
-                        )
-                        .on_press(Message::SplitDrag(handle))
-                        .interaction(mouse::Interaction::ResizingVertically);
-                        column![
-                            container(first).height(Length::FillPortion(a)),
-                            gutter,
-                            container(second).height(Length::FillPortion(b))
-                        ]
-                        .width(Length::Fill)
-                        .into()
-                    }
-                }
-            }
-        }
-    }
-
-    fn tile(&self, id: TileId) -> Element<'_, Message> {
-        let layout = self.layout();
-        let panel = layout.panel(id);
-        let focused = layout.focused == id;
-        let name_color = if focused { theme::BRIGHT } else { theme::TEXT_DIM };
-        let picker = pick_list(Panel::ALL, Some(panel), move |p| Message::SetPanel(id, p))
-            .text_size(theme::SMALL)
-            .padding([2, 6])
-            .style(move |theme, status| {
-                let mut style = theme::pick(theme, status);
-                style.text_color = name_color;
-                style.background = iced::Background::Color(iced::Color::TRANSPARENT);
-                style
-            })
-            .menu_style(theme::menu);
-        let tools = match panel {
-            Panel::Browser => browser::toolbar(self),
-            Panel::ChannelRack => channel_rack::toolbar(self),
-            Panel::PianoRoll => piano_roll::toolbar(self),
-            Panel::Playlist => playlist::toolbar(self),
-            Panel::Mixer => mixer::toolbar(self),
-            Panel::Automation => automation::toolbar(self),
-            Panel::Parameters => parameters::toolbar(self),
-            Panel::Settings => settings::toolbar(self),
-        };
-        let tools = if panel == Panel::Playlist {
-            crate::panels::scroll(tools, false, true).width(Length::Fill).height(theme::HEADER_HEIGHT).into()
-        } else { tools };
-        let marker = if layout.zoomed { text("focus").size(theme::SMALL).color(theme::TEXT_DIM) } else { text("") };
-        let header = container(row![picker, tools, marker].spacing(6).align_y(iced::Alignment::Center))
-            .height(theme::HEADER_HEIGHT)
-            .width(Length::Fill)
-            .padding([0, 4])
-            .align_y(iced::Alignment::Center)
-            .style(move |t| {
-                let mut style = theme::header(t);
-                if focused {
-                    style.background = Some(iced::Background::Color(theme::CONTROL));
-                }
-                style
-            });
-        let body = match panel {
-            Panel::Browser => browser::view(self),
-            Panel::ChannelRack => channel_rack::view(self),
-            Panel::PianoRoll => piano_roll::view(self, focused),
-            Panel::Playlist => playlist::view(self, focused),
-            Panel::Mixer => mixer::view(self),
-            Panel::Automation => automation::view(self, focused),
-            Panel::Parameters => parameters::view(self),
-            Panel::Settings => settings::view(self),
-        };
-        container(column![header, container(body).width(Length::Fill).height(Length::Fill)])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::panel)
-            .into()
-    }
-
-    fn transport(&self) -> Element<'_, Message> {
-        let small = |label: &str| text(label.to_string()).size(theme::SMALL);
-        let playing = self.playing;
-        let mode_label = match self.mode {
-            PlayMode::Song => "song",
-            PlayMode::Pattern(_) => "pattern",
-        };
-        let beats = self.position / f64::from(daw_model::time::TICKS_PER_BEAT);
-        let beats_per_bar = f64::from(self.project.signature.numerator);
-        let position = format!(
-            "{}.{}.{:02}",
-            (beats / beats_per_bar).floor() as u32 + 1,
-            (beats % beats_per_bar).floor() as u32 + 1,
-            ((beats.fract()) * 100.0).floor() as u32
-        );
-        let pattern_names: Vec<PatternChoice> =
-            self.project.patterns.iter().map(|p| PatternChoice { id: p.id, name: p.name.clone() }).collect();
-        let selected = pattern_names.iter().find(|p| p.id == self.selected_pattern).cloned();
-        let bar = self.project.signature.ticks_per_bar();
-        let bars = self.project.pattern(self.selected_pattern).map(|p| p.length.div_ceil(bar).max(1));
-        let mut bar_choices: Vec<u64> = (1..=16).collect();
-        if let Some(bars) = bars
-            && !bar_choices.contains(&bars)
-        {
-            bar_choices.push(bars);
-        }
-        let scan = match self.scan {
-            Some(Progress { done, total }) if total > 0 => format!("scanning plugins {done}/{total}"),
-            Some(_) => "scanning plugins".into(),
-            None => String::new(),
-        };
-        let bar = row![
-            button(small(if playing { "stop" } else { "play" }))
-                .on_press(Message::Action(Action::PlayPause))
-                .style(theme::toggle(playing))
-                .padding([3, 8]),
-            button(small(mode_label)).on_press(Message::Action(Action::ToggleMode)).style(theme::control).padding([3, 8]),
-            text(position).size(theme::TEXT_SIZE).font(iced::Font::MONOSPACE).width(70),
-            text_input("bpm", &self.bpm_text.clone().unwrap_or_else(|| format!("{}", self.project.bpm)))
-                .id("tempo")
-                .on_submit(Message::BpmDone)
-                .on_input(Message::SetBpm)
-                .size(theme::SMALL)
-                .width(48)
-                .padding([3, 4])
-                .style(theme::input),
-            small("bpm").color(theme::TEXT_DIM),
-            mouse_area(
-                pick_list(pattern_names, selected, |p: PatternChoice| Message::SelectPattern(p.id))
-                    .text_size(theme::SMALL)
-                    .padding([3, 6])
-                    .style(theme::pick)
-                    .menu_style(theme::menu)
-            )
-            .on_right_press(menu::Message::Open(menu::Item::Pattern(self.selected_pattern)).into()),
-            pick_list(bar_choices, bars, Message::PatternBars)
-                .text_size(theme::SMALL)
-                .padding([3, 6])
-                .style(theme::pick)
-                .menu_style(theme::menu),
-            small("bars").color(theme::TEXT_DIM),
-            button(small("+ pattern")).on_press(Message::NewPattern).style(theme::control).padding([3, 8]),
-            button(small("bind")).on_press(Message::Action(Action::ToggleBind)).style(theme::toggle(self.bind_mode)).padding([3, 8]),
-            button(small("rec")).on_press(Message::Action(Action::ToggleRecord)).style(theme::toggle(self.record)).padding([3, 8]),
-            button(small("rec midi")).on_press(Message::Action(Action::ToggleMidiRecord))
-                .style(theme::toggle(self.midi.recording)).padding([3, 8]),
-            button(small("rec audio"))
-                .on_press(Message::Action(Action::ToggleAudioRecord))
-                .style(theme::toggle(self.session.recording_armed()))
-                .padding([3, 8]),
-            text(self.status.clone()).size(theme::SMALL).color(theme::TEXT_DIM).width(Length::Fill),
-            small(&scan).color(theme::TEXT_DIM),
-            button(small("export")).on_press(Message::Action(Action::Export)).style(theme::control).padding([3, 8]),
-            button(small("open")).on_press(Message::Action(Action::Open)).style(theme::control).padding([3, 8]),
-            button(small("save")).on_press(Message::Action(Action::Save)).style(theme::control).padding([3, 8]),
-            button(small("settings")).on_press(Message::Action(Action::Settings)).style(theme::control).padding([3, 8]),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
-        container(bar).height(TRANSPORT_HEIGHT).width(Length::Fill).padding([0, 4]).center_y(TRANSPORT_HEIGHT).style(theme::header).into()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct PatternChoice {
-    id: PatternId,
-    name: String,
-}
-
-impl std::fmt::Display for PatternChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name)
-    }
-}
-
-/// A running job's progress, with a button that cancels it.
-fn job(label: &str, progress: f32, cancel: Message) -> Element<'_, Message> {
-    row![
-        panels::label(format!("{label} {:.0}%", progress * 100.0)),
-        progress_bar(0.0..=1.0, progress).length(120).girth(8),
-        panels::tool("cancel", cancel)
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center)
-    .into()
-}
-
-fn rule_style() -> rule::Style {
-    rule::Style { color: theme::LINE, radius: 0.0.into(), fill_mode: rule::FillMode::Full, snap: true }
 }
 
 /// Keys from plugin editor windows, waiting for the subscription to take them.
@@ -1452,25 +919,9 @@ fn plugin_keys() -> impl Stream<Item = Message> {
     stream::iter(receiver).flatten().map(|event| Message::Key(event, false))
 }
 
-pub fn gain_text(gain: f32) -> String {
-    if gain <= 0.0001 { "-inf dB".into() } else { format!("{:.1} dB", 20.0 * gain.log10()) }
-}
-
-pub fn pan_text(pan: f32) -> String {
-    match pan {
-        p if p.abs() < 0.005 => "C".into(),
-        p if p < 0.0 => format!("{:.0}L", -p * 100.0),
-        p => format!("{:.0}R", p * 100.0),
-    }
-}
-
-async fn save_dialog() -> Option<PathBuf> {
-    rfd::AsyncFileDialog::new()
-        .add_filter("project", &["dawproj"])
-        .set_file_name("untitled.dawproj")
-        .save_file()
-        .await
-        .map(|f| f.path().to_owned())
+/// Ask where to save the project, then send the answer as `then`.
+fn save_as(then: fn(Option<PathBuf>) -> Message) -> Task<Message> {
+    Task::perform(dialogs::save("project", &["dawproj"], "untitled.dawproj"), then)
 }
 
 fn scan_task() -> Task<Message> {

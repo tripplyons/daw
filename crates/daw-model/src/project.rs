@@ -78,6 +78,13 @@ impl Default for SynthParams {
     }
 }
 
+impl SynthParams {
+    /// Lowpass frequency for a 0..1 cutoff, from 40 Hz to 18 kHz exponentially.
+    pub fn cutoff_hz(cutoff: f32) -> f32 {
+        40.0 * (18000.0f32 / 40.0).powf(cutoff)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Source {
     Synth(SynthParams),

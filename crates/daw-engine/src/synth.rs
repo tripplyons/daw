@@ -90,8 +90,8 @@ impl Processor for Synth {
         let sr = self.sample_rate as f32;
         let attack_step = 1.0 / (self.params.attack.max(0.001) * sr);
         let release_step = 1.0 / (self.params.release.max(0.001) * sr);
-        // Cutoff 0..1 maps to 40 Hz .. 18 kHz exponentially; one-pole lowpass.
-        let cutoff_hz = 40.0 * (18000.0f32 / 40.0).powf(self.params.cutoff);
+        // One-pole lowpass.
+        let cutoff_hz = SynthParams::cutoff_hz(self.params.cutoff);
         let alpha = 1.0 - (-2.0 * std::f32::consts::PI * cutoff_hz / sr).exp();
         let mut next_event = 0;
         for frame in 0..left.len() {

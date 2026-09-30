@@ -6,9 +6,10 @@ use iced::widget::{Space, button, column, container, mouse_area, row, slider, te
 use iced::{Element, Length, Task, mouse};
 
 use super::{InsertChoice, label, pick, tool, toggle};
-use crate::app::{App, Message as AppMessage, gain_text, pan_text};
+use crate::app::{App, Message as AppMessage};
 use crate::menu;
 use crate::theme;
+use crate::units::{gain_text, pan_text};
 
 const STRIP_WIDTH: f32 = 58.0;
 const STRIPS: &str = "mixer-strips";

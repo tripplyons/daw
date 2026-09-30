@@ -117,16 +117,7 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.edited();
         }
         Message::AddSampler => {
-            return Task::perform(
-                async {
-                    rfd::AsyncFileDialog::new()
-                        .add_filter("audio", &["wav", "wave"])
-                        .pick_file()
-                        .await
-                        .map(|f| f.path().to_owned())
-                },
-                |path| Message::SamplePicked(path).into(),
-            );
+            return Task::perform(crate::dialogs::open("audio", &["wav", "wave"], None), |path| Message::SamplePicked(path).into());
         }
         Message::SamplePicked(Some(path)) => {
             app.checkpoint();

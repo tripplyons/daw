@@ -8,7 +8,7 @@ use daw_plugins::PluginKind;
 use daw_plugins::scan::Catalog;
 
 use super::parse::{clip_source_name, key_name, shape_name, target_name, time, waveform_name};
-use crate::app::pan_text;
+use crate::units::pan_text;
 
 pub fn show(project: &Project, pattern: Option<u64>, automation: Option<u64>, json: bool) -> Result<String, String> {
     if let Some(id) = pattern {

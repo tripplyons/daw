@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 
+use daw_engine::output::BitDepth;
 use daw_model::Clip;
 use daw_model::time::Ticks;
 
@@ -83,6 +84,15 @@ impl State {
 }
 
 impl App {
+    /// Start rendering the whole song to `path` as 24-bit WAV.
+    pub(super) fn export(&mut self, path: PathBuf) -> Result<(), String> {
+        if self.rendering.busy() { return Err("an audio render is already running".into()); }
+        self.session.store_states(&mut self.project);
+        let options = RenderOptions { depth: BitDepth::Int24, range: None, tail_seconds: self.project.render.export_tail_seconds };
+        let renderer = self.session.renderer(&self.project)?;
+        self.rendering.start(renderer, Kind::Export, path, options, self.revision)
+    }
+
     pub(super) fn poll_renders(&mut self) {
         let Some(job) = &self.rendering.job else { return };
         let result = match job.thread.receive.try_recv() {

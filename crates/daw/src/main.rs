@@ -2,6 +2,7 @@ mod app;
 mod capture;
 mod cli;
 mod config;
+mod dialogs;
 mod keys;
 mod menu;
 mod midi;
@@ -13,6 +14,7 @@ mod quit;
 mod render;
 mod session;
 mod theme;
+mod units;
 
 use std::process::ExitCode;
 

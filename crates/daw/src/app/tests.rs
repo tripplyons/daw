@@ -1,5 +1,6 @@
 //! Drives `App::update` the way the UI does and checks the project.
 
+use daw_engine::output::BitDepth;
 use daw_model::automation::{Shape, TimeSnap, ValueSnap};
 use daw_model::layout::{Axis, Panel};
 use daw_model::time::Grid;
