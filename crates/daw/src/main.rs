@@ -10,6 +10,8 @@ mod project_files;
 mod midi;
 mod quit;
 mod session;
+mod processing;
+mod render;
 mod theme;
 
 use std::process::ExitCode;

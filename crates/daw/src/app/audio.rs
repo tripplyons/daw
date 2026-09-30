@@ -88,6 +88,7 @@ impl App {
     /// Render only the selected pattern/audio clips through their mixer
     /// paths. Master processing remains live on the consolidated audio.
     pub fn consolidate_selection(&mut self) -> Result<(), String> {
+        if self.rendering.busy() { return Err("an audio render is already running".into()); }
         let selected = self.playlist.selected.clone();
         let clips: Vec<_> = self.project.playlist.clips.iter()
             .filter(|c| selected.contains(&c.id) && !c.muted && !matches!(c.source, daw_model::ClipSource::Automation(_))).cloned().collect();
@@ -115,27 +116,29 @@ impl App {
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let path = folder.join(format!("consolidated-{}.wav", crate::project_files::stamp()));
         let options = crate::session::RenderOptions { depth: daw_engine::output::BitDepth::Float32, range: Some((start, end)), tail_seconds: self.project.render.consolidation_tail_seconds };
-        if let Err(error) = self.session.export(&render, &path, self.mode, options, &[]) {
-            let _ = std::fs::remove_file(&path);
-            self.refresh();
-            return Err(error);
-        }
+        let renderer = self.session.renderer(&render)?;
+        let tail = seconds_to_ticks(options.tail_seconds, self.project.bpm).round() as Ticks;
+        self.rendering.start(renderer, super::rendering::Kind::Consolidate { clips, start, length: end - start + tail }, path, options, self.revision)?;
+        self.set_status("consolidating selection");
+        Ok(())
+    }
+
+    pub(super) fn place_consolidation(&mut self, path: &Path, clips: &[daw_model::Clip], start: Ticks, length: Ticks) {
         self.checkpoint();
         for clip in &mut self.project.playlist.clips {
             if clips.iter().any(|c| c.id == clip.id) { clip.muted = true; }
         }
-        let tail = seconds_to_ticks(options.tail_seconds, self.project.bpm).round() as Ticks;
-        let channel = self.add_audio(&path, start, end - start + tail);
+        let channel = self.add_audio(path, start, length);
         let audio = self.project.channel_mut(channel).expect("new channel");
         audio.volume = 1.0;
         audio.pan = 0.0;
         audio.insert = daw_model::MASTER;
         self.playlist.selected = self.project.playlist.clips.iter().filter(|c| c.source == daw_model::ClipSource::Audio(channel)).map(|c| c.id).collect();
+        self.session.stop();
         self.playing = false;
         self.edited();
         self.return_to_start();
         self.set_status(format!("consolidated {} clips", clips.len()));
-        Ok(())
     }
 
     /// Add a WAV file as an audio channel with one clip of the whole file at `start`.
@@ -149,12 +152,14 @@ impl App {
         Ok(channel)
     }
 
-    /// Length of an audio channel's whole file at the current tempo, once loaded.
+    /// Length of an audio channel's whole file at the current tempo.
     pub fn audio_length(&self, channel: ChannelId) -> Option<Ticks> {
         let Source::Audio { path } = &self.project.channel(channel)?.source else { return None };
-        let (sample, _) = self.session.waveform(path)?;
-        let seconds = sample.left.len() as f64 / sample.sample_rate;
-        Some((seconds_to_ticks(seconds, self.project.bpm).round() as Ticks).max(1))
+        if let Some((sample, _)) = self.session.waveform(path) {
+            let seconds = sample.left.len() as f64 / sample.sample_rate;
+            return Some((seconds_to_ticks(seconds, self.project.bpm).round() as Ticks).max(1));
+        }
+        file_length(path, self.project.bpm).ok()
     }
 
     fn add_audio(&mut self, path: &Path, start: Ticks, length: Ticks) -> ChannelId {

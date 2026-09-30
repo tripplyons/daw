@@ -13,24 +13,30 @@ use daw_model::{AutomationId, ChannelId, ClipSource, InsertId, InstanceId, Patte
 use daw_plugins::scan::{Catalog, Progress};
 use iced::futures::channel::mpsc::{self, UnboundedReceiver};
 use iced::futures::{Stream, StreamExt, stream};
-use iced::widget::{button, column, container, mouse_area, pick_list, row, rule, stack, text, text_input};
+use iced::widget::{button, column, container, mouse_area, pick_list, progress_bar, row, rule, stack, text, text_input};
 use iced::{Element, Length, Point, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::config;
 use crate::keys::{Action, Keymap};
 use crate::menu::{self, Menu};
-use crate::panels::{automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
+use crate::panels::{self, automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
 use crate::session::Session;
 use crate::theme;
 
 pub mod audio;
 mod history;
+mod rendering;
 mod saving;
 
 /// Project given on the command line, set by `main` before the app starts.
 pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
 pub const TRANSPORT_HEIGHT: f32 = 26.0;
+
+fn panels_job(label: &str, progress: f32, cancel: Message) -> Element<'_, Message> {
+    row![panels::label(format!("{label} {:.0}%", progress * 100.0)), progress_bar(0.0..=1.0, progress).length(120).girth(8),
+        panels::tool("cancel", cancel)].spacing(6).align_y(iced::Alignment::Center).into()
+}
 const GUTTER: f32 = 3.0;
 const UNDO_LIMIT: usize = 200;
 const LAST_TOUCHED: usize = 16;
@@ -38,6 +44,9 @@ const LAST_TOUCHED: usize = 16;
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
+    CancelAudio,
+    RetryAudio,
+    CancelRender,
     Key(keyboard::Event, bool),
     WindowResized(Size),
     MouseMoved(Point),
@@ -179,6 +188,7 @@ pub struct App {
     /// The unsaved changes prompt is showing, for this next step.
     pending: Option<Pending>,
     saving: saving::State,
+    rendering: rendering::State,
 }
 
 impl App {
@@ -237,6 +247,7 @@ impl App {
             quit_routed: false,
             pending: None,
             saving: saving::State::default(),
+            rendering: rendering::State::default(),
         };
         app.load_config();
         if let Some(error) = &app.session.audio_error {
@@ -288,7 +299,8 @@ impl App {
     }
 
     fn tile_area(&self) -> Rect {
-        Rect { x: 0.0, y: TRANSPORT_HEIGHT, width: self.window.width, height: (self.window.height - TRANSPORT_HEIGHT).max(1.0) }
+        let top = TRANSPORT_HEIGHT + if self.session.audio_progress().is_some() || self.session.preparation_error.is_some() || self.rendering.progress().is_some() { 26.0 } else { 0.0 };
+        Rect { x: 0.0, y: top, width: self.window.width, height: (self.window.height - top).max(1.0) }
     }
 
     fn load_config(&mut self) {
@@ -521,12 +533,21 @@ impl App {
         match message {
             Message::Tick => {
                 self.tick();
+                self.poll_renders();
+                match self.session.poll_preparation(&mut self.project, self.mode) {
+                    Some(Err(error)) => self.set_status(if error.starts_with("cancelled") { format!("audio processing {error}") } else { format!("audio preparation failed: {error}") }),
+                    Some(Ok(())) if self.status == "processing audio" => self.set_status("audio ready"),
+                    _ => {}
+                }
                 let saves = self.poll_saves();
                 if self.bpm_text.is_some() {
                     return Task::batch([saves, iced::widget::operation::is_focused("tempo").map(Message::BpmFocused)]);
                 }
                 return saves;
             }
+            Message::CancelAudio => self.session.cancel_audio(),
+            Message::RetryAudio => { self.refresh(); if self.session.audio_progress().is_some() { self.set_status("processing audio"); } }
+            Message::CancelRender => self.rendering.cancel(),
             Message::Key(event, typing) => {
                 if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
                     playlist::update(self, playlist::Message::AudioPitchDone);
@@ -753,15 +774,14 @@ impl App {
             Message::Exported(path) => {
                 if let Some(path) = path {
                     let path = if path.extension().is_none() { path.with_extension("wav") } else { path };
-                    // Export renders offline, so the input would record silence.
-                    self.stop_audio_recording();
+                    self.session.store_states(&mut self.project);
                     let options = crate::session::RenderOptions { depth: BitDepth::Int24, range: None, tail_seconds: self.project.render.export_tail_seconds };
-                    match self.session.export(&self.project, &path, self.mode, options, &[]) {
-                        Ok(()) => self.set_status(format!("exported {}", path.display())),
+                    let started = if self.rendering.busy() { Err("an audio render is already running".into()) }
+                        else { self.session.renderer(&self.project).and_then(|renderer| self.rendering.start(renderer, rendering::Kind::Export, path, options, self.revision)) };
+                    match started {
+                        Ok(()) => self.set_status("exporting audio"),
                         Err(error) => self.set_status(format!("export failed: {error}")),
                     }
-                    self.playing = false;
-                    self.return_to_start();
                 }
             }
         }
@@ -1058,6 +1078,7 @@ impl App {
 
     fn new_project(&mut self) {
         self.saving.new_project();
+        self.rendering.new_project();
         self.suspend_midi_input();
         if self.midi.recording { self.toggle_midi_recording(); }
         self.backup_key = crate::project_files::stamp();
@@ -1115,6 +1136,7 @@ impl App {
         match loaded {
             Ok(project) => {
                 self.saving.new_project();
+                self.rendering.new_project();
                 self.suspend_midi_input();
                 if self.midi.recording { self.toggle_midi_recording(); }
                 self.backup_key = crate::project_files::backup_key(&project.name, &path);
@@ -1178,7 +1200,22 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let layout = self.layout();
         let tiles = if layout.zoomed { self.tile(layout.focused) } else { self.node(&layout.root, &mut Vec::new()) };
-        let base = column![self.transport(), tiles];
+        let mut base = column![self.transport()];
+        let mut jobs = row![].spacing(8).align_y(iced::Alignment::Center);
+        let mut showing = false;
+        if let Some(progress) = self.session.audio_progress() {
+            showing = true;
+            jobs = jobs.push(panels_job("audio", progress, Message::CancelAudio));
+        } else if self.session.preparation_error.is_some() {
+            showing = true;
+            jobs = jobs.push(panels::tool("retry audio processing", Message::RetryAudio));
+        }
+        if let Some((label, progress)) = self.rendering.progress() {
+            showing = true;
+            jobs = jobs.push(panels_job(label, progress, Message::CancelRender));
+        }
+        if showing { base = base.push(container(jobs).height(26).padding([2, 4])); }
+        let base = base.push(tiles);
         match &self.menu {
             Some(open) => stack![base, menu::view(self, open)].into(),
             None => base.into(),
@@ -1435,16 +1472,11 @@ pub fn pan_text(pan: f32) -> String {
 /// Headless render for `daw export`, loading the project's plugins. With
 /// `stems`, each mixer insert also goes to its own file in that folder.
 pub fn export_cli(project: &Path, out: &Path, range: Option<(Ticks, Ticks)>, stems: Option<&Path>, tail: Option<f64>) -> Result<(), String> {
-    let mut app = App::boot().0;
-    app.open(project.to_path_buf());
-    for (instance, error) in &app.session.load_errors {
-        eprintln!("plugin {} failed to load: {error}", instance.0);
-    }
+    let project = crate::project_files::load(project)?;
     let stems: Vec<daw_engine::output::Stem> = match stems {
         Some(folder) => {
             std::fs::create_dir_all(folder).map_err(|e| format!("could not create {}: {e}", folder.display()))?;
             // Skip inserts no channel's signal reaches; always keep the master.
-            let project = &app.project;
             let reached = |id| project.channels.iter().any(|c| c.insert == id || project.mixer.feeds(c.insert, id));
             project
                 .mixer
@@ -1460,9 +1492,10 @@ pub fn export_cli(project: &Path, out: &Path, range: Option<(Ticks, Ticks)>, ste
         }
         None => Vec::new(),
     };
-    let mode = app.mode;
-    let options = crate::session::RenderOptions { depth: BitDepth::Int24, range, tail_seconds: tail.unwrap_or(app.project.render.export_tail_seconds) };
-    app.session.export(&app.project, out, mode, options, &stems).map_err(|e| format!("export failed: {e}"))
+    let sample_rate = daw_engine::output::default_sample_rate().unwrap_or(48_000.0);
+    let mut renderer = crate::render::Renderer::new(&project, Default::default(), Default::default(), sample_rate)?;
+    let options = crate::session::RenderOptions { depth: BitDepth::Int24, range, tail_seconds: tail.unwrap_or(project.render.export_tail_seconds) };
+    renderer.worker.run(out, options, &stems, &crate::processing::Control::default()).map(|_| ()).map_err(|e| format!("export failed: {e}"))
 }
 
 async fn save_dialog() -> Option<PathBuf> {

@@ -1,11 +1,14 @@
 //! Keeps the realtime engine and plugin instances in step with the project.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use daw_engine::input::{Recorder, Take};
-use daw_engine::output::{self, BitDepth, Stem};
+use daw_engine::output::{self, BitDepth};
+#[cfg(test)]
+use daw_engine::output::Stem;
 use daw_engine::song::{EngineTarget, PlayMode, channel_node, compile};
 use daw_engine::synth::{PARAM_ATTACK, PARAM_CUTOFF, PARAM_RELEASE, PARAM_WAVEFORM, Sample, Sampler, Synth};
 use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
@@ -63,9 +66,10 @@ pub struct Session {
     pub load_errors: HashMap<InstanceId, String>,
     built_in: HashMap<u64, BuiltIn>,
     samples: daw_engine::audio::Cache,
+    preparation: Option<crate::processing::Preparation>,
     /// Waveform summaries of loaded samples: the largest absolute value per
     /// `PEAK_FRAMES` frames, across both sides.
-    peaks: HashMap<String, Vec<f32>>,
+    peaks: crate::processing::Peaks,
     /// Microphone input, while audio recording is armed.
     recorder: Option<Recorder>,
     #[cfg(test)]
@@ -102,6 +106,7 @@ impl Session {
             load_errors: HashMap::new(),
             built_in: HashMap::new(),
             samples: daw_engine::audio::Cache::default(),
+            preparation: None,
             peaks: HashMap::new(),
             recorder: None,
             #[cfg(test)]
@@ -174,12 +179,12 @@ impl Session {
                 _ => {
                     let node = match &wanted {
                         BuiltIn::Synth(params) => Some(Node::new(key, Box::new(Synth::new(*params, self.sample_rate())))),
-                        BuiltIn::Sampler(path, root) => match self.sample(path) {
-                            Ok(sample) => Some(Node::new(key, Box::new(Sampler::new(sample, *root, self.sample_rate())))),
-                            Err(error) => {
-                                log::error!("{error}");
-                                None
-                            }
+                        BuiltIn::Sampler(path, root) => match self.samples.get(path) {
+                            Some(sample) => Some(Node::new(key, Box::new(Sampler::new(sample.clone(), *root, self.sample_rate())))),
+                            None => {
+                                if self.built_in.remove(&key).is_some() { self.send(Command::RemoveNode(key)); }
+                                continue;
+                            },
                         },
                     };
                     if let Some(node) = node {
@@ -255,23 +260,6 @@ impl Session {
         if let (Some(from), Some(to)) = (from, to) { self.send(Command::SendLevel { from, to, value }); }
     }
 
-    /// Load a WAV file, or take it from the cache.
-    pub fn sample(&mut self, path: &str) -> Result<Arc<Sample>, String> {
-        if let Some(sample) = self.samples.get(path) {
-            return Ok(sample.clone());
-        }
-        let sample = Arc::new(Sample::load(path).map_err(|e| format!("could not load {path}: {e}"))?);
-        let peaks = sample
-            .left
-            .chunks(PEAK_FRAMES)
-            .zip(sample.right.chunks(PEAK_FRAMES))
-            .map(|(l, r)| l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs())))
-            .collect();
-        self.peaks.insert(path.to_owned(), peaks);
-        self.samples.insert(path.to_owned(), sample.clone());
-        Ok(sample)
-    }
-
     /// A loaded file and its waveform peaks, for drawing.
     pub fn waveform(&self, path: &str) -> Option<(&Sample, &[f32])> {
         Some((self.samples.get(path)?, self.peaks.get(path)?))
@@ -280,19 +268,58 @@ impl Session {
     pub fn update_song(&mut self, project: &Project, mode: PlayMode) -> Result<(), String> {
         #[cfg(test)]
         { self.song_updates += 1; }
-        let prepared = daw_engine::audio::prepare(project, &mut self.samples);
-        self.preparation_error = prepared.as_ref().err().cloned();
-        self.peaks.retain(|key, _| self.samples.contains_key(key));
-        for (path, sample) in self.samples.iter() {
-            if !self.peaks.contains_key(path) {
-                let peaks = sample.left.chunks(PEAK_FRAMES).zip(sample.right.chunks(PEAK_FRAMES))
-                    .map(|(l, r)| l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs()))).collect();
-                self.peaks.insert(path.clone(), peaks);
-            }
+        let needed = daw_engine::audio::Cache::required(project);
+        if self.samples.ready(project) && needed.iter().all(|key| self.peaks.contains_key(key)) {
+            self.preparation = None;
+            self.preparation_error = None;
+            self.samples.trim(project);
+        } else if self.preparation.as_ref().is_none_or(|job| job.needed != needed) {
+            self.preparation = None;
+            self.preparation_error = None;
+            self.preparation = Some(crate::processing::Preparation::start(project.clone(), self.samples.clone(), self.peaks.clone())?);
         }
+        self.publish_song(project, mode);
+        Ok(())
+    }
+
+    fn publish_song(&mut self, project: &Project, mode: PlayMode) {
+        self.peaks.retain(|key, _| self.samples.contains_key(key));
         let song = compile(project, mode, MAX_BLOCK, &self.samples);
         self.send(Command::Song(Box::new(song)));
-        prepared
+    }
+
+    pub fn audio_progress(&self) -> Option<f32> { self.preparation.as_ref().map(|job| job.control.progress()) }
+
+    pub fn cancel_audio(&mut self) {
+        if let Some(job) = &self.preparation { job.control.cancel(); }
+    }
+
+    pub fn poll_preparation(&mut self, project: &mut Project, mode: PlayMode) -> Option<Result<(), String>> {
+        let job = self.preparation.as_ref()?;
+        let polled = job.poll();
+        if matches!(&polled, Ok(None)) { return None; }
+        let cancelled = job.control.cancelled();
+        self.preparation = None;
+        let result = match polled {
+            Ok(Some(finished)) if !cancelled => { self.samples = finished.cache; self.peaks = finished.peaks; finished.result }
+            Ok(_) => Err("cancelled; retry audio processing to hear the pending edits".into()),
+            Err(error) => Err(error),
+        };
+        self.preparation_error = result.as_ref().err().cloned();
+        self.sync(project);
+        self.publish_song(project, mode);
+        Some(result)
+    }
+
+    #[cfg(test)]
+    pub fn wait_preparation(&mut self, project: &mut Project, mode: PlayMode) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.audio_progress().is_some() {
+            if let Some(result) = self.poll_preparation(project, mode) { return result; }
+            assert!(std::time::Instant::now() < deadline, "audio preparation timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
     }
 
     pub fn play(&mut self) {
@@ -501,6 +528,7 @@ impl Session {
 
     /// Drop every plugin and built-in node, e.g. before opening another project.
     pub fn clear(&mut self) {
+        self.preparation = None;
         for id in self.controllers.keys().copied().collect::<Vec<_>>() {
             self.send(Command::RemoveNode(id.0));
         }
@@ -515,41 +543,81 @@ impl Session {
         self.stop();
     }
 
-    /// Render the song to a WAV file, then restore the live plan. With a range,
-    /// render only those ticks plus the chosen tail; notes that start before it are
-    /// not heard. Stems come from the same pass.
-    pub fn export(
-        &mut self,
-        project: &Project,
-        path: &Path,
-        live_mode: PlayMode,
-        options: RenderOptions,
-        stems: &[Stem],
-    ) -> Result<(), String> {
-        let (start, frames) = options.timing(project, self.sample_rate())?;
-        daw_engine::audio::prepare(project, &mut self.samples)?;
-        if !self.load_errors.is_empty() { return Err("one or more plugins failed to load".into()); }
-        self.stop();
-        let mut render = project.clone();
-        render.playlist.loop_range = None;
-        if let Some((_, end)) = options.range {
-            render.playlist.clips.retain(|c| c.start < end);
-            for clip in &mut render.playlist.clips { clip.length = clip.length.min(end - clip.start); }
-        }
-        self.update_song(&render, PlayMode::Song)?;
-        let result = {
-            let mut engine = self.engine.lock().map_err(|_| "audio engine lock poisoned")?;
-            output::export_wav(&mut engine, path, start, frames, options.depth, stems).map_err(|e| e.to_string())
-        };
-        self.update_song(project, live_mode)?;
-        self.seek(0.0);
-        result
+    pub fn renderer(&self, project: &Project) -> Result<crate::render::Renderer, String> {
+        let parameters = self.controllers.iter().map(|(&id, controller)| {
+            let values = self.params(id).iter().map(|p| (p.id, controller.param_value(p.id))).collect();
+            (id, values)
+        }).collect();
+        crate::render::Renderer::new(project, self.samples.clone(), parameters, self.sample_rate())
     }
+
+    /// Synchronous adapter for audio comparisons.
+    #[cfg(test)]
+    pub fn export(&self, project: &Project, path: &Path, _live_mode: PlayMode, options: RenderOptions, stems: &[Stem]) -> Result<(), String> {
+        let mut renderer = self.renderer(project)?;
+        renderer.worker.run(path, options, stems, &crate::processing::Control::default()).map(|_| ())
+    }
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_cancellation_retry_and_undo_ignore_obsolete_workers() {
+        let mut session = Session::new();
+        let mut project = Project::new();
+        let path = "cached.wav";
+        let channel = project.add_channel("audio", Source::Audio { path: path.into() });
+        project.add_audio_clip(0, 0, channel, 3840);
+        let left: Vec<_> = (0..48_000).map(|i| (i as f32 * 0.1).sin()).collect();
+        let original = Arc::new(Sample { sample_rate: 48_000.0, right: left.clone(), left });
+        session.samples.insert(path.into(), original.clone());
+        session.update_song(&project, PlayMode::Song).unwrap();
+        session.wait_preparation(&mut project, PlayMode::Song).unwrap();
+        project.playlist.clips[0].audio.semitones = 3.0;
+        session.update_song(&project, PlayMode::Song).unwrap();
+        let cancelled_key = daw_engine::audio::cache_key(path, project.playlist.clips[0].audio);
+        session.cancel_audio();
+        assert!(session.wait_preparation(&mut project, PlayMode::Song).is_err());
+        assert!(!session.samples.contains_key(&cancelled_key));
+        assert!(Arc::ptr_eq(&original, &session.samples[path]));
+        session.update_song(&project, PlayMode::Song).unwrap();
+        session.wait_preparation(&mut project, PlayMode::Song).unwrap();
+        assert!(session.samples.contains_key(&cancelled_key));
+
+        project.playlist.clips[0].audio.semitones = 7.0;
+        session.update_song(&project, PlayMode::Song).unwrap();
+        let obsolete_key = daw_engine::audio::cache_key(path, project.playlist.clips[0].audio);
+        project.playlist.clips[0].audio.semitones = 12.0;
+        session.update_song(&project, PlayMode::Song).unwrap();
+        session.wait_preparation(&mut project, PlayMode::Song).unwrap();
+        assert!(!session.samples.contains_key(&obsolete_key));
+        assert!(session.samples.contains_key(&daw_engine::audio::cache_key(path, project.playlist.clips[0].audio)));
+        project.playlist.clips[0].audio = daw_model::AudioEdit::default();
+        session.update_song(&project, PlayMode::Song).unwrap();
+        assert!(session.audio_progress().is_none(), "undo reuses the cached audio and peaks immediately");
+        assert!(Arc::ptr_eq(&original, &session.samples[path]));
+    }
+
+    #[test]
+    fn independent_export_does_not_lock_or_move_live_playback() {
+        let mut session = Session::new();
+        let mut project = Project::new();
+        session.sync(&mut project);
+        session.update_song(&project, PlayMode::Song).unwrap();
+        let path = std::env::temp_dir().join(format!("daw-unlocked-render-{}.wav", crate::project_files::stamp()));
+        let mut live = session.engine.lock().unwrap();
+        live.start_offline(960);
+        let before = live.position();
+        // Rendering while the live mutex is held would deadlock a shared-engine export.
+        session.export(&project, &path, PlayMode::Song, RenderOptions { depth: BitDepth::Float32, range: Some((0, 960)), tail_seconds: 0.0 }, &[]).unwrap();
+        assert_eq!(live.position(), before);
+        live.render_offline(512, |_, _| {});
+        assert!(live.position() > before, "live playback still advances after the export");
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn missing_audio_replaces_the_previous_playback_plan() {
@@ -570,7 +638,8 @@ mod tests {
         project.channel_mut(channel).unwrap().source = Source::Audio {
             path: std::env::temp_dir().join(format!("missing-{}.wav", crate::project_files::stamp())).to_string_lossy().into_owned(),
         };
-        assert!(session.update_song(&project, PlayMode::Song).is_err());
+        session.update_song(&project, PlayMode::Song).unwrap();
+        assert!(session.wait_preparation(&mut project, PlayMode::Song).is_err());
         let mut engine = session.engine.lock().unwrap();
         engine.start_offline(0);
         engine.render_offline(512, |l, r| assert!(l.iter().chain(r).all(|s| *s == 0.0)));

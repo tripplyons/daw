@@ -27,6 +27,19 @@ fn wait_saves(app: &mut App) -> usize {
     count
 }
 
+fn wait_audio(app: &mut App) {
+    app.session.wait_preparation(&mut app.project, app.mode).unwrap();
+}
+
+fn wait_renders(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.rendering.busy() {
+        app.poll_renders();
+        assert!(std::time::Instant::now() < deadline, "audio render timed out");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 struct TestPlugin(f32);
 
 impl daw_plugins::Controller for TestPlugin {
@@ -441,6 +454,7 @@ fn save_open_and_export() {
 
     let wav = dir.join("song.wav");
     let _ = other.update(Message::Exported(Some(wav.clone())));
+    wait_renders(&mut other);
     let reader = hound::WavReader::open(&wav).unwrap();
     assert!(reader.duration() > 0, "{}", other.status);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -882,6 +896,8 @@ fn audio_pitch_prepares_only_the_released_value_and_undoes_once() {
     let _ = app.update(list::Message::AudioPitchDone.into());
     assert!(app.playlist.pitch_edit.is_none());
     assert_eq!(app.project.playlist.clips.iter().map(|c| c.audio.semitones).collect::<Vec<_>>(), vec![7.0, 7.0, 0.0]);
+    assert!(app.session.audio_progress().is_some());
+    wait_audio(&mut app);
     assert!(app.session.waveform(&shifted(7.0)).is_some());
     assert!(app.session.waveform(&shifted(1.0)).is_none());
     assert!(app.session.waveform(&shifted(4.0)).is_none());
@@ -910,6 +926,7 @@ fn audio_pitch_prepares_only_the_released_value_and_undoes_once() {
     }, true));
     assert!(app.playlist.pitch_edit.is_none());
     assert_eq!(app.project.playlist.clips[0].audio.semitones, 2.0);
+    wait_audio(&mut app);
     assert!(app.session.waveform(&shifted(2.0)).is_some());
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1066,6 +1083,7 @@ fn audio_stretch_drag_prepares_only_on_release_and_cancels_on_undo() {
     }
     app.refresh();
     let _ = app.update(list::Message::End.into());
+    wait_audio(&mut app);
     let stretched = &app.project.playlist.clips[0];
     assert_eq!((stretched.length, stretched.audio.stretch), (3840, 2.0));
     assert!(app.session.waveform(&daw_engine::audio::cache_key(&path, stretched.audio)).is_some());
@@ -1178,6 +1196,7 @@ fn consolidation_bakes_insert_gain_and_leaves_master_processing_live() {
     let before = dir.join("before.wav");
     app.session.export(&app.project, &before, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((960, end)), tail_seconds: 0.0 }, &[]).unwrap();
     app.consolidate_selection().unwrap();
+    wait_renders(&mut app);
     assert!(app.project.playlist.clips[0].muted);
     let audio = app.project.channels.last().unwrap();
     assert_eq!((audio.volume, audio.pan, audio.insert), (1.0, 0.0, daw_model::MASTER));
@@ -1429,6 +1448,12 @@ fn opening_missing_audio_keeps_the_error_visible() {
     std::fs::write(&path, project.to_ron().unwrap()).unwrap();
     let mut app = app();
     app.open(path);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.session.audio_progress().is_some() {
+        let _ = app.update(Message::Tick);
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     assert!(app.status.contains("audio preparation failed"));
     assert!(app.status.contains("missing.wav"));
     assert!(app.session.preparation_error.is_some());
@@ -1620,6 +1645,7 @@ fn render_tails_are_adjustable_portable_and_extend_consolidated_clips() {
     crate::project_files::save(app.path.as_ref().unwrap(), &app.project).unwrap();
     assert_eq!(crate::project_files::load(app.path.as_ref().unwrap()).unwrap().render, app.project.render);
     let _ = app.update(list::Message::Consolidate.into());
+    wait_renders(&mut app);
     let clip = app.project.playlist.clips.last().unwrap();
     assert_eq!(clip.length, end + daw_model::time::seconds_to_ticks(0.75, app.project.bpm).round() as Ticks);
     let ClipSource::Audio(audio) = clip.source else { panic!("consolidated audio") };
@@ -1633,5 +1659,95 @@ fn render_tails_are_adjustable_portable_and_extend_consolidated_clips() {
     let (_, frames) = options.timing(&app.project, 48_000.0).unwrap();
     assert_eq!(frames, ((daw_model::time::ticks_to_seconds(100.0, app.project.bpm) + 1.25) * 48_000.0).round() as usize);
     assert!(crate::session::RenderOptions { tail_seconds: f64::NAN, ..options }.timing(&app.project, 48_000.0).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn background_export_keeps_playback_and_uses_the_requested_snapshot() {
+    let dir = std::env::temp_dir().join(format!("daw-export-job-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let mut app = app();
+    let channel = app.project.channels[0].id;
+    let pattern = app.selected_pattern;
+    app.project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    app.project.add_clip(0, 0, ClipSource::Pattern(pattern));
+    app.playing = true;
+    let path = dir.join("snapshot.wav");
+    let _ = app.update(Message::Exported(Some(path.clone())));
+    assert!(app.rendering.busy());
+    assert!(!path.exists(), "publish only when the UI accepts the result");
+    assert!(app.playing);
+    let _ = app.update(crate::panels::channel_rack::Message::Volume(channel, 0.0).into());
+    wait_renders(&mut app);
+    assert!(app.playing);
+    assert!(app.status.starts_with("exported"), "{}", app.status);
+    let sample = daw_engine::synth::Sample::load(path.to_str().unwrap()).unwrap();
+    assert!(sample.left.iter().any(|s| s.abs() > 0.001), "render must use the volume from the snapshot");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cancelled_failed_and_obsolete_exports_preserve_existing_files() {
+    let dir = std::env::temp_dir().join(format!("daw-export-cleanup-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let mut app = app();
+    let path = dir.join("keep.wav");
+    let original = b"existing file";
+    std::fs::write(&path, original).unwrap();
+    let _ = app.update(Message::Exported(Some(path.clone())));
+    let _ = app.update(Message::CancelRender);
+    wait_renders(&mut app);
+    assert!(app.status.contains("cancelled"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+    app.project.add_channel("missing", daw_model::Source::Audio { path: dir.join("missing.wav").to_string_lossy().into_owned() });
+    let _ = app.update(Message::Exported(Some(path.clone())));
+    wait_renders(&mut app);
+    assert!(app.status.contains("failed"), "{}", app.status);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+    app.project = Project::new();
+    let _ = app.update(Message::Exported(Some(path.clone())));
+    app.rendering.new_project();
+    wait_renders(&mut app);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn pending_consolidation_creates_no_undo_and_rejects_changed_projects() {
+    let dir = std::env::temp_dir().join(format!("daw-consolidate-job-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let mut app = app();
+    app.path = Some(dir.join("song.dawproj"));
+    let pattern = app.selected_pattern;
+    let source = app.project.add_clip(0, 0, ClipSource::Pattern(pattern));
+    app.playlist.selected = vec![source];
+    let undo = app.undo.len();
+    app.consolidate_selection().unwrap();
+    assert_eq!(app.undo.len(), undo);
+    assert!(!app.project.playlist.clips[0].muted);
+    let _ = app.update(Message::CancelRender);
+    wait_renders(&mut app);
+    assert_eq!(app.undo.len(), undo);
+    assert_eq!(app.project.playlist.clips.len(), 1);
+    assert_eq!(std::fs::read_dir(dir.join("recordings")).unwrap().count(), 0);
+
+    app.consolidate_selection().unwrap();
+    app.mark_edited();
+    wait_renders(&mut app);
+    assert!(app.status.contains("project changed"), "{}", app.status);
+    assert_eq!(app.undo.len(), undo);
+    assert!(!app.project.playlist.clips[0].muted);
+    assert_eq!(std::fs::read_dir(dir.join("recordings")).unwrap().count(), 0);
+
+    app.consolidate_selection().unwrap();
+    wait_renders(&mut app);
+    assert_eq!(app.undo.len(), undo + 1);
+    assert!(app.project.playlist.clips[0].muted);
+    wait_audio(&mut app);
     std::fs::remove_dir_all(dir).unwrap();
 }

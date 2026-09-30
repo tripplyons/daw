@@ -21,7 +21,7 @@ pub fn default_sample_rate() -> Result<f64, OutputError> {
 }
 
 /// Start the default output device. The callback only `try_lock`s the engine,
-/// so it never blocks; it outputs silence while an export holds the lock.
+/// so it never blocks; it outputs silence while the UI updates plugin state.
 pub fn start(engine: Arc<Mutex<Engine>>) -> Result<cpal::Stream, OutputError> {
     let device = cpal::default_host().default_output_device().ok_or(OutputError::NoDevice)?;
     let supported = device.default_output_config()?;
@@ -93,6 +93,21 @@ pub fn export_wav(
     depth: BitDepth,
     stems: &[Stem],
 ) -> Result<(), hound::Error> {
+    export_wav_with_progress(engine, path, start, frames, depth, stems, |_| true).map(|_| ())
+}
+
+/// Returns false if cancelled. Callers render to a temporary path and publish
+/// it only after this returns true.
+pub fn export_wav_with_progress(
+    engine: &mut Engine,
+    path: &std::path::Path,
+    start: daw_model::time::Ticks,
+    frames: usize,
+    depth: BitDepth,
+    stems: &[Stem],
+    mut progress: impl FnMut(f32) -> bool,
+) -> Result<bool, hound::Error> {
+    if !progress(0.0) { return Ok(false); }
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: engine.sample_rate() as u32,
@@ -112,7 +127,9 @@ pub fn export_wav(
     let (mut left, mut right) = (vec![0.0; MAX_BLOCK], vec![0.0; MAX_BLOCK]);
     let mut result = Ok(());
     let mut done = 0;
+    let mut cancelled = false;
     while done < frames && result.is_ok() {
+        if !progress(done as f32 / frames.max(1) as f32) { cancelled = true; break; }
         let n = (frames - done).min(MAX_BLOCK);
         engine.render(&mut left[..n], &mut right[..n]);
         result = write_block(&mut writer, depth, &left[..n], &right[..n]);
@@ -126,10 +143,12 @@ pub fn export_wav(
     engine.stop_offline();
     engine.set_capture(false);
     result?;
+    if cancelled || !progress(1.0) { return Ok(false); }
     for stem_writer in stem_writers {
         stem_writer.finalize()?;
     }
-    writer.finalize()
+    writer.finalize()?;
+    Ok(true)
 }
 
 fn write_block<W: std::io::Write + std::io::Seek>(
@@ -152,4 +171,28 @@ fn write_block<W: std::io::Write + std::io::Seek>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_reports_progress_and_stops_between_blocks() {
+        let (mut engine, _) = crate::create(48_000.0);
+        let path = std::env::temp_dir().join(format!("daw-export-progress-{}.wav", std::process::id()));
+        let stem = Stem { insert: 0, path: path.with_extension("stem.wav") };
+        let mut updates = Vec::new();
+        let completed = export_wav_with_progress(&mut engine, &path, 0, 48_000, BitDepth::Float32, &[stem], |p| { updates.push(p); p < 0.1 }).unwrap();
+        assert!(!completed);
+        assert!(*updates.last().unwrap() >= 0.1 && *updates.last().unwrap() < 0.12);
+        assert!(engine.captured().is_empty());
+        updates.clear();
+        assert!(export_wav_with_progress(&mut engine, &path, 0, 48_000, BitDepth::Float32, &[], |p| { updates.push(p); true }).unwrap());
+        assert_eq!((*updates.first().unwrap(), *updates.last().unwrap()), (0.0, 1.0));
+        assert!(updates.windows(2).all(|p| p[1] >= p[0]));
+        assert_eq!(hound::WavReader::open(&path).unwrap().duration(), 48_000);
+        std::fs::remove_file(path.with_extension("stem.wav")).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 }
