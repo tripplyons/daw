@@ -3,15 +3,36 @@
 use std::path::Path;
 
 use daw_engine::audio::{self, Cache};
-use daw_engine::output::{self, Stem};
+use daw_engine::output::{self, BitDepth, Stem};
 use daw_engine::song::{PlayMode, channel_node, compile};
-use daw_engine::synth::{Sampler, Synth};
+use daw_engine::synth::instrument;
 use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
-use daw_model::{Project, Source};
+use daw_model::time::{Ticks, ticks_to_seconds};
+use daw_model::{Project, RenderSettings};
 use daw_plugins::Controller;
 
 use crate::processing::Control;
-use crate::session::{PluginParameters, RenderOptions};
+use crate::session::PluginParameters;
+
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions {
+    pub depth: BitDepth,
+    pub range: Option<(Ticks, Ticks)>,
+    pub tail_seconds: f64,
+}
+
+impl RenderOptions {
+    pub fn timing(self, project: &Project, sample_rate: f64) -> Result<(Ticks, usize), String> {
+        RenderSettings::check_tail("render tail", self.tail_seconds)?;
+        let (start, length) = match self.range {
+            Some((start, end)) if end > start => (start, end - start),
+            Some(_) => return Err("render range must end after it starts".into()),
+            None => (0, project.song_length()),
+        };
+        let seconds = ticks_to_seconds(length as f64, project.bpm) + self.tail_seconds;
+        Ok((start, (seconds * sample_rate).round() as usize))
+    }
+}
 
 pub struct Renderer {
     pub worker: Worker,
@@ -64,12 +85,7 @@ impl Worker {
         for channel in &self.project.channels {
             if control.cancelled() { return Ok(false); }
             let node = channel_node(&channel.source, channel.id);
-            let processor: Box<dyn daw_engine::Processor> = match &channel.source {
-                Source::Synth(params) => Box::new(Synth::new(*params, self.engine.sample_rate())),
-                Source::Audio { path } => Box::new(Sampler::new(self.samples[path].clone(), daw_model::DEFAULT_KEY, self.engine.sample_rate())),
-                Source::Sampler { path, root_key } => Box::new(Sampler::new(self.samples[path].clone(), *root_key, self.engine.sample_rate())),
-                Source::Plugin(_) => continue,
-            };
+            let Some(processor) = instrument(&channel.source, &self.samples, self.engine.sample_rate()) else { continue };
             self.handle.send(Command::AddNode(Node::new(node, processor))).map_err(|_| "render command queue full")?;
             self.engine.handle_commands();
         }
@@ -83,7 +99,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use daw_engine::synth::Sample;
-    use daw_model::{PluginFormat, PluginRef, Send};
+    use daw_model::{PluginFormat, PluginRef, Send, Source};
 
     fn native_render(format: PluginFormat, detector: f32, boost: bool) -> f64 {
         let au = format == PluginFormat::AudioUnit;

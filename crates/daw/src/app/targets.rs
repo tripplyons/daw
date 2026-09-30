@@ -1,7 +1,7 @@
 //! Automation targets: how they read, and binding one to a new automation
 //! clip.
 
-use daw_model::automation::tempo_from_normalized;
+use daw_model::automation::{insert_volume_from_normalized, pan_from_normalized, tempo_from_normalized};
 use daw_model::layout::Panel;
 use daw_model::time::Ticks;
 use daw_model::{AutomationId, ClipSource, SynthParams, Target};
@@ -40,9 +40,9 @@ impl App {
     pub fn value_text(&self, target: Target, value: f32) -> String {
         match target {
             Target::Plugin { instance, param } => self.session.param_text(instance, param, value),
-            Target::InsertVolume(_) => gain_text(value * 2.0),
+            Target::InsertVolume(_) => gain_text(insert_volume_from_normalized(value)),
             Target::ChannelVolume(_) => gain_text(value),
-            Target::InsertPan(_) | Target::ChannelPan(_) => pan_text(value * 2.0 - 1.0),
+            Target::InsertPan(_) | Target::ChannelPan(_) => pan_text(pan_from_normalized(value)),
             Target::SynthCutoff(_) => format!("{:.0} Hz", SynthParams::cutoff_hz(value)),
             Target::Tempo => format!("{:.1} bpm", tempo_from_normalized(value)),
         }

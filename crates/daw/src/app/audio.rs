@@ -115,7 +115,7 @@ impl App {
         let folder = recordings_dir(self.path.as_deref());
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let path = folder.join(format!("consolidated-{}.wav", crate::project_files::stamp()));
-        let options = crate::session::RenderOptions { depth: daw_engine::output::BitDepth::Float32, range: Some((start, end)), tail_seconds: self.project.render.consolidation_tail_seconds };
+        let options = crate::render::RenderOptions { depth: daw_engine::output::BitDepth::Float32, range: Some((start, end)), tail_seconds: self.project.render.consolidation_tail_seconds };
         let renderer = self.session.renderer(&render)?;
         let tail = seconds_to_ticks(options.tail_seconds, self.project.bpm).round() as Ticks;
         self.rendering.start(renderer, super::rendering::Kind::Consolidate { clips, start, length: end - start + tail }, path, options, self.revision)?;

@@ -8,7 +8,7 @@ use daw_model::time::Ticks;
 
 use crate::processing::Control;
 use crate::render::Renderer;
-use crate::session::RenderOptions;
+use crate::render::RenderOptions;
 
 /// Render the song to `out` as 24-bit WAV, and each reached mixer insert to
 /// `stems` when a folder is given.

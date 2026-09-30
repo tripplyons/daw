@@ -6,16 +6,18 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use daw_engine::input::{Recorder, Take};
-use daw_engine::output::{self, BitDepth};
+use daw_engine::output;
 #[cfg(test)]
 use daw_engine::output::Stem;
 use daw_engine::audio;
 use daw_engine::song::{EngineTarget, PlayMode, channel_node, compile, engine_target};
-use daw_engine::synth::{PARAM_ATTACK, PARAM_CUTOFF, PARAM_RELEASE, PARAM_WAVEFORM, Sample, Sampler, Synth};
+use daw_engine::synth::{PARAM_CUTOFF, Sample, instrument, param_values};
 use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
-use daw_model::time::{Ticks, ticks_to_seconds};
-use daw_model::{ChannelId, InsertId, InstanceId, Project, RenderSettings, Source, SynthParams, Target, Waveform};
+use daw_model::{ChannelId, InsertId, InstanceId, Project, Source, SynthParams, Target};
 use daw_plugins::{Controller, ParamInfo, Touch};
+
+#[cfg(test)]
+use crate::render::RenderOptions;
 
 pub type PluginParameters = HashMap<InstanceId, Vec<(u32, f32)>>;
 
@@ -23,26 +25,6 @@ pub type PluginParameters = HashMap<InstanceId, Vec<(u32, f32)>>;
 struct PluginState {
     state: Vec<u8>,
     parameters: Vec<(u32, f32)>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RenderOptions {
-    pub depth: BitDepth,
-    pub range: Option<(Ticks, Ticks)>,
-    pub tail_seconds: f64,
-}
-
-impl RenderOptions {
-    pub fn timing(self, project: &Project, sample_rate: f64) -> Result<(Ticks, usize), String> {
-        RenderSettings::check_tail("render tail", self.tail_seconds)?;
-        let (start, length) = match self.range {
-            Some((start, end)) if end > start => (start, end - start),
-            Some(_) => return Err("render range must end after it starts".into()),
-            None => (0, project.song_length()),
-        };
-        let seconds = ticks_to_seconds(length as f64, project.bpm) + self.tail_seconds;
-        Ok((start, (seconds * sample_rate).round() as usize))
-    }
 }
 
 /// What a built-in node was created from, to know when to rebuild it.
@@ -161,7 +143,6 @@ impl Session {
             let wanted = match &channel.source {
                 Source::Synth(params) => BuiltIn::Synth(*params),
                 Source::Sampler { path, root_key } => BuiltIn::Sampler(path.clone(), *root_key),
-                // Audio channels get a sampler too, so the channel rack can preview them.
                 Source::Audio { path } => BuiltIn::Sampler(path.clone(), daw_model::DEFAULT_KEY),
                 Source::Plugin(_) => continue,
             };
@@ -173,20 +154,15 @@ impl Session {
                     self.update_synth(key, old, new);
                     self.built_in.insert(key, wanted);
                 }
-                _ => {
-                    let node = match &wanted {
-                        BuiltIn::Synth(params) => Node::new(key, Box::new(Synth::new(*params, self.sample_rate()))),
-                        BuiltIn::Sampler(path, root) => match self.samples.get(path) {
-                            Some(sample) => Node::new(key, Box::new(Sampler::new(sample.clone(), *root, self.sample_rate()))),
-                            None => {
-                                if self.built_in.remove(&key).is_some() { self.send(Command::RemoveNode(key)); }
-                                continue;
-                            }
-                        },
-                    };
-                    self.send(Command::AddNode(node));
-                    self.built_in.insert(key, wanted);
-                }
+                _ => match instrument(&channel.source, &self.samples, self.sample_rate()) {
+                    Some(processor) => {
+                        self.send(Command::AddNode(Node::new(key, processor)));
+                        self.built_in.insert(key, wanted);
+                    }
+                    None => {
+                        if self.built_in.remove(&key).is_some() { self.send(Command::RemoveNode(key)); }
+                    }
+                },
             }
         }
         let keys: Vec<u64> = self.built_in.keys().copied().collect();
@@ -200,27 +176,13 @@ impl Session {
     }
 
     fn update_synth(&mut self, key: u64, old: SynthParams, new: SynthParams) {
-        let changes = [
-            (PARAM_CUTOFF, old.cutoff != new.cutoff, new.cutoff),
-            (PARAM_ATTACK, old.attack != new.attack, new.attack / 2.0),
-            (PARAM_RELEASE, old.release != new.release, new.release / 4.0),
-            (
-                PARAM_WAVEFORM,
-                old.waveform != new.waveform,
-                match new.waveform {
-                    Waveform::Sine => 0.0,
-                    Waveform::Saw => 0.5,
-                    Waveform::Square => 1.0,
-                },
-            ),
-        ];
-        for (id, changed, value) in changes {
-            if changed {
-                if id == PARAM_CUTOFF {
-                    self.send(Command::Mix { target: EngineTarget::Node { node: key, param: id }, value });
-                } else {
-                    self.send(Command::Param { node: key, id, value });
-                }
+        for ((id, value), (_, previous)) in param_values(new).into_iter().zip(param_values(old)) {
+            if value == previous { continue; }
+            // Cutoff can be automated; a mix change makes automation apply again after the edit.
+            if id == PARAM_CUTOFF {
+                self.send(Command::Mix { target: EngineTarget::Node { node: key, param: id }, value });
+            } else {
+                self.send(Command::Param { node: key, id, value });
             }
         }
     }
@@ -552,6 +514,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daw_engine::output::BitDepth;
 
     #[test]
     fn audio_cancellation_retry_and_undo_ignore_obsolete_workers() {

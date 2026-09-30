@@ -1,5 +1,6 @@
 //! Mixer inserts with meters, and the effect chain of the selected insert.
 
+use daw_model::automation::{insert_volume_to_normalized, pan_to_normalized};
 use daw_model::{InsertId, Send, Target};
 use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::{Space, button, column, container, mouse_area, row, slider, text, vertical_slider};
@@ -86,9 +87,10 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             if let Some(insert) = app.project.mixer.insert_mut(id) {
                 insert.volume = volume;
             }
-            app.session.set_mix(&app.project, Target::InsertVolume(id), volume / 2.0);
+            let value = insert_volume_to_normalized(volume);
+            app.session.set_mix(&app.project, Target::InsertVolume(id), value);
             app.mark_edited();
-            app.touched(Target::InsertVolume(id), volume / 2.0);
+            app.touched(Target::InsertVolume(id), value);
         }
         Message::Pan(id, pan) => {
             if app.project.mixer.insert(id).is_none_or(|i| i.pan == pan) { return Task::none(); }
@@ -96,9 +98,10 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             if let Some(insert) = app.project.mixer.insert_mut(id) {
                 insert.pan = pan;
             }
-            app.session.set_mix(&app.project, Target::InsertPan(id), (pan + 1.0) / 2.0);
+            let value = pan_to_normalized(pan);
+            app.session.set_mix(&app.project, Target::InsertPan(id), value);
             app.mark_edited();
-            app.touched(Target::InsertPan(id), (pan + 1.0) / 2.0);
+            app.touched(Target::InsertPan(id), value);
         }
         Message::Mute(id) => {
             app.checkpoint();

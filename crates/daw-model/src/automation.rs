@@ -91,6 +91,24 @@ pub fn tempo_to_normalized(bpm: f64) -> f32 {
     ((bpm - TEMPO_MIN) / (TEMPO_MAX - TEMPO_MIN)).clamp(0.0, 1.0) as f32
 }
 
+/// Insert volume is linear gain 0..2. Channel volume is already 0..1.
+pub fn insert_volume_from_normalized(value: f32) -> f32 {
+    value * 2.0
+}
+
+pub fn insert_volume_to_normalized(volume: f32) -> f32 {
+    volume / 2.0
+}
+
+/// Pan runs from -1 (left) to 1 (right).
+pub fn pan_from_normalized(value: f32) -> f32 {
+    value * 2.0 - 1.0
+}
+
+pub fn pan_to_normalized(pan: f32) -> f32 {
+    (pan + 1.0) / 2.0
+}
+
 /// Shape a 0..1 position within a segment into a 0..1 blend factor.
 pub fn shape_factor(shape: Shape, tension: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);

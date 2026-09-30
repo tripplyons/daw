@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
-use daw_model::automation::tempo_from_normalized;
+use daw_model::automation::{insert_volume_from_normalized, pan_from_normalized, tempo_from_normalized};
 use daw_model::time::{TICKS_PER_BEAT, Ticks};
 
 use crate::processor::{Event, EventKind, Processor, TransportInfo};
@@ -346,8 +346,12 @@ impl Engine {
         }
     }
 
-    fn node_mut(&mut self, key: u64) -> Option<&mut Node> {
-        self.nodes.iter_mut().find(|n| n.key == key).map(|n| &mut **n)
+    /// Queue an event at the start of the next block for node `key`, if it
+    /// exists.
+    fn push_event(&mut self, key: u64, kind: EventKind) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.key == key) {
+            node.push(Event { offset: 0, kind });
+        }
     }
 
     /// Apply queued commands. Offline engines call this between sends so a
@@ -406,22 +410,12 @@ impl Engine {
                     self.position = tick.max(0.0);
                     self.frames = self.ticks_to_frames(self.position);
                 }
-                Command::Param { node, id, value } => {
-                    if let Some(node) = self.node_mut(node) {
-                        node.push(Event { offset: 0, kind: EventKind::Param { id, value } });
-                    }
-                }
-                Command::Note { node, key, velocity } => {
-                    if let Some(node) = self.node_mut(node) {
-                        node.push(Event { offset: 0, kind: EventKind::note(key, velocity) });
-                    }
-                }
+                Command::Param { node, id, value } => self.push_event(node, EventKind::Param { id, value }),
+                Command::Note { node, key, velocity } => self.push_event(node, EventKind::note(key, velocity)),
             }
         }
         while let Some(note) = self.midi.as_mut().and_then(|input| input.pop().ok()) {
-            if let Some(node) = self.node_mut(note.node) {
-                node.push(Event { offset: 0, kind: EventKind::note(note.key, note.velocity) });
-            }
+            self.push_event(note.node, EventKind::note(note.key, note.velocity));
         }
     }
 
@@ -639,19 +633,15 @@ impl Engine {
 
     fn apply_target(&mut self, song: &mut Song, target: EngineTarget, value: f32) {
         match target {
-            EngineTarget::Node { node, param } => {
-                if let Some(node) = self.node_mut(node) {
-                    node.push(Event { offset: 0, kind: EventKind::Param { id: param, value } });
-                }
-            }
+            EngineTarget::Node { node, param } => self.push_event(node, EventKind::Param { id: param, value }),
             EngineTarget::InsertVolume(i) => {
                 if let Some(insert) = song.inserts.get_mut(i) {
-                    insert.volume = value * 2.0;
+                    insert.volume = insert_volume_from_normalized(value);
                 }
             }
             EngineTarget::InsertPan(i) => {
                 if let Some(insert) = song.inserts.get_mut(i) {
-                    insert.pan = value * 2.0 - 1.0;
+                    insert.pan = pan_from_normalized(value);
                 }
             }
             EngineTarget::ChannelVolume(i) => {
@@ -661,7 +651,7 @@ impl Engine {
             }
             EngineTarget::ChannelPan(i) => {
                 if let Some(channel) = song.channels.get_mut(i) {
-                    channel.pan = value * 2.0 - 1.0;
+                    channel.pan = pan_from_normalized(value);
                 }
             }
             EngineTarget::Tempo => song.bpm = tempo_from_normalized(value),

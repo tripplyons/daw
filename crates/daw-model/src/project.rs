@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 
 use serde::{Deserialize, Serialize};
 
-use crate::automation::{Envelope, Point, tempo_to_normalized};
+use crate::automation::{Envelope, Point, insert_volume_to_normalized, pan_to_normalized, tempo_to_normalized};
 use crate::layout::Layout;
 use crate::time::{Grid, TICKS_PER_BEAT, TimeSignature, Ticks};
 
@@ -217,6 +217,12 @@ pub struct Clip {
     pub audio: AudioEdit,
 }
 
+impl Clip {
+    pub fn end(&self) -> Ticks {
+        self.start + self.length
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioEdit {
@@ -265,12 +271,6 @@ impl Send {
     pub const LEVEL: RangeInclusive<f32> = 0.0..=2.0;
 }
 
-impl Clip {
-    pub fn end(&self) -> Ticks {
-        self.start + self.length
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub name: String,
@@ -300,6 +300,12 @@ pub struct Insert {
     pub output: InsertId,
     #[serde(default)]
     pub sends: Vec<Send>,
+}
+
+impl Insert {
+    pub fn new(id: InsertId, name: &str) -> Self {
+        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new(), output: MASTER, sends: Vec::new() }
+    }
 }
 
 pub const MASTER: InsertId = InsertId(0);
@@ -654,10 +660,10 @@ impl Project {
     pub fn target_value(&self, target: Target) -> Option<f32> {
         match target {
             Target::Plugin { .. } => None,
-            Target::InsertVolume(id) => self.mixer.insert(id).map(|i| i.volume / 2.0),
-            Target::InsertPan(id) => self.mixer.insert(id).map(|i| (i.pan + 1.0) / 2.0),
+            Target::InsertVolume(id) => self.mixer.insert(id).map(|i| insert_volume_to_normalized(i.volume)),
+            Target::InsertPan(id) => self.mixer.insert(id).map(|i| pan_to_normalized(i.pan)),
             Target::ChannelVolume(id) => self.channel(id).map(|c| c.volume),
-            Target::ChannelPan(id) => self.channel(id).map(|c| (c.pan + 1.0) / 2.0),
+            Target::ChannelPan(id) => self.channel(id).map(|c| pan_to_normalized(c.pan)),
             Target::SynthCutoff(id) => match &self.channel(id)?.source {
                 Source::Synth(params) => Some(params.cutoff),
                 _ => None,
@@ -797,12 +803,6 @@ impl Project {
             }
         }
         self.format = Self::FORMAT;
-    }
-}
-
-impl Insert {
-    pub fn new(id: InsertId, name: &str) -> Self {
-        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new(), output: MASTER, sends: Vec::new() }
     }
 }
 

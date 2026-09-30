@@ -1,8 +1,9 @@
 //! Built-in polyphonic synth and one-shot sampler.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use daw_model::{SynthParams, Waveform};
+use daw_model::{Source, SynthParams, Waveform};
 
 use crate::processor::{Event, EventKind, Processor, TransportInfo};
 
@@ -12,6 +13,29 @@ pub const PARAM_RELEASE: u32 = 2;
 pub const PARAM_WAVEFORM: u32 = 3;
 
 const VOICES: usize = 16;
+
+/// The normalized value of each synth parameter, as `Param` events carry
+/// them.
+pub fn param_values(params: SynthParams) -> [(u32, f32); 4] {
+    let waveform = match params.waveform {
+        Waveform::Sine => 0.0,
+        Waveform::Saw => 0.5,
+        Waveform::Square => 1.0,
+    };
+    [(PARAM_CUTOFF, params.cutoff), (PARAM_ATTACK, params.attack / 2.0), (PARAM_RELEASE, params.release / 4.0), (PARAM_WAVEFORM, waveform)]
+}
+
+/// The built-in instrument for a channel, or `None` for plugin channels and
+/// samples that are not loaded. Audio channels get a sampler so the channel
+/// rack can preview them.
+pub fn instrument(source: &Source, samples: &HashMap<String, Arc<Sample>>, sample_rate: f64) -> Option<Box<dyn Processor>> {
+    match source {
+        Source::Synth(params) => Some(Box::new(Synth::new(*params, sample_rate))),
+        Source::Sampler { path, root_key } => Some(Box::new(Sampler::new(samples.get(path)?.clone(), *root_key, sample_rate))),
+        Source::Audio { path } => Some(Box::new(Sampler::new(samples.get(path)?.clone(), daw_model::DEFAULT_KEY, sample_rate))),
+        Source::Plugin(_) => None,
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct Voice {
@@ -222,5 +246,22 @@ impl Processor for Sampler {
 
     fn reset(&mut self) {
         self.voices = [Voice::default(); VOICES];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn param_values_decode_to_the_same_params() {
+        for waveform in [Waveform::Sine, Waveform::Saw, Waveform::Square] {
+            let params = SynthParams { waveform, attack: 1.5, release: 3.0, cutoff: 0.25 };
+            let mut synth = Synth::new(SynthParams::default(), 48_000.0);
+            for (id, value) in param_values(params) {
+                synth.apply(EventKind::Param { id, value });
+            }
+            assert_eq!(synth.params, params);
+        }
     }
 }

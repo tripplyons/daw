@@ -10,8 +10,7 @@ use daw_model::time::Ticks;
 
 use super::App;
 use crate::processing::Control;
-use crate::render::{Renderer, Worker};
-use crate::session::RenderOptions;
+use crate::render::{RenderOptions, Renderer, Worker};
 
 pub enum Kind {
     Export,
