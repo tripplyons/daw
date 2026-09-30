@@ -946,6 +946,44 @@ fn selecting_notes_and_clips_preserves_dirty_state_undo_and_redo() {
 }
 
 #[test]
+fn selecting_automation_points_and_handles_preserves_undo_and_dirty_state() {
+    let mut app = app();
+    let channel = app.selected_channel.unwrap();
+    let _ = app.update(Message::Automate(Target::ChannelVolume(channel)));
+    let _ = app.update(auto::Message::Add { time: 240.0, value: 0.25, bypass: true }.into());
+    let _ = app.update(auto::Message::End.into());
+    let _ = app.update(Message::NewPattern);
+    let _ = app.update(Message::Action(Action::Undo));
+    app.dirty = false;
+    let before = app.project.clone();
+    let (undo, redo, revision, updates) = (app.undo.len(), app.redo.len(), app.revision, app.session.song_updates);
+    for additive in [false, true, true] {
+        let _ = app.update(auto::Message::Begin { index: 0, additive }.into());
+        let _ = app.update(auto::Message::Drag { ticks: 0.0, value: 0.0, bypass: false }.into());
+        let _ = app.update(auto::Message::End.into());
+    }
+    let _ = app.update(auto::Message::BeginTension(0).into());
+    let _ = app.update(auto::Message::Tension(0, 0.0).into());
+    let _ = app.update(auto::Message::End.into());
+    assert_eq!(app.project, before);
+    assert!(!app.dirty);
+    assert_eq!((app.undo.len(), app.redo.len(), app.revision, app.session.song_updates), (undo, redo, revision, updates));
+    let _ = app.update(auto::Message::Begin { index: 0, additive: false }.into());
+    for ticks in [240.0, 480.0] { let _ = app.update(auto::Message::Drag { ticks, value: 0.1, bypass: true }.into()); }
+    let _ = app.update(auto::Message::End.into());
+    assert_eq!(app.undo.len(), undo + 1);
+    let _ = app.update(Message::Action(Action::Undo));
+    let _ = app.update(auto::Message::End.into());
+    assert_eq!(app.project, before);
+    let _ = app.update(auto::Message::BeginTension(0).into());
+    for tension in [0.2, 0.4] { let _ = app.update(auto::Message::Tension(0, tension).into()); }
+    let _ = app.update(auto::Message::End.into());
+    assert_eq!(app.undo.len(), undo + 1);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project, before);
+}
+
+#[test]
 fn keyboard_note_nudges_create_one_undo_step_and_skip_clamped_moves() {
     let mut app = app();
     focus(&mut app, Panel::PianoRoll);

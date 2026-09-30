@@ -372,6 +372,7 @@ impl App {
         }
         self.piano_roll.selected.clear();
         self.piano_roll.cancel_drag();
+        self.automation.cancel_drag();
         self.playlist.cancel_drag();
         self.playlist.pitch_edit = None;
         self.bpm_text = None;

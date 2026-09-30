@@ -114,6 +114,7 @@ pub struct State {
     pub lfo_rate: LfoRate,
     /// Points being dragged, the pressed one first.
     originals: Vec<(usize, EnvPoint)>,
+    drag_changed: bool,
     clipboard: Vec<EnvPoint>,
     /// Last recorded clip-local tick per target during this pass.
     recording: HashMap<Target, f64>,
@@ -132,9 +133,17 @@ impl Default for State {
             lfo_shape: LfoShape::Sine,
             lfo_rate: LfoRate(4),
             originals: Vec::new(),
+            drag_changed: false,
             clipboard: Vec::new(),
             recording: HashMap::new(),
         }
+    }
+}
+
+impl State {
+    pub fn cancel_drag(&mut self) {
+        self.originals.clear();
+        self.drag_changed = false;
     }
 }
 
@@ -246,6 +255,7 @@ fn sort(app: &mut App) {
 }
 
 fn begin_drag(app: &mut App, first: usize) {
+    app.automation.cancel_drag();
     let points = points(app).to_vec();
     let mut order: Vec<usize> = vec![first];
     order.extend(app.automation.selected.iter().copied().filter(|&i| i != first));
@@ -268,6 +278,7 @@ pub fn update(app: &mut App, message: Message) {
         Message::View(view) => app.automation.time = view,
         Message::Values(range) => app.automation.values = range,
         Message::Clip(choice) => {
+            app.automation.cancel_drag();
             app.automation.clip = Some(choice.id);
             app.automation.values = ValueRange::FULL;
             app.automation.selected.clear();
@@ -322,10 +333,12 @@ pub fn update(app: &mut App, message: Message) {
             let index = points.len() - 1;
             app.automation.selected = vec![index];
             begin_drag(app, index);
+            app.automation.drag_changed = true;
             app.edited();
         }
         Message::Begin { index, additive } => {
-            app.checkpoint();
+            app.automation.cancel_drag();
+            if points(app).get(index).is_none() { return; }
             let selected = &mut app.automation.selected;
             if additive {
                 if let Some(position) = selected.iter().position(|&i| i == index) {
@@ -358,19 +371,21 @@ pub fn update(app: &mut App, message: Message) {
             };
             let dt = time as i64 - primary.time as i64;
             let dv = new_value - primary.value;
-            let Some(points) = points_mut(app) else { return };
+            let mut changed = Vec::new();
             for (index, original) in originals {
-                if let Some(point) = points.get_mut(index) {
-                    point.time = (original.time as i64 + dt).max(0) as Ticks;
-                    point.value = (original.value + dv).clamp(0.0, 1.0);
-                }
+                let point = EnvPoint { time: (original.time as i64 + dt).max(0) as Ticks,
+                    value: (original.value + dv).clamp(0.0, 1.0), ..original };
+                if points(app).get(index).is_some_and(|old| *old != point) { changed.push((index, point)); }
             }
+            if changed.is_empty() { return; }
+            if !app.automation.drag_changed { app.checkpoint(); }
+            app.automation.drag_changed = true;
+            if let Some(points) = points_mut(app) { for (index, point) in changed { points[index] = point; } }
             app.edited();
         }
         Message::End => {
-            app.automation.originals.clear();
-            sort(app);
-            app.edited();
+            if app.automation.drag_changed { sort(app); app.edited(); }
+            app.automation.cancel_drag();
         }
         Message::Delete(index) => {
             app.checkpoint();
@@ -384,19 +399,20 @@ pub fn update(app: &mut App, message: Message) {
             app.edited();
         }
         Message::BeginTension(index) => {
-            app.checkpoint();
-            if let Some(point) = points_mut(app).and_then(|p| p.get_mut(index))
-                && !point.shape.uses_tension()
-            {
-                point.shape = Shape::Curve;
-                point.tension = 0.0;
-            }
-            app.edited();
+            app.automation.cancel_drag();
+            if let Some(point) = points(app).get(index).copied() { app.automation.originals.push((index, point)); }
         }
         Message::Tension(index, tension) => {
-            if let Some(point) = points_mut(app).and_then(|p| p.get_mut(index)) {
-                point.tension = tension.clamp(-1.0, 1.0);
-            }
+            if !tension.is_finite() { return; }
+            let Some((_, original)) = app.automation.originals.iter().find(|(i, _)| *i == index) else { return };
+            if !app.automation.drag_changed && original.tension == tension.clamp(-1.0, 1.0) { return; }
+            let Some(old) = points(app).get(index).copied() else { return };
+            let point = EnvPoint { shape: if old.shape.uses_tension() { old.shape } else { Shape::Curve },
+                tension: tension.clamp(-1.0, 1.0), ..old };
+            if old == point { return; }
+            if !app.automation.drag_changed { app.checkpoint(); }
+            app.automation.drag_changed = true;
+            if let Some(points) = points_mut(app) { points[index] = point; }
             app.edited();
         }
         Message::CycleShape(index) => {
@@ -598,7 +614,6 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
                 Named::ArrowUp => (0.0, value_step * scale),
                 _ => (0.0, -value_step * scale),
             };
-            app.checkpoint();
             let first = app.automation.selected[0];
             begin_drag(app, first);
             update(app, Message::Drag { ticks, value, bypass: true });
@@ -1193,4 +1208,3 @@ mod tests {
         assert_eq!(out, ValueRange::FULL);
     }
 }
-
