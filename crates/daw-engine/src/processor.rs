@@ -8,6 +8,13 @@ pub enum EventKind {
     Param { id: u32, value: f32 },
 }
 
+impl EventKind {
+    /// A note-on, or a note-off when `velocity` is 0.
+    pub fn note(key: u8, velocity: f32) -> Self {
+        if velocity > 0.0 { EventKind::NoteOn { key, velocity } } else { EventKind::NoteOff { key } }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Event {
     /// Frame offset within the block.

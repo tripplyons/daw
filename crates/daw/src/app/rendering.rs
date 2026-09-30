@@ -26,20 +26,26 @@ impl File {
 impl Drop for File { fn drop(&mut self) { let _ = std::fs::remove_file(&self.temporary); } }
 
 struct Job {
-    kind: Option<Kind>,
-    file: Option<File>,
+    // Declared first so the thread stops before the temporary file is removed.
+    thread: Thread,
+    kind: Kind,
+    file: File,
     generation: u64,
     revision: u64,
+}
+
+/// The render thread, and the native controllers its plugins need until it ends.
+struct Thread {
     control: Control,
     receive: Receiver<(Worker, Result<bool, String>)>,
-    thread: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<()>>,
     _controllers: Vec<Box<dyn daw_plugins::Controller>>,
 }
 
-impl Drop for Job {
+impl Drop for Thread {
     fn drop(&mut self) {
         self.control.cancel();
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+        if let Some(handle) = self.handle.take() { let _ = handle.join(); }
         // Destroy returned processors here, before dropping native controllers.
         while let Ok(result) = self.receive.try_recv() { drop(result); }
     }
@@ -51,11 +57,11 @@ pub struct State { generation: u64, job: Option<Job> }
 impl State {
     pub fn busy(&self) -> bool { self.job.is_some() }
     pub fn new_project(&mut self) { self.generation += 1; self.cancel(); }
-    pub fn cancel(&self) { if let Some(job) = &self.job { job.control.cancel(); } }
+    pub fn cancel(&self) { if let Some(job) = &self.job { job.thread.control.cancel(); } }
     pub fn progress(&self) -> Option<(&str, f32)> {
         let job = self.job.as_ref().filter(|job| job.generation == self.generation)?;
-        let label = if matches!(job.kind, Some(Kind::Export)) { "export" } else { "consolidate" };
-        Some((label, job.control.progress()))
+        let label = if matches!(job.kind, Kind::Export) { "export" } else { "consolidate" };
+        Some((label, job.thread.control.progress()))
     }
 
     pub fn start(&mut self, renderer: Renderer, kind: Kind, path: PathBuf, options: RenderOptions, revision: u64) -> Result<(), String> {
@@ -66,11 +72,12 @@ impl State {
         let worker_control = control.clone();
         let (send, receive) = mpsc::channel();
         let Renderer { mut worker, controllers } = renderer;
-        let thread = std::thread::Builder::new().name("audio render".into()).spawn(move || {
+        let handle = std::thread::Builder::new().name("audio render".into()).spawn(move || {
             let result = worker.run(&temporary, options, &[], &worker_control);
             let _ = send.send((worker, result));
         }).map_err(|e| e.to_string())?;
-        self.job = Some(Job { kind: Some(kind), file: Some(file), generation: self.generation, revision, control, receive, thread: Some(thread), _controllers: controllers });
+        let thread = Thread { control, receive, handle: Some(handle), _controllers: controllers };
+        self.job = Some(Job { thread, kind, file, generation: self.generation, revision });
         Ok(())
     }
 }
@@ -78,18 +85,16 @@ impl State {
 impl App {
     pub(super) fn poll_renders(&mut self) {
         let Some(job) = &self.rendering.job else { return };
-        let result = match job.receive.try_recv() {
+        let result = match job.thread.receive.try_recv() {
             Ok((worker, result)) => { drop(worker); result }
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => Err("audio render worker stopped before completion".into()),
         };
-        let mut job = self.rendering.job.take().unwrap();
-        if job.generation != self.rendering.generation { return; }
-        if job.control.cancelled() || matches!(result, Ok(false)) { self.set_status("audio render cancelled"); return; }
+        let Some(Job { thread, kind, file, generation, revision }) = self.rendering.job.take() else { return };
+        if generation != self.rendering.generation { return; }
+        if thread.control.cancelled() || matches!(result, Ok(false)) { self.set_status("audio render cancelled"); return; }
         if let Err(error) = result { self.set_status(format!("audio render failed: {error}")); return; }
-        let file = job.file.take().unwrap();
-        let kind = job.kind.take().unwrap();
-        if matches!(kind, Kind::Consolidate { .. }) && job.revision != self.revision {
+        if matches!(kind, Kind::Consolidate { .. }) && revision != self.revision {
             self.set_status("project changed during consolidation; consolidate the selection again");
             return;
         }

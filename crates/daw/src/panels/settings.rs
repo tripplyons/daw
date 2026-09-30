@@ -1,5 +1,8 @@
-//! Settings: key bindings, saved to the config file on every change.
+//! Settings: MIDI input, autosave, render tails, and key bindings. Every
+//! change except the tails saves to the config file; the tails belong to the
+//! project.
 
+use daw_model::RenderSettings;
 use iced::keyboard::Event;
 use iced::widget::{column, container, row, text, text_input};
 use iced::{Element, Length};
@@ -13,7 +16,30 @@ use crate::theme;
 pub struct State {
     /// Action waiting for its new key chord.
     pub capturing: Option<&'static str>,
-    pub tail_text: Option<(bool, String)>,
+    /// Tail length being typed, before it is checked.
+    pub tail_text: Option<(Tail, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tail {
+    Export,
+    Consolidation,
+}
+
+impl Tail {
+    fn name(self) -> &'static str {
+        match self {
+            Tail::Export => "export tail",
+            Tail::Consolidation => "consolidation tail",
+        }
+    }
+
+    fn seconds(self, settings: &mut RenderSettings) -> &mut f64 {
+        match self {
+            Tail::Export => &mut settings.export_tail_seconds,
+            Tail::Consolidation => &mut settings.consolidation_tail_seconds,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -21,8 +47,8 @@ pub enum Message {
     MidiPort(crate::midi::Port),
     MidiRescan,
     Autosave(u64),
-    TailText(bool, String),
-    TailDone(bool),
+    TailText(Tail, String),
+    TailDone(Tail),
     Capture(&'static str),
     Cancel,
     Remove(&'static str, Chord),
@@ -45,30 +71,27 @@ pub fn update(app: &mut App, message: Message) {
             app.poll_midi();
             app.finish_midi();
             let name = port.index.map(|_| port.name.clone());
-            match app.midi.connect(port, app.session.midi_shared()) {
-                Ok(input) => {
-                    app.session.attach_midi(input);
-                    app.config.midi_input = name;
-                    app.save_config("MIDI input changed".into());
-                }
-                Err(error) => app.set_status(format!("MIDI input failed: {error}")),
+            if app.connect_midi(port) {
+                app.config.midi_input = name;
+                app.save_config("MIDI input changed".into());
             }
         }
         Message::Autosave(minutes) => {
             app.config.autosave_minutes = minutes;
             app.save_config(if minutes == 0 { "autosave off".into() } else { format!("autosave every {minutes} minutes") });
         }
-        Message::TailText(consolidation, value) => app.settings.tail_text = Some((consolidation, value)),
-        Message::TailDone(consolidation) => {
-            let Some((field, text)) = app.settings.tail_text.as_ref() else { return };
-            if *field != consolidation { return; }
-            let Ok(value) = text.trim().parse::<f64>() else { app.set_status("tail must be a number between 0 and 120 seconds"); return };
-            if !value.is_finite() || !(0.0..=120.0).contains(&value) { app.set_status("tail must be between 0 and 120 seconds"); return; }
-            let previous = if consolidation { app.project.render.consolidation_tail_seconds } else { app.project.render.export_tail_seconds };
-            if previous != value {
+        Message::TailText(tail, value) => app.settings.tail_text = Some((tail, value)),
+        Message::TailDone(tail) => {
+            let Some((typed, text)) = app.settings.tail_text.as_ref() else { return };
+            if *typed != tail { return; }
+            let Ok(value) = text.trim().parse::<f64>() else { app.set_status(format!("{} must be a number", tail.name())); return };
+            let value = match RenderSettings::check_tail(tail.name(), value) {
+                Ok(value) => value,
+                Err(error) => { app.set_status(error); return; }
+            };
+            if *tail.seconds(&mut app.project.render) != value {
                 app.checkpoint();
-                if consolidation { app.project.render.consolidation_tail_seconds = value; }
-                else { app.project.render.export_tail_seconds = value; }
+                *tail.seconds(&mut app.project.render) = value;
                 app.mark_edited();
             }
             app.settings.tail_text = None;
@@ -125,11 +148,11 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 }
 
 pub fn view(app: &App) -> Element<'_, AppMessage> {
-    let tail_row = |name, consolidation, value: f64| {
-        let shown = app.settings.tail_text.as_ref().filter(|(field, _)| *field == consolidation).map_or_else(|| value.to_string(), |(_, text)| text.clone());
-        row![label(name), text_input("seconds", &shown).on_input(move |s| Message::TailText(consolidation, s).into())
-            .on_submit(Message::TailDone(consolidation).into()).width(80).size(theme::SMALL).padding([3, 6]).style(theme::input),
-            label("seconds (0-120)"), tool("set", Message::TailDone(consolidation).into())].spacing(6).align_y(iced::Alignment::Center)
+    let tail_row = |tail: Tail, value: f64| {
+        let shown = app.settings.tail_text.as_ref().filter(|(typed, _)| *typed == tail).map_or_else(|| value.to_string(), |(_, text)| text.clone());
+        row![label(tail.name()), text_input("seconds", &shown).on_input(move |s| Message::TailText(tail, s).into())
+            .on_submit(Message::TailDone(tail).into()).width(80).size(theme::SMALL).padding([3, 6]).style(theme::input),
+            label(format!("seconds (0-{})", RenderSettings::MAX_TAIL_SECONDS)), tool("set", Message::TailDone(tail).into())].spacing(6).align_y(iced::Alignment::Center)
     };
     let mut list = column![
         label("MIDI input"),
@@ -140,8 +163,8 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             tool("recover backup", AppMessage::Action(crate::keys::Action::Recover)),
             tool("package project", AppMessage::Action(crate::keys::Action::Pack))].spacing(6),
         label("project render settings"),
-        tail_row("export tail", false, app.project.render.export_tail_seconds),
-        tail_row("consolidation tail", true, app.project.render.consolidation_tail_seconds),
+        tail_row(Tail::Export, app.project.render.export_tail_seconds),
+        tail_row(Tail::Consolidation, app.project.render.consolidation_tail_seconds),
     ].spacing(6).padding([4, 8]);
     if let Some(error) = &app.config_error {
         list = list.push(container(text(error.clone()).size(theme::SMALL).color(theme::BRIGHT)).padding([2, 0]));

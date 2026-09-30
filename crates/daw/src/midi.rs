@@ -215,10 +215,20 @@ impl App {
     }
 
     pub fn reset_midi_input(&mut self) {
-        if let Some(port) = self.midi.selected.clone() {
-            match self.midi.connect(port, self.session.midi_shared()) {
-                Ok(input) => self.session.attach_midi(input),
-                Err(error) => self.set_status(format!("MIDI input failed: {error}")),
+        if let Some(port) = self.midi.selected.clone() { self.connect_midi(port); }
+    }
+
+    /// Send `port`'s notes to the engine. Returns false and shows the error
+    /// when the port cannot be opened.
+    pub fn connect_midi(&mut self, port: Port) -> bool {
+        match self.midi.connect(port, self.session.shared().clone()) {
+            Ok(input) => {
+                self.session.attach_midi(input);
+                true
+            }
+            Err(error) => {
+                self.set_status(format!("MIDI input failed: {error}"));
+                false
             }
         }
     }

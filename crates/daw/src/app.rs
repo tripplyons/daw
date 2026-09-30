@@ -1,7 +1,7 @@
 //! Application state, messages, and top-level update and view.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -32,11 +32,8 @@ mod saving;
 pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
 pub const TRANSPORT_HEIGHT: f32 = 26.0;
-
-fn panels_job(label: &str, progress: f32, cancel: Message) -> Element<'_, Message> {
-    row![panels::label(format!("{label} {:.0}%", progress * 100.0)), progress_bar(0.0..=1.0, progress).length(120).girth(8),
-        panels::tool("cancel", cancel)].spacing(6).align_y(iced::Alignment::Center).into()
-}
+/// Height of the background job bar under the transport, while it shows.
+const JOBS_HEIGHT: f32 = 26.0;
 const GUTTER: f32 = 3.0;
 const UNDO_LIMIT: usize = 200;
 const LAST_TOUCHED: usize = 16;
@@ -258,13 +255,11 @@ impl App {
             app.open(path);
         }
         if let Err(error) = app.midi.rescan() { app.set_status(format!("MIDI scan failed: {error}")); }
-        if let Some(name) = &app.config.midi_input {
-            if let Some(port) = app.midi.ports.iter().find(|p| &p.name == name).cloned() {
-                match app.midi.connect(port, app.session.midi_shared()) {
-                    Ok(input) => app.session.attach_midi(input),
-                    Err(error) => app.set_status(format!("MIDI input failed: {error}")),
-                }
-            } else { app.set_status(format!("MIDI input {name} unavailable; select an input in settings")); }
+        if let Some(name) = app.config.midi_input.clone() {
+            match app.midi.ports.iter().find(|p| p.name == name).cloned() {
+                Some(port) => { app.connect_midi(port); }
+                None => app.set_status(format!("MIDI input {name} unavailable; select an input in settings")),
+            }
         }
         #[cfg(target_os = "macos")]
         forward_plugin_keys();
@@ -298,8 +293,13 @@ impl App {
         layout.panel(layout.focused)
     }
 
+    /// Whether the background job bar shows, for audio processing or a render.
+    fn showing_jobs(&self) -> bool {
+        self.session.audio_progress().is_some() || self.session.preparation_error.is_some() || self.rendering.progress().is_some()
+    }
+
     fn tile_area(&self) -> Rect {
-        let top = TRANSPORT_HEIGHT + if self.session.audio_progress().is_some() || self.session.preparation_error.is_some() || self.rendering.progress().is_some() { 26.0 } else { 0.0 };
+        let top = TRANSPORT_HEIGHT + if self.showing_jobs() { JOBS_HEIGHT } else { 0.0 };
         Rect { x: 0.0, y: top, width: self.window.width, height: (self.window.height - top).max(1.0) }
     }
 
@@ -535,7 +535,8 @@ impl App {
                 self.tick();
                 self.poll_renders();
                 match self.session.poll_preparation(&mut self.project, self.mode) {
-                    Some(Err(error)) => self.set_status(if error.starts_with("cancelled") { format!("audio processing {error}") } else { format!("audio preparation failed: {error}") }),
+                    Some(Err(daw_engine::audio::Error::Cancelled)) => self.set_status("audio processing cancelled; retry audio processing to hear the pending edits"),
+                    Some(Err(error)) => self.set_status(format!("audio preparation failed: {error}")),
                     Some(Ok(())) if self.status == "processing audio" => self.set_status("audio ready"),
                     _ => {}
                 }
@@ -605,7 +606,7 @@ impl App {
             Message::BpmDone => {
                 if let Some(value) = self.bpm_text.take()
                     && let Ok(bpm) = value.trim().parse::<f64>()
-                    && bpm.is_finite() && (20.0..=400.0).contains(&bpm) && bpm != self.project.bpm {
+                    && Project::BPM.contains(&bpm) && bpm != self.project.bpm {
                     self.checkpoint();
                     self.project.bpm = bpm;
                     self.edited();
@@ -755,7 +756,8 @@ impl App {
                 if self.path.is_none() {
                     return Task::perform(save_dialog(), Message::SavedAsThenContinue);
                 }
-                return self.save_and_continue();
+                // `save_finished` runs the pending step once the save works.
+                self.save();
             }
             Message::SaveChoice(SaveChoice::Discard) => {
                 self.saving.cancel_wait();
@@ -769,7 +771,7 @@ impl App {
             }
             Message::SavedAsThenContinue(Some(path)) => {
                 self.path = Some(path);
-                return self.save_and_continue();
+                self.save();
             }
             Message::Exported(path) => {
                 if let Some(path) = path {
@@ -806,11 +808,10 @@ impl App {
         self.position = shared.position();
         let was_playing = self.playing;
         self.playing = shared.playing();
+        self.meters = (0..self.project.mixer.inserts.len()).map(|i| shared.take_peak(i)).collect();
         if was_playing && !self.playing {
             automation::stopped(self);
         }
-        let shared = self.session.shared();
-        self.meters = (0..self.project.mixer.inserts.len()).map(|i| shared.take_peak(i)).collect();
         for (instance, touch) in self.session.poll() {
             self.plugin_touch(instance, touch);
         }
@@ -1077,16 +1078,22 @@ impl App {
     }
 
     fn new_project(&mut self) {
+        self.replace_project(Project::new(), None, crate::project_files::stamp());
+    }
+
+    /// Close the current project, with its jobs, recordings, and history,
+    /// and start editing `project`.
+    fn replace_project(&mut self, project: Project, path: Option<PathBuf>, backup_key: String) {
         self.saving.new_project();
         self.rendering.new_project();
         self.suspend_midi_input();
         if self.midi.recording { self.toggle_midi_recording(); }
-        self.backup_key = crate::project_files::stamp();
+        self.backup_key = backup_key;
         self.last_autosave = Instant::now();
         self.stop_audio_recording();
         self.session.clear();
-        self.project = Project::new();
-        self.path = None;
+        self.project = project;
+        self.path = path;
         self.undo.clear();
         self.redo.clear();
         self.dirty = false;
@@ -1124,48 +1131,24 @@ impl App {
         )
     }
 
-    /// Save, then run the pending step only if the save worked; otherwise
-    /// keep the project open with the error.
-    fn save_and_continue(&mut self) -> Task<Message> {
-        self.save();
-        Task::none()
-    }
-
     pub fn open(&mut self, path: PathBuf) {
-        let loaded = crate::project_files::load(&path);
-        match loaded {
-            Ok(project) => {
-                self.saving.new_project();
-                self.rendering.new_project();
-                self.suspend_midi_input();
-                if self.midi.recording { self.toggle_midi_recording(); }
-                self.backup_key = crate::project_files::backup_key(&project.name, &path);
-                self.last_autosave = Instant::now();
-                self.stop_audio_recording();
-                self.session.clear();
-                self.project = project;
-                self.path = Some(path);
-                self.undo.clear();
-                self.redo.clear();
-                self.dirty = false;
-                self.song_start = 0.0;
-                self.pattern_start = 0.0;
-                self.selected_pattern = self.project.patterns[0].id;
-                self.mode = PlayMode::Song;
-                self.validate_selection();
-                self.refresh();
-                self.reset_midi_input();
-                let failures = self.session.load_errors.len();
-                self.set_status(if let Some(error) = &self.session.preparation_error {
-                    format!("opened; audio preparation failed: {error}")
-                } else if failures == 0 {
-                    "opened".to_string()
-                } else {
-                    format!("opened; {failures} plugins failed to load")
-                });
+        let project = match crate::project_files::load(&path) {
+            Ok(project) => project,
+            Err(error) => {
+                self.set_status(format!("open failed: {error}"));
+                return;
             }
-            Err(error) => self.set_status(format!("open failed: {error}")),
-        }
+        };
+        let backup_key = crate::project_files::backup_key(&project.name, &path);
+        self.replace_project(project, Some(path), backup_key);
+        let failures = self.session.load_errors.len();
+        self.set_status(if let Some(error) = &self.session.preparation_error {
+            format!("opened; audio preparation failed: {error}")
+        } else if failures == 0 {
+            "opened".to_string()
+        } else {
+            format!("opened; {failures} plugins failed to load")
+        });
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -1201,25 +1184,25 @@ impl App {
         let layout = self.layout();
         let tiles = if layout.zoomed { self.tile(layout.focused) } else { self.node(&layout.root, &mut Vec::new()) };
         let mut base = column![self.transport()];
-        let mut jobs = row![].spacing(8).align_y(iced::Alignment::Center);
-        let mut showing = false;
-        if let Some(progress) = self.session.audio_progress() {
-            showing = true;
-            jobs = jobs.push(panels_job("audio", progress, Message::CancelAudio));
-        } else if self.session.preparation_error.is_some() {
-            showing = true;
-            jobs = jobs.push(panels::tool("retry audio processing", Message::RetryAudio));
-        }
-        if let Some((label, progress)) = self.rendering.progress() {
-            showing = true;
-            jobs = jobs.push(panels_job(label, progress, Message::CancelRender));
-        }
-        if showing { base = base.push(container(jobs).height(26).padding([2, 4])); }
+        if self.showing_jobs() { base = base.push(self.jobs()); }
         let base = base.push(tiles);
         match &self.menu {
             Some(open) => stack![base, menu::view(self, open)].into(),
             None => base.into(),
         }
+    }
+
+    fn jobs(&self) -> Element<'_, Message> {
+        let mut jobs = row![].spacing(8).align_y(iced::Alignment::Center);
+        if let Some(progress) = self.session.audio_progress() {
+            jobs = jobs.push(job("audio", progress, Message::CancelAudio));
+        } else if self.session.preparation_error.is_some() {
+            jobs = jobs.push(panels::tool("retry audio processing", Message::RetryAudio));
+        }
+        if let Some((label, progress)) = self.rendering.progress() {
+            jobs = jobs.push(job(label, progress, Message::CancelRender));
+        }
+        container(jobs).height(JOBS_HEIGHT).padding([2, 4]).into()
     }
 
     fn node<'a>(&'a self, node: &daw_model::layout::Node, path: &mut Vec<bool>) -> Element<'a, Message> {
@@ -1428,6 +1411,18 @@ impl std::fmt::Display for PatternChoice {
     }
 }
 
+/// A running job's progress, with a button that cancels it.
+fn job(label: &str, progress: f32, cancel: Message) -> Element<'_, Message> {
+    row![
+        panels::label(format!("{label} {:.0}%", progress * 100.0)),
+        progress_bar(0.0..=1.0, progress).length(120).girth(8),
+        panels::tool("cancel", cancel)
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 fn rule_style() -> rule::Style {
     rule::Style { color: theme::LINE, radius: 0.0.into(), fill_mode: rule::FillMode::Full, snap: true }
 }
@@ -1467,35 +1462,6 @@ pub fn pan_text(pan: f32) -> String {
         p if p < 0.0 => format!("{:.0}L", -p * 100.0),
         p => format!("{:.0}R", p * 100.0),
     }
-}
-
-/// Headless render for `daw export`, loading the project's plugins. With
-/// `stems`, each mixer insert also goes to its own file in that folder.
-pub fn export_cli(project: &Path, out: &Path, range: Option<(Ticks, Ticks)>, stems: Option<&Path>, tail: Option<f64>) -> Result<(), String> {
-    let project = crate::project_files::load(project)?;
-    let stems: Vec<daw_engine::output::Stem> = match stems {
-        Some(folder) => {
-            std::fs::create_dir_all(folder).map_err(|e| format!("could not create {}: {e}", folder.display()))?;
-            // Skip inserts no channel's signal reaches; always keep the master.
-            let reached = |id| project.channels.iter().any(|c| c.insert == id || project.mixer.feeds(c.insert, id));
-            project
-                .mixer
-                .inserts
-                .iter()
-                .enumerate()
-                .filter(|&(index, insert)| index == 0 || reached(insert.id))
-                .map(|(index, insert)| daw_engine::output::Stem {
-                    insert: index,
-                    path: folder.join(format!("{index:02} {}.wav", insert.name.replace(['/', '\\'], "-"))),
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
-    let sample_rate = daw_engine::output::default_sample_rate().unwrap_or(48_000.0);
-    let mut renderer = crate::render::Renderer::new(&project, Default::default(), Default::default(), sample_rate)?;
-    let options = crate::session::RenderOptions { depth: BitDepth::Int24, range, tail_seconds: tail.unwrap_or(project.render.export_tail_seconds) };
-    renderer.worker.run(out, options, &stems, &crate::processing::Control::default()).map(|_| ()).map_err(|e| format!("export failed: {e}"))
 }
 
 async fn save_dialog() -> Option<PathBuf> {

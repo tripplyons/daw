@@ -4,14 +4,14 @@ mod cli;
 mod config;
 mod keys;
 mod menu;
+mod midi;
 mod open_files;
 mod panels;
-mod project_files;
-mod midi;
-mod quit;
-mod session;
 mod processing;
+mod project_files;
+mod quit;
 mod render;
+mod session;
 mod theme;
 
 use std::process::ExitCode;

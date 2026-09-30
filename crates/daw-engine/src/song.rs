@@ -275,7 +275,9 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
     Song { bpm: project.bpm, signature: project.signature, loop_range, channels, inserts, order, automation }
 }
 
-fn engine_target(project: &Project, target: Target) -> Option<EngineTarget> {
+/// Where `target` lives in a plan compiled from `project`, or `None` when its
+/// channel or insert is gone.
+pub fn engine_target(project: &Project, target: Target) -> Option<EngineTarget> {
     let insert = |id| project.mixer.inserts.iter().position(|i| i.id == id);
     let channel = |id| project.channels.iter().position(|c| c.id == id);
     Some(match target {

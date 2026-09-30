@@ -4,13 +4,14 @@
 mod analyze;
 mod batch;
 mod edit;
+mod export;
 mod parse;
 mod plugins;
 mod show;
 #[cfg(test)]
 mod tests;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -21,6 +22,8 @@ use daw_plugins::PluginKind;
 pub use edit::Op;
 use parse::Time;
 use plugins::Plugins;
+
+use crate::project_files::{load, save};
 
 #[derive(Parser)]
 #[command(name = "daw", about = "A tiling DAW. With no command, opens the app.", args_conflicts_with_subcommands = true)]
@@ -165,7 +168,7 @@ pub fn run(command: Command) -> ExitCode {
 fn execute(command: Command) -> Result<String, String> {
     match command {
         Command::Pack { file, out } => {
-            crate::project_files::pack(&out, &load(&file)?)?;
+            save(&out, &load(&file)?)?;
             Ok(format!("packaged {}", out.display()))
         }
         Command::Unpack { archive, folder } => {
@@ -226,7 +229,6 @@ fn execute(command: Command) -> Result<String, String> {
             Ok(output)
         }
         Command::Export { file, out, range, stems, tail } => {
-            // Load here first: the app reports a bad file only in its status bar.
             let project = load(&file)?;
             let range = match range {
                 Some((start, end)) if ticks(&project, end) <= ticks(&project, start) => {
@@ -235,7 +237,7 @@ fn execute(command: Command) -> Result<String, String> {
                 Some((start, end)) => Some((ticks(&project, start), ticks(&project, end))),
                 None => None,
             };
-            crate::app::export_cli(&file, &out, range, stems.as_deref(), tail)?;
+            export::export(&project, &out, range, stems.as_deref(), tail)?;
             Ok(format!("exported {}", out.display()))
         }
         Command::Analyze { files, bars, bpm } => {
@@ -259,15 +261,6 @@ fn execute(command: Command) -> Result<String, String> {
             Ok(output)
         }
     }
-}
-
-fn load(path: &Path) -> Result<Project, String> {
-    crate::project_files::load(path)
-}
-
-/// Save the project and its audio in one archive through a temporary file.
-fn save(path: &Path, project: &Project) -> Result<(), String> {
-    crate::project_files::save(path, project)
 }
 
 /// Find an installed plugin by exact id or case-insensitive name.

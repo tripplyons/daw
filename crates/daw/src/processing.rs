@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use daw_engine::audio::{self, Cache};
+use daw_engine::audio::{self, Cache, Error};
 use daw_model::Project;
 
 #[derive(Default)]
@@ -24,9 +24,12 @@ impl Control {
     }
 }
 
+/// Frames summarized by each waveform peak.
+pub const PEAK_FRAMES: usize = 256;
+
 pub type Peaks = HashMap<String, Arc<Vec<f32>>>;
 
-pub struct Finished { pub cache: Cache, pub peaks: Peaks, pub result: Result<(), String> }
+pub struct Finished { pub cache: Cache, pub peaks: Peaks, pub result: Result<(), Error> }
 
 pub struct Preparation {
     pub needed: HashSet<String>,
@@ -41,7 +44,7 @@ impl Preparation {
         let needed = Cache::required(&project);
         let (send, receive) = mpsc::channel();
         std::thread::Builder::new().name("audio preparation".into()).spawn(move || {
-            let result = audio::prepare_with_progress(&project, &mut cache, |p| worker_control.update(p * 0.8))
+            let result = audio::prepare(&project, &mut cache, |p| worker_control.update(p * 0.8))
                 .and_then(|()| prepare_peaks(&cache, &mut peaks, &worker_control));
             cache.trim(&project);
             peaks.retain(|key, _| cache.contains_key(key));
@@ -61,18 +64,20 @@ impl Preparation {
 
 impl Drop for Preparation { fn drop(&mut self) { self.control.cancel(); } }
 
-fn prepare_peaks(cache: &Cache, peaks: &mut Peaks, control: &Control) -> Result<(), String> {
+/// Summarize each sample without peaks as the largest absolute value per
+/// `PEAK_FRAMES` frames, across both sides.
+fn prepare_peaks(cache: &Cache, peaks: &mut Peaks, control: &Control) -> Result<(), Error> {
     for (index, (key, sample)) in cache.iter().enumerate() {
         if peaks.contains_key(key) { continue; }
-        let mut summary = Vec::with_capacity(sample.left.len().div_ceil(crate::session::PEAK_FRAMES));
-        for (chunk, (l, r)) in sample.left.chunks(crate::session::PEAK_FRAMES).zip(sample.right.chunks(crate::session::PEAK_FRAMES)).enumerate() {
+        let mut summary = Vec::with_capacity(sample.left.len().div_ceil(PEAK_FRAMES));
+        for (chunk, (l, r)) in sample.left.chunks(PEAK_FRAMES).zip(sample.right.chunks(PEAK_FRAMES)).enumerate() {
             if chunk % 256 == 0 {
-                let fraction = chunk as f32 * crate::session::PEAK_FRAMES as f32 / sample.left.len().max(1) as f32;
-                if !control.update(0.8 + 0.2 * (index as f32 + fraction) / cache.len().max(1) as f32) { return Err("cancelled".into()); }
+                let fraction = chunk as f32 * PEAK_FRAMES as f32 / sample.left.len().max(1) as f32;
+                if !control.update(0.8 + 0.2 * (index as f32 + fraction) / cache.len().max(1) as f32) { return Err(Error::Cancelled); }
             }
             summary.push(l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs())));
         }
         peaks.insert(key.clone(), Arc::new(summary));
     }
-    if control.update(1.0) { Ok(()) } else { Err("cancelled".into()) }
+    if control.update(1.0) { Ok(()) } else { Err(Error::Cancelled) }
 }

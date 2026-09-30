@@ -75,7 +75,7 @@ Automation values are normalized from 0 to 1:
 
 | Target | 0 | 1 |
 | --- | --- | --- |
-| tempo | 40 bpm | 240 bpm (bpm = 40 + 200 × value) |
+| tempo | 1 bpm | 999 bpm (bpm = 1 + 998 × value, so value = (bpm - 1) / 998; 120 bpm is about 0.1192) |
 | channel-volume | silent | gain 1 (the channel volume itself) |
 | insert-volume | silent | gain 2, about +6 dB (value = insert volume / 2) |
 | channel-pan, insert-pan | left | right (0.5 is center) |
@@ -125,6 +125,7 @@ Behavior worth knowing:
 - `note add` and `note steps` grow the pattern to whole bars that hold the new notes. `note steps` replaces all of that channel's notes in the pattern.
 - `note remove` with no filters clears the channel's notes in that pattern.
 - `pattern set --length` and `automation set --length` also resize playlist clips that show the whole source.
+- `set --bpm` accepts 1 to 999, the same range tempo automation covers.
 - `clip add` adds tracks up to the index you give. Its length defaults to the source's length, less `--offset`; for `audio:CHANNEL`, that is the WAV file's length at the project tempo.
 - `automation add` makes two points, at 0 and at the clip's length, both at the target's current value or `--value`. Each point sets the shape of the segment that follows it. One clip per target. `point add` past the clip's end grows the clip; `point add` and `point set` print the point's index after sorting by time.
 - `--plugin` and `effect add` match an exact plugin id or a case-insensitive name. When a plugin exists in several formats, pass the id from `$DAW plugins`. If the cache is empty, run `$DAW plugins --scan` (it can take a minute).

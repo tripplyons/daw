@@ -322,11 +322,16 @@ fn bpm_field_applies_only_on_submit_or_focus_loss() {
     let _ = app.update(Message::Action(Action::Undo));
     assert_eq!(app.project.bpm, before);
     let (revision, undo) = (app.revision, app.undo.len());
-    for text in ["", "NaN", "401", "19"] {
+    for text in ["", "NaN", "0.5", "1000"] {
         let _ = app.update(Message::SetBpm(text.into()));
         let _ = app.update(Message::BpmDone);
         assert_eq!(app.project.bpm, before);
         assert_eq!((app.revision, app.undo.len()), (revision, undo));
+    }
+    for bpm in [1.0, 999.0] {
+        let _ = app.update(Message::SetBpm(bpm.to_string()));
+        let _ = app.update(Message::BpmDone);
+        assert_eq!(app.project.bpm, bpm);
     }
 }
 
@@ -1194,7 +1199,7 @@ fn consolidation_bakes_insert_gain_and_leaves_master_processing_live() {
     app.refresh();
     let end = app.project.playlist.clips[0].end();
     let before = dir.join("before.wav");
-    app.session.export(&app.project, &before, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((960, end)), tail_seconds: 0.0 }, &[]).unwrap();
+    app.session.export(&app.project, &before, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((960, end)), tail_seconds: 0.0 }, &[]).unwrap();
     app.consolidate_selection().unwrap();
     wait_renders(&mut app);
     assert!(app.project.playlist.clips[0].muted);
@@ -1202,7 +1207,7 @@ fn consolidation_bakes_insert_gain_and_leaves_master_processing_live() {
     assert_eq!((audio.volume, audio.pan, audio.insert), (1.0, 0.0, daw_model::MASTER));
     assert_eq!(app.project.mixer.inserts[0].volume, 0.5);
     let after = dir.join("after.wav");
-    app.session.export(&app.project, &after, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((960, end)), tail_seconds: 0.0 }, &[]).unwrap();
+    app.session.export(&app.project, &after, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((960, end)), tail_seconds: 0.0 }, &[]).unwrap();
     let before = daw_engine::synth::Sample::load(before.to_str().unwrap()).unwrap();
     let after = daw_engine::synth::Sample::load(after.to_str().unwrap()).unwrap();
     assert_eq!(before.left.len(), after.left.len());
@@ -1474,7 +1479,7 @@ fn a_portable_project_renders_identically_after_removing_the_source_folder() {
     app.refresh();
     let end = app.project.song_length();
     let before = dir.join("before.wav");
-    app.session.export(&app.project, &before, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((0, end)), tail_seconds: 0.0 }, &[]).unwrap();
+    app.session.export(&app.project, &before, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((0, end)), tail_seconds: 0.0 }, &[]).unwrap();
     let saved = dir.join("song.dawproj");
     let _ = app.update(Message::SavedAs(Some(saved.clone())));
     wait_saves(&mut app);
@@ -1488,7 +1493,7 @@ fn a_portable_project_renders_identically_after_removing_the_source_folder() {
     assert_eq!(app.path, Some(relocated.clone()));
     assert!(app.session.preparation_error.is_none());
     let after = dir.join("after.wav");
-    app.session.export(&app.project, &after, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((0, end)), tail_seconds: 0.0 }, &[]).unwrap();
+    app.session.export(&app.project, &after, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((0, end)), tail_seconds: 0.0 }, &[]).unwrap();
     let before = daw_engine::synth::Sample::load(before.to_str().unwrap()).unwrap();
     let after = daw_engine::synth::Sample::load(after.to_str().unwrap()).unwrap();
     assert!(before.left.iter().any(|s| s.abs() > 0.01));
@@ -1628,6 +1633,7 @@ fn precise_audio_values_commit_once_and_reset_without_spurious_undo() {
 
 #[test]
 fn render_tails_are_adjustable_portable_and_extend_consolidated_clips() {
+    use crate::panels::settings::{Message, Tail};
     let mut app = app();
     let dir = std::env::temp_dir().join(format!("daw-tails-{}", crate::project_files::stamp()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1638,10 +1644,10 @@ fn render_tails_are_adjustable_portable_and_extend_consolidated_clips() {
     let id = app.project.add_clip(0, 0, ClipSource::Pattern(pattern));
     let end = app.project.playlist.clips.last().unwrap().end();
     app.playlist.selected = vec![id];
-    let _ = app.update(crate::panels::settings::Message::TailText(true, "0.75".into()).into());
-    let _ = app.update(crate::panels::settings::Message::TailDone(true).into());
-    let _ = app.update(crate::panels::settings::Message::TailText(false, "1.25".into()).into());
-    let _ = app.update(crate::panels::settings::Message::TailDone(false).into());
+    let _ = app.update(Message::TailText(Tail::Consolidation, "0.75".into()).into());
+    let _ = app.update(Message::TailDone(Tail::Consolidation).into());
+    let _ = app.update(Message::TailText(Tail::Export, "1.25".into()).into());
+    let _ = app.update(Message::TailDone(Tail::Export).into());
     crate::project_files::save(app.path.as_ref().unwrap(), &app.project).unwrap();
     assert_eq!(crate::project_files::load(app.path.as_ref().unwrap()).unwrap().render, app.project.render);
     let _ = app.update(list::Message::Consolidate.into());

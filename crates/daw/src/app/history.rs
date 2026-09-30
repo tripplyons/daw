@@ -64,7 +64,7 @@ impl App {
         match touch {
             Touch::Begin(param) => { self.history.gestures.entry(id).or_default().held.insert(param); }
             Touch::Value { param, value } => {
-                if !value.is_finite() || !(0.0..=1.0).contains(&value) || self.session.previous_parameter(id, param) == Some(value) { return; }
+                if !(0.0..=1.0).contains(&value) || self.session.previous_parameter(id, param) == Some(value) { return; }
                 let changed = self.history.gestures.get(&id).is_some_and(|g| g.changed);
                 if !changed {
                     let snapshot = self.snapshot(Some(id));

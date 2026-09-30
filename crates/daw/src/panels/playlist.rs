@@ -9,7 +9,7 @@
 use daw_engine::song::PlayMode;
 use daw_engine::input::Take;
 use daw_model::time::{Grid, TICKS_PER_BEAT, Ticks, seconds_to_ticks};
-use daw_model::{Clip, ClipId, ClipSource, Source};
+use daw_model::{AudioEdit, Clip, ClipId, ClipSource, Source};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::{column, row, slider, text_input};
@@ -20,7 +20,7 @@ use super::{label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage};
 use crate::keys::Action;
 use crate::menu;
-use crate::session::PEAK_FRAMES;
+use crate::processing::PEAK_FRAMES;
 use crate::theme;
 
 const HEADER_WIDTH: f32 = 84.0;
@@ -220,7 +220,7 @@ pub fn update(app: &mut App, message: Message) {
             app.edited();
         }
         Message::AudioPitch(value) => {
-            if !value.is_finite() || !(-48.0..=48.0).contains(&value) { return; }
+            if !AudioEdit::SEMITONES.contains(&value) { return; }
             match &mut app.playlist.pitch_edit {
                 Some((_, pitch)) => *pitch = value,
                 None => {
@@ -246,7 +246,7 @@ pub fn update(app: &mut App, message: Message) {
         }
         Message::Reverse | Message::AudioStretch(_) => {
             if let Message::AudioStretch(value) = message
-                && (!value.is_finite() || !(0.125..=8.0).contains(&value)) { return; }
+                && !AudioEdit::STRETCH.contains(&value) { return; }
             let changed = app.project.playlist.clips.iter().any(|c| app.playlist.selected.contains(&c.id)
                 && matches!(c.source, ClipSource::Audio(_)) && match message {
                     Message::AudioStretch(value) => c.audio.stretch != value,
@@ -282,17 +282,21 @@ pub fn update(app: &mut App, message: Message) {
             if !app.playlist.selected.contains(&text.clip) { app.playlist.audio_text = None; return; }
             match field {
                 AudioField::Stretch => {
-                    let Ok(value) = text.stretch.trim().parse::<f64>() else { app.set_status("stretch must be a number between 0.125 and 8"); return };
-                    if !value.is_finite() || !(0.125..=8.0).contains(&value) { app.set_status("stretch must be between 0.125 and 8"); return; }
+                    let Ok(value) = text.stretch.trim().parse::<f64>() else { app.set_status("stretch must be a number"); return };
+                    let value = match AudioEdit::check_stretch(value) {
+                        Ok(value) => value,
+                        Err(error) => { app.set_status(error); return; }
+                    };
                     update(app, Message::AudioStretch(value));
                 }
                 _ => {
                     let parsed = text.pitch.trim().parse::<f32>().ok().zip(text.cents.trim().parse::<f32>().ok());
                     let Some((pitch, cents)) = parsed else { app.set_status("pitch and cents must be numbers"); return };
                     let value = pitch + cents / 100.0;
-                    if !pitch.is_finite() || !cents.is_finite() || !value.is_finite() || !(-48.0..=48.0).contains(&value) {
-                        app.set_status("combined pitch must be between -48 and 48 semitones"); return;
-                    }
+                    let value = match AudioEdit::check_semitones(value) {
+                        Ok(value) => value,
+                        Err(error) => { app.set_status(format!("combined {error}")); return; }
+                    };
                     update(app, Message::AudioPitch(value));
                     update(app, Message::AudioPitchDone);
                 }
@@ -379,7 +383,7 @@ pub fn update(app: &mut App, message: Message) {
                     };
                     let ratio = length as f64 / original.length.max(1) as f64;
                     let stretch = original.audio.stretch * ratio;
-                    if (0.125..=8.0).contains(&stretch) {
+                    if AudioEdit::STRETCH.contains(&stretch) {
                         clip.audio.stretch = stretch;
                         clip.offset = (original.offset as f64 * ratio).round() as Ticks;
                         clip.length = length;
@@ -661,7 +665,7 @@ pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
         .on_input(move |s| Message::AudioText(field, s).into()).on_submit(Message::AudioApply(field).into())
         .width(72).size(theme::SMALL).padding([3, 6]).style(theme::input);
     let pitch = row![
-        label("audio pitch"), slider(-48.0..=48.0, semitones, |p| Message::AudioPitch(p).into())
+        label("audio pitch"), slider(AudioEdit::SEMITONES, semitones, |p| Message::AudioPitch(p).into())
             .step(0.01_f32).on_release(Message::AudioPitchDone.into()).width(100).style(theme::fader),
         audio_input("pitch", &draft.pitch, AudioField::Pitch), label("st"),
         audio_input("cents", &draft.cents, AudioField::Cents), label("cents"),

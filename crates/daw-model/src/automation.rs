@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Project;
 use crate::time::{Grid, TimeSignature, Ticks};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -78,9 +79,9 @@ impl Point {
     }
 }
 
-/// Tempo range that normalized tempo automation spans.
-pub const TEMPO_MIN: f64 = 40.0;
-pub const TEMPO_MAX: f64 = 240.0;
+/// Tempo automation spans the whole `Project::BPM` range.
+const TEMPO_MIN: f64 = *Project::BPM.start();
+const TEMPO_MAX: f64 = *Project::BPM.end();
 
 pub fn tempo_from_normalized(value: f32) -> f64 {
     TEMPO_MIN + f64::from(value) * (TEMPO_MAX - TEMPO_MIN)

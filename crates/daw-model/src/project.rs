@@ -1,5 +1,7 @@
 //! Project document: channels, patterns, playlist, mixer, automation, and plugin instances.
 
+use std::ops::RangeInclusive;
+
 use serde::{Deserialize, Serialize};
 
 use crate::automation::{Envelope, Point, tempo_to_normalized};
@@ -161,7 +163,6 @@ impl Pattern {
             notes.sort_by_key(|n| n.start);
         }
     }
-
 }
 
 /// What an automation clip drives.
@@ -224,12 +225,37 @@ impl Default for AudioEdit {
     }
 }
 
+impl AudioEdit {
+    pub const STRETCH: RangeInclusive<f64> = 0.125..=8.0;
+    pub const SEMITONES: RangeInclusive<f32> = -48.0..=48.0;
+
+    pub fn validate(&self) -> Result<(), String> {
+        Self::check_stretch(self.stretch)?;
+        Self::check_semitones(self.semitones)?;
+        Ok(())
+    }
+
+    pub fn check_stretch(stretch: f64) -> Result<f64, String> {
+        if Self::STRETCH.contains(&stretch) { return Ok(stretch); }
+        Err(format!("stretch must be between {} and {}", Self::STRETCH.start(), Self::STRETCH.end()))
+    }
+
+    pub fn check_semitones(semitones: f32) -> Result<f32, String> {
+        if Self::SEMITONES.contains(&semitones) { return Ok(semitones); }
+        Err(format!("pitch must be between {} and {} semitones", Self::SEMITONES.start(), Self::SEMITONES.end()))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Send {
     pub to: InsertId,
     pub level: f32,
     /// A detector input, not audible audio at the destination.
     pub sidechain: bool,
+}
+
+impl Send {
+    pub const LEVEL: RangeInclusive<f32> = 0.0..=2.0;
 }
 
 impl Clip {
@@ -312,7 +338,7 @@ impl Mixer {
     }
 
     pub fn set_send(&mut self, from: InsertId, send: Send) -> bool {
-        if !send.level.is_finite() || !(0.0..=2.0).contains(&send.level) || !self.can_route(from, send.to) {
+        if !Send::LEVEL.contains(&send.level) || !self.can_route(from, send.to) {
             return false;
         }
         let Some(insert) = self.insert_mut(from) else { return false };
@@ -368,11 +394,19 @@ impl Default for RenderSettings {
 }
 
 impl RenderSettings {
+    /// Longest tail an offline render may add, in seconds.
+    pub const MAX_TAIL_SECONDS: f64 = 120.0;
+
     pub fn validate(&self) -> Result<(), String> {
-        for (name, value) in [("export tail", self.export_tail_seconds), ("consolidation tail", self.consolidation_tail_seconds)] {
-            if !value.is_finite() || !(0.0..=120.0).contains(&value) { return Err(format!("{name} must be between 0 and 120 seconds")); }
-        }
+        Self::check_tail("export tail", self.export_tail_seconds)?;
+        Self::check_tail("consolidation tail", self.consolidation_tail_seconds)?;
         Ok(())
+    }
+
+    /// Accept a tail length in seconds, naming it `name` in the error.
+    pub fn check_tail(name: &str, seconds: f64) -> Result<f64, String> {
+        if (0.0..=Self::MAX_TAIL_SECONDS).contains(&seconds) { return Ok(seconds); }
+        Err(format!("{name} must be between 0 and {} seconds", Self::MAX_TAIL_SECONDS))
     }
 }
 
@@ -392,6 +426,9 @@ pub struct Project {
     #[serde(default)]
     pub render: RenderSettings,
     next_id: u64,
+    /// Files saved before formats were numbered read as 0.
+    #[serde(default)]
+    format: u32,
 }
 
 impl Default for Project {
@@ -401,6 +438,15 @@ impl Default for Project {
 }
 
 impl Project {
+    pub const BPM: RangeInclusive<f64> = 1.0..=999.0;
+    /// Format 1 widened tempo automation from 40..240 bpm to all of `BPM`.
+    const FORMAT: u32 = 1;
+
+    pub fn check_bpm(bpm: f64) -> Result<f64, String> {
+        if Self::BPM.contains(&bpm) { return Ok(bpm); }
+        Err(format!("bpm must be between {} and {}", Self::BPM.start(), Self::BPM.end()))
+    }
+
     /// A project with a master insert, 8 mixer inserts, one synth channel, one
     /// pattern, and 16 empty playlist tracks.
     pub fn new() -> Self {
@@ -427,6 +473,7 @@ impl Project {
             grid: Grid::Division(16),
             render: RenderSettings::default(),
             next_id: 1,
+            format: Self::FORMAT,
         };
         project.mixer.inserts.push(Insert::new(MASTER, "master"));
         for i in 1..=8 {
@@ -641,15 +688,7 @@ impl Project {
         for insert in &mut self.mixer.inserts {
             insert.effects.retain(|&e| e != id);
         }
-        let dead: Vec<AutomationId> = self
-            .automation
-            .iter()
-            .filter(|a| matches!(a.target, Target::Plugin { instance, .. } if instance == id))
-            .map(|a| a.id)
-            .collect();
-        for automation in dead {
-            self.remove_automation(automation);
-        }
+        self.remove_automation_where(|target| matches!(target, Target::Plugin { instance, .. } if instance == id));
     }
 
     /// Remove a pattern and its playlist clips.
@@ -663,6 +702,14 @@ impl Project {
         self.playlist.clips.retain(|c| c.source != ClipSource::Automation(id));
     }
 
+    /// Remove the automation clips whose target matches, with their playlist clips.
+    fn remove_automation_where(&mut self, targets: impl Fn(Target) -> bool) {
+        let dead: Vec<AutomationId> = self.automation.iter().filter(|a| targets(a.target)).map(|a| a.id).collect();
+        for automation in dead {
+            self.remove_automation(automation);
+        }
+    }
+
     pub fn remove_channel(&mut self, id: ChannelId) {
         let Some(channel) = self.channel(id) else { return };
         if let Source::Plugin(instance) = channel.source {
@@ -673,17 +720,9 @@ impl Project {
         for pattern in &mut self.patterns {
             pattern.lanes.retain(|l| l.channel != id);
         }
-        let dead: Vec<AutomationId> = self
-            .automation
-            .iter()
-            .filter(|a| {
-                matches!(a.target, Target::ChannelVolume(c) | Target::ChannelPan(c) | Target::SynthCutoff(c) if c == id)
-            })
-            .map(|a| a.id)
-            .collect();
-        for automation in dead {
-            self.remove_automation(automation);
-        }
+        self.remove_automation_where(
+            |target| matches!(target, Target::ChannelVolume(c) | Target::ChannelPan(c) | Target::SynthCutoff(c) if c == id),
+        );
     }
 
     /// Remove a mixer insert with its effects and automation. Channels routed
@@ -708,15 +747,7 @@ impl Project {
                 other.output = next;
             }
         }
-        let dead: Vec<AutomationId> = self
-            .automation
-            .iter()
-            .filter(|a| matches!(a.target, Target::InsertVolume(i) | Target::InsertPan(i) if i == id))
-            .map(|a| a.id)
-            .collect();
-        for automation in dead {
-            self.remove_automation(automation);
-        }
+        self.remove_automation_where(|target| matches!(target, Target::InsertVolume(i) | Target::InsertPan(i) if i == id));
         self.mixer.inserts.retain(|i| i.id != id);
         for insert in &mut self.mixer.inserts { insert.sends.retain(|s| s.to != id); }
     }
@@ -744,7 +775,21 @@ impl Project {
     }
 
     pub fn from_ron(text: &str) -> Result<Project, ron::error::SpannedError> {
-        ron::from_str(text)
+        let mut project: Project = ron::from_str(text)?;
+        project.upgrade();
+        Ok(project)
+    }
+
+    /// Convert a project saved in an older format to `FORMAT`.
+    fn upgrade(&mut self) {
+        if self.format < 1 {
+            for clip in self.automation.iter_mut().filter(|c| c.target == Target::Tempo) {
+                for point in &mut clip.envelope.points {
+                    point.value = tempo_to_normalized(40.0 + f64::from(point.value) * 200.0);
+                }
+            }
+        }
+        self.format = Self::FORMAT;
     }
 }
 
@@ -777,6 +822,18 @@ mod tests {
 
     fn plugin(name: &str) -> PluginRef {
         PluginRef { format: PluginFormat::Vst3, id: name.into(), path: String::new(), name: name.into(), vendor: String::new() }
+    }
+
+    #[test]
+    fn loading_an_unnumbered_project_widens_tempo_automation() {
+        let mut project = Project::new();
+        let id = project.add_automation("tempo", Target::Tempo, 0.5);
+        project.format = 0;
+        let loaded = Project::from_ron(&project.to_ron().unwrap()).unwrap();
+        let value = loaded.automation_clip(id).unwrap().envelope.points[0].value;
+        assert!((crate::automation::tempo_from_normalized(value) - 140.0).abs() < 1e-3);
+        assert_eq!(loaded.format, Project::FORMAT);
+        assert_eq!(Project::from_ron(&loaded.to_ron().unwrap()).unwrap(), loaded);
     }
 
     #[test]

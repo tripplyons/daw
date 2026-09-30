@@ -170,7 +170,10 @@ impl Clock {
 
 impl Shared {
     /// Ticks played without loop wraps or seeks, for measuring recorded notes.
-    pub fn record_position(&self) -> f64 { f64::from_bits(self.record_position.load(Ordering::Relaxed)) }
+    pub fn record_position(&self) -> f64 {
+        f64::from_bits(self.record_position.load(Ordering::Relaxed))
+    }
+
     pub fn position(&self) -> f64 {
         f64::from_bits(self.position.load(Ordering::Relaxed))
     }
@@ -347,7 +350,9 @@ impl Engine {
         self.nodes.iter_mut().find(|n| n.key == key).map(|n| &mut **n)
     }
 
-    fn handle_commands(&mut self) {
+    /// Apply queued commands. Offline engines call this between sends so a
+    /// long setup does not fill the queue.
+    pub fn handle_commands(&mut self) {
         while let Ok(command) = self.commands.pop() {
             match command {
                 Command::ReleaseNotes => self.release_all(0),
@@ -408,16 +413,14 @@ impl Engine {
                 }
                 Command::Note { node, key, velocity } => {
                     if let Some(node) = self.node_mut(node) {
-                        let kind = if velocity > 0.0 { EventKind::NoteOn { key, velocity } } else { EventKind::NoteOff { key } };
-                        node.push(Event { offset: 0, kind });
+                        node.push(Event { offset: 0, kind: EventKind::note(key, velocity) });
                     }
                 }
             }
         }
         while let Some(note) = self.midi.as_mut().and_then(|input| input.pop().ok()) {
             if let Some(node) = self.node_mut(note.node) {
-                let kind = if note.velocity > 0.0 { EventKind::NoteOn { key: note.key, velocity: note.velocity } } else { EventKind::NoteOff { key: note.key } };
-                node.push(Event { offset: 0, kind });
+                node.push(Event { offset: 0, kind: EventKind::note(note.key, note.velocity) });
             }
         }
     }
@@ -556,24 +559,7 @@ impl Engine {
         }
 
         for &index in &song.order {
-            {
-                let insert = &mut song.inserts[index];
-                let (l, r) = (&mut insert.left[..frames], &mut insert.right[..frames]);
-                for key in &insert.effects {
-                    if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
-                        node.processor.process_sidechain(&transport, &node.events, l, r,
-                            (&insert.side_left[..frames], &insert.side_right[..frames]));
-                        node.events.clear();
-                    }
-                }
-                let (gl, gr) = if insert.silent { (0.0, 0.0) } else { apply_pan(insert.pan, insert.volume) };
-                for i in 0..frames { l[i] *= gl; r[i] *= gr; }
-                if let Some([cl, cr]) = self.capture.get_mut(index) {
-                    cl[offset..offset + frames].copy_from_slice(l);
-                    cr[offset..offset + frames].copy_from_slice(r);
-                }
-                self.shared.raise_peak(index, peak(l), peak(r));
-            }
+            self.process_insert(&mut song.inserts[index], index, &transport, offset, frames);
             let output = song.inserts[index].output;
             route(&mut song.inserts, index, output, 1.0, false, frames);
             for send in 0..song.inserts[index].sends.len() {
@@ -583,23 +569,9 @@ impl Engine {
             }
         }
         let master = &mut song.inserts[0];
-        let (l, r) = (&mut master.left[..frames], &mut master.right[..frames]);
-        for key in &master.effects {
-            if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
-                node.processor.process_sidechain(&transport, &node.events, l, r, (&master.side_left[..frames], &master.side_right[..frames]));
-                node.events.clear();
-            }
-        }
-        let (gl, gr) = if master.silent { (0.0, 0.0) } else { apply_pan(master.pan, master.volume) };
-        for i in 0..frames {
-            left[i] = l[i] * gl;
-            right[i] = r[i] * gr;
-        }
-        if let Some([cl, cr]) = self.capture.get_mut(0) {
-            cl[offset..offset + frames].copy_from_slice(left);
-            cr[offset..offset + frames].copy_from_slice(right);
-        }
-        self.shared.raise_peak(0, peak(left), peak(right));
+        self.process_insert(master, 0, &transport, offset, frames);
+        left.copy_from_slice(&master.left[..frames]);
+        right.copy_from_slice(&master.right[..frames]);
         // Nodes not routed anywhere still drop their events each block.
         for node in &mut self.nodes {
             node.events.clear();
@@ -609,6 +581,28 @@ impl Engine {
         if self.playing {
             self.advance(frames);
         }
+    }
+
+    /// Run an insert's effects and fader in place, then capture and meter
+    /// the result.
+    fn process_insert(&mut self, insert: &mut InsertPlan, index: usize, transport: &TransportInfo, offset: usize, frames: usize) {
+        let (l, r) = (&mut insert.left[..frames], &mut insert.right[..frames]);
+        for key in &insert.effects {
+            if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
+                node.processor.process_sidechain(transport, &node.events, l, r, (&insert.side_left[..frames], &insert.side_right[..frames]));
+                node.events.clear();
+            }
+        }
+        let (gl, gr) = if insert.silent { (0.0, 0.0) } else { apply_pan(insert.pan, insert.volume) };
+        for i in 0..frames {
+            l[i] *= gl;
+            r[i] *= gr;
+        }
+        if let Some([cl, cr]) = self.capture.get_mut(index) {
+            cl[offset..offset + frames].copy_from_slice(l);
+            cr[offset..offset + frames].copy_from_slice(r);
+        }
+        self.shared.raise_peak(index, peak(l), peak(r));
     }
 
     fn transport(&self) -> TransportInfo {
@@ -704,12 +698,7 @@ impl Engine {
             let Some(node) = self.nodes.iter_mut().find(|n| n.key == channel.node) else { continue };
             for event in channel.events[first..].iter().take_while(|e| (e.tick as f64) < high) {
                 let frame = offset + (((event.tick as f64 - from) / per_frame).round().max(0.0) as u32).min(last_frame);
-                let kind = if event.velocity > 0.0 {
-                    EventKind::NoteOn { key: event.key, velocity: event.velocity }
-                } else {
-                    EventKind::NoteOff { key: event.key }
-                };
-                node.push(Event { offset: frame, kind });
+                node.push(Event { offset: frame, kind: EventKind::note(event.key, event.velocity) });
             }
         }
         self.song = Some(song);

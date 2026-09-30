@@ -66,7 +66,7 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.edited();
         }
         Message::SendLevel(from, to, level) => {
-            if !level.is_finite() || !(0.0..=2.0).contains(&level) { return Task::none(); }
+            if !Send::LEVEL.contains(&level) { return Task::none(); }
             if app.project.mixer.insert(from).and_then(|i| i.sends.iter().find(|s| s.to == to)).is_none_or(|s| s.level == level) { return Task::none(); }
             app.begin_edit();
             if let Some(send) = app.project.mixer.insert_mut(from).and_then(|i| i.sends.iter_mut().find(|s| s.to == to)) { send.level = level; }
@@ -276,7 +276,7 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                 let name = app.project.mixer.insert(to).map(|i| i.name.clone()).unwrap_or_default();
                 chain = chain.push(row![label(format!("{} {name}", if send.sidechain { "sc" } else { "send" })),
                     tool("x", Message::RemoveSend(from, to).into())].spacing(4));
-                chain = chain.push(slider(0.0..=2.0, send.level, move |v| Message::SendLevel(from, to, v).into())
+                chain = chain.push(slider(Send::LEVEL, send.level, move |v| Message::SendLevel(from, to, v).into())
                     .step(0.01_f32).on_release(AppMessage::EndEdit).style(theme::fader));
             }
         }

@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use daw_model::{Project, Source};
+use daw_model::{Project, Send, Source};
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -49,22 +49,18 @@ fn load_document(path: &Path) -> Result<Project, String> {
 }
 
 fn validate(project: &Project) -> Result<(), String> {
+    Project::check_bpm(project.bpm)?;
     project.render.validate()?;
     if project.patterns.is_empty() || project.mixer.inserts.first().is_none_or(|i| i.id != daw_model::MASTER) {
         return Err("project needs a pattern and a master mixer insert".into());
     }
     for clip in &project.playlist.clips {
-        if !clip.audio.stretch.is_finite() || !(0.125..=8.0).contains(&clip.audio.stretch) {
-            return Err(format!("clip {}: stretch must be between 0.125 and 8", clip.id.0));
-        }
-        if !clip.audio.semitones.is_finite() || !(-48.0..=48.0).contains(&clip.audio.semitones) {
-            return Err(format!("clip {}: pitch must be between -48 and 48 semitones", clip.id.0));
-        }
+        clip.audio.validate().map_err(|e| format!("clip {}: {e}", clip.id.0))?;
     }
     for insert in project.mixer.inserts.iter().skip(1) {
         if !project.mixer.can_route(insert.id, insert.output) { return Err(format!("invalid output route on {}", insert.name)); }
         for send in &insert.sends {
-            if !project.mixer.can_route(insert.id, send.to) || !send.level.is_finite() || !(0.0..=2.0).contains(&send.level) {
+            if !project.mixer.can_route(insert.id, send.to) || !Send::LEVEL.contains(&send.level) {
                 return Err(format!("invalid send on {}", insert.name));
             }
         }
@@ -72,11 +68,9 @@ fn validate(project: &Project) -> Result<(), String> {
     Ok(())
 }
 
+/// Save the project and a copy of each audio file it uses in one archive,
+/// writing through a temporary file so a failed save keeps the old file.
 pub fn save(path: &Path, project: &Project) -> Result<(), String> {
-    pack(path, project)
-}
-
-pub fn pack(path: &Path, project: &Project) -> Result<(), String> {
     validate(project)?;
     let temporary = path.with_extension(format!("{}.tmp", stamp()));
     let result = (|| -> Result<(), String> {
@@ -122,8 +116,7 @@ pub fn unpack(path: &Path, folder: &Path) -> Result<PathBuf, String> {
             std::io::copy(&mut entry, &mut file).map_err(|e| e.to_string())?;
         }
         let project_path = folder.join("project.dawproj");
-        let mut text = String::new();
-        std::fs::File::open(&project_path).map_err(|e| e.to_string())?.read_to_string(&mut text).map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(&project_path).map_err(|e| e.to_string())?;
         let mut project = Project::from_ron(&text).map_err(|e| e.to_string())?;
         let root = std::fs::canonicalize(folder).map_err(|e| e.to_string())?;
         for channel in &mut project.channels {
@@ -186,7 +179,7 @@ mod tests {
         project.add_audio_clip(0, 960, audio, 480);
         project.playlist.clips[0].audio = AudioEdit { stretch: 2.0, semitones: 12.0, reverse: true };
         let archive = root.join("portable.dawzip");
-        pack(&archive, &project).unwrap();
+        save(&archive, &project).unwrap();
         std::fs::remove_file(original).unwrap();
         let extracted = root.join("relocated");
         let path = unpack(&archive, &extracted).unwrap();
@@ -206,13 +199,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_pack_preserves_existing_file_and_snapshots_rotate() {
+    fn failed_save_preserves_existing_file_and_snapshots_rotate() {
         let root = folder();
         let archive = root.join("keep.dawzip");
         std::fs::write(&archive, b"existing package").unwrap();
         let mut project = Project::new();
         project.add_channel("missing", Source::Audio { path: root.join("absent.wav").to_string_lossy().into_owned() });
-        assert!(pack(&archive, &project).is_err());
+        assert!(save(&archive, &project).is_err());
         assert_eq!(std::fs::read(&archive).unwrap(), b"existing package");
         let project = Project::new();
         for _ in 0..12 { snapshot(&root.join("backups"), &project).unwrap(); }

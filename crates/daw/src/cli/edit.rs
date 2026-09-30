@@ -329,10 +329,7 @@ pub fn apply(project: &mut Project, op: Op, catalog: impl FnOnce() -> Catalog) -
     match op {
         Op::Set { name, bpm, signature, grid, loop_range, no_loop } => {
             if let Some(bpm) = bpm {
-                if !(10.0..=999.0).contains(&bpm) {
-                    return Err(format!("bpm {bpm} is outside 10..999"));
-                }
-                project.bpm = bpm;
+                project.bpm = Project::check_bpm(bpm)?;
             }
             if let Some(name) = name {
                 project.name = name;

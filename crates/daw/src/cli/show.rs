@@ -191,7 +191,7 @@ fn show_automation(project: &Project, clip: &daw_model::AutomationClip) -> Strin
         time(clip.length, sig)
     );
     if let Target::Tempo = clip.target {
-        let _ = write!(out, "\nvalues map to {}..{} bpm", daw_model::automation::TEMPO_MIN, daw_model::automation::TEMPO_MAX);
+        let _ = write!(out, "\nvalues map to {}..{} bpm", Project::BPM.start(), Project::BPM.end());
     }
     let placed: Vec<String> = project
         .playlist

@@ -85,20 +85,10 @@ pub struct Stem {
 
 /// Render `frames` from `start` into a WAV file, and each stem into its own
 /// file from the same pass. The engine must already hold a song-mode plan.
+///
+/// Returns false if `progress` cancelled the render. Callers render to a
+/// temporary path and publish it only after this returns true.
 pub fn export_wav(
-    engine: &mut Engine,
-    path: &std::path::Path,
-    start: daw_model::time::Ticks,
-    frames: usize,
-    depth: BitDepth,
-    stems: &[Stem],
-) -> Result<(), hound::Error> {
-    export_wav_with_progress(engine, path, start, frames, depth, stems, |_| true).map(|_| ())
-}
-
-/// Returns false if cancelled. Callers render to a temporary path and publish
-/// it only after this returns true.
-pub fn export_wav_with_progress(
     engine: &mut Engine,
     path: &std::path::Path,
     start: daw_model::time::Ticks,
@@ -183,12 +173,12 @@ mod tests {
         let path = std::env::temp_dir().join(format!("daw-export-progress-{}.wav", std::process::id()));
         let stem = Stem { insert: 0, path: path.with_extension("stem.wav") };
         let mut updates = Vec::new();
-        let completed = export_wav_with_progress(&mut engine, &path, 0, 48_000, BitDepth::Float32, &[stem], |p| { updates.push(p); p < 0.1 }).unwrap();
+        let completed = export_wav(&mut engine, &path, 0, 48_000, BitDepth::Float32, &[stem], |p| { updates.push(p); p < 0.1 }).unwrap();
         assert!(!completed);
         assert!(*updates.last().unwrap() >= 0.1 && *updates.last().unwrap() < 0.12);
         assert!(engine.captured().is_empty());
         updates.clear();
-        assert!(export_wav_with_progress(&mut engine, &path, 0, 48_000, BitDepth::Float32, &[], |p| { updates.push(p); true }).unwrap());
+        assert!(export_wav(&mut engine, &path, 0, 48_000, BitDepth::Float32, &[], |p| { updates.push(p); true }).unwrap());
         assert_eq!((*updates.first().unwrap(), *updates.last().unwrap()), (0.0, 1.0));
         assert!(updates.windows(2).all(|p| p[1] >= p[0]));
         assert_eq!(hound::WavReader::open(&path).unwrap().duration(), 48_000);

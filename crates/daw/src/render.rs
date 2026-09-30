@@ -42,7 +42,7 @@ impl Renderer {
                 }
             }
             controllers.push(loaded.controller);
-            engine.start_offline(0);
+            engine.handle_commands();
         }
         Ok(Self { worker: Worker { project: project.clone(), samples, engine, handle }, controllers })
     }
@@ -56,7 +56,11 @@ impl Worker {
             self.project.playlist.clips.retain(|c| c.start < end);
             for clip in &mut self.project.playlist.clips { clip.length = clip.length.min(end - clip.start); }
         }
-        audio::prepare_with_progress(&self.project, &mut self.samples, |p| control.update(p * 0.35))?;
+        match audio::prepare(&self.project, &mut self.samples, |p| control.update(p * 0.35)) {
+            Ok(()) => {}
+            Err(audio::Error::Cancelled) => return Ok(false),
+            Err(audio::Error::Failed(error)) => return Err(error),
+        }
         for channel in &self.project.channels {
             if control.cancelled() { return Ok(false); }
             let node = channel_node(&channel.source, channel.id);
@@ -67,10 +71,10 @@ impl Worker {
                 Source::Plugin(_) => continue,
             };
             self.handle.send(Command::AddNode(Node::new(node, processor))).map_err(|_| "render command queue full")?;
-            self.engine.start_offline(0);
+            self.engine.handle_commands();
         }
         self.handle.send(Command::Song(Box::new(compile(&self.project, PlayMode::Song, MAX_BLOCK, &self.samples)))).map_err(|_| "render command queue full")?;
-        output::export_wav_with_progress(&mut self.engine, path, start, frames, options.depth, stems, |p| control.update(0.35 + p * 0.65)).map_err(|e| e.to_string())
+        output::export_wav(&mut self.engine, path, start, frames, options.depth, stems, |p| control.update(0.35 + p * 0.65)).map_err(|e| e.to_string())
     }
 }
 

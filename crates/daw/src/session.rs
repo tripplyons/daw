@@ -9,15 +9,13 @@ use daw_engine::input::{Recorder, Take};
 use daw_engine::output::{self, BitDepth};
 #[cfg(test)]
 use daw_engine::output::Stem;
-use daw_engine::song::{EngineTarget, PlayMode, channel_node, compile};
+use daw_engine::audio;
+use daw_engine::song::{EngineTarget, PlayMode, channel_node, compile, engine_target};
 use daw_engine::synth::{PARAM_ATTACK, PARAM_CUTOFF, PARAM_RELEASE, PARAM_WAVEFORM, Sample, Sampler, Synth};
 use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
 use daw_model::time::{Ticks, ticks_to_seconds};
-use daw_model::{ChannelId, InsertId, InstanceId, Project, Source, SynthParams, Target, Waveform};
+use daw_model::{ChannelId, InsertId, InstanceId, Project, RenderSettings, Source, SynthParams, Target, Waveform};
 use daw_plugins::{Controller, ParamInfo, Touch};
-
-/// Frames summarized by each waveform peak.
-pub const PEAK_FRAMES: usize = 256;
 
 pub type PluginParameters = HashMap<InstanceId, Vec<(u32, f32)>>;
 
@@ -36,7 +34,7 @@ pub struct RenderOptions {
 
 impl RenderOptions {
     pub fn timing(self, project: &Project, sample_rate: f64) -> Result<(Ticks, usize), String> {
-        if !self.tail_seconds.is_finite() || !(0.0..=120.0).contains(&self.tail_seconds) { return Err("render tail must be between 0 and 120 seconds".into()); }
+        RenderSettings::check_tail("render tail", self.tail_seconds)?;
         let (start, length) = match self.range {
             Some((start, end)) if end > start => (start, end - start),
             Some(_) => return Err("render range must end after it starts".into()),
@@ -59,16 +57,15 @@ pub struct Session {
     handle: EngineHandle,
     _stream: Option<cpal::Stream>,
     pub audio_error: Option<String>,
-    pub preparation_error: Option<String>,
+    pub preparation_error: Option<audio::Error>,
     controllers: HashMap<InstanceId, Box<dyn Controller>>,
     params: HashMap<InstanceId, Vec<ParamInfo>>,
     plugin_states: HashMap<InstanceId, PluginState>,
     pub load_errors: HashMap<InstanceId, String>,
     built_in: HashMap<u64, BuiltIn>,
-    samples: daw_engine::audio::Cache,
+    samples: audio::Cache,
     preparation: Option<crate::processing::Preparation>,
-    /// Waveform summaries of loaded samples: the largest absolute value per
-    /// `PEAK_FRAMES` frames, across both sides.
+    /// Waveform summaries of loaded samples, from `processing::prepare_peaks`.
     peaks: crate::processing::Peaks,
     /// Microphone input, while audio recording is armed.
     recorder: Option<Recorder>,
@@ -105,7 +102,7 @@ impl Session {
             plugin_states: HashMap::new(),
             load_errors: HashMap::new(),
             built_in: HashMap::new(),
-            samples: daw_engine::audio::Cache::default(),
+            samples: audio::Cache::default(),
             preparation: None,
             peaks: HashMap::new(),
             recorder: None,
@@ -118,7 +115,7 @@ impl Session {
         self.handle.sample_rate
     }
 
-    pub fn shared(&self) -> &daw_engine::engine::Shared {
+    pub fn shared(&self) -> &Arc<daw_engine::engine::Shared> {
         &self.handle.shared
     }
 
@@ -178,18 +175,16 @@ impl Session {
                 }
                 _ => {
                     let node = match &wanted {
-                        BuiltIn::Synth(params) => Some(Node::new(key, Box::new(Synth::new(*params, self.sample_rate())))),
+                        BuiltIn::Synth(params) => Node::new(key, Box::new(Synth::new(*params, self.sample_rate()))),
                         BuiltIn::Sampler(path, root) => match self.samples.get(path) {
-                            Some(sample) => Some(Node::new(key, Box::new(Sampler::new(sample.clone(), *root, self.sample_rate())))),
+                            Some(sample) => Node::new(key, Box::new(Sampler::new(sample.clone(), *root, self.sample_rate()))),
                             None => {
                                 if self.built_in.remove(&key).is_some() { self.send(Command::RemoveNode(key)); }
                                 continue;
-                            },
+                            }
                         },
                     };
-                    if let Some(node) = node {
-                        self.send(Command::AddNode(node));
-                    }
+                    self.send(Command::AddNode(node));
                     self.built_in.insert(key, wanted);
                 }
             }
@@ -244,14 +239,9 @@ impl Session {
         self.remember_plugin(instance);
     }
 
+    /// Change a normalized value in the playing plan without recompiling it.
     pub fn set_mix(&mut self, project: &Project, target: Target, value: f32) {
-        let target = match target {
-            Target::ChannelVolume(id) => project.channels.iter().position(|c| c.id == id).map(EngineTarget::ChannelVolume),
-            Target::InsertVolume(id) => project.mixer.inserts.iter().position(|i| i.id == id).map(EngineTarget::InsertVolume),
-            Target::InsertPan(id) => project.mixer.inserts.iter().position(|i| i.id == id).map(EngineTarget::InsertPan),
-            _ => None,
-        };
-        if let Some(target) = target { self.send(Command::Mix { target, value }); }
+        if let Some(target) = engine_target(project, target) { self.send(Command::Mix { target, value }); }
     }
 
     pub fn set_send_level(&mut self, project: &Project, from: InsertId, to: InsertId, value: f32) {
@@ -268,13 +258,12 @@ impl Session {
     pub fn update_song(&mut self, project: &Project, mode: PlayMode) -> Result<(), String> {
         #[cfg(test)]
         { self.song_updates += 1; }
-        let needed = daw_engine::audio::Cache::required(project);
+        let needed = audio::Cache::required(project);
         if self.samples.ready(project) && needed.iter().all(|key| self.peaks.contains_key(key)) {
             self.preparation = None;
             self.preparation_error = None;
             self.samples.trim(project);
         } else if self.preparation.as_ref().is_none_or(|job| job.needed != needed) {
-            self.preparation = None;
             self.preparation_error = None;
             self.preparation = Some(crate::processing::Preparation::start(project.clone(), self.samples.clone(), self.peaks.clone())?);
         }
@@ -294,7 +283,7 @@ impl Session {
         if let Some(job) = &self.preparation { job.control.cancel(); }
     }
 
-    pub fn poll_preparation(&mut self, project: &mut Project, mode: PlayMode) -> Option<Result<(), String>> {
+    pub fn poll_preparation(&mut self, project: &mut Project, mode: PlayMode) -> Option<Result<(), audio::Error>> {
         let job = self.preparation.as_ref()?;
         let polled = job.poll();
         if matches!(&polled, Ok(None)) { return None; }
@@ -302,8 +291,8 @@ impl Session {
         self.preparation = None;
         let result = match polled {
             Ok(Some(finished)) if !cancelled => { self.samples = finished.cache; self.peaks = finished.peaks; finished.result }
-            Ok(_) => Err("cancelled; retry audio processing to hear the pending edits".into()),
-            Err(error) => Err(error),
+            Ok(_) => Err(audio::Error::Cancelled),
+            Err(error) => Err(audio::Error::Failed(error)),
         };
         self.preparation_error = result.as_ref().err().cloned();
         self.sync(project);
@@ -312,7 +301,7 @@ impl Session {
     }
 
     #[cfg(test)]
-    pub fn wait_preparation(&mut self, project: &mut Project, mode: PlayMode) -> Result<(), String> {
+    pub fn wait_preparation(&mut self, project: &mut Project, mode: PlayMode) -> Result<(), audio::Error> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while self.audio_progress().is_some() {
             if let Some(result) = self.poll_preparation(project, mode) { return result; }
@@ -337,8 +326,6 @@ impl Session {
     pub fn attach_midi(&mut self, input: rtrb::Consumer<daw_engine::engine::LiveNote>) {
         self.send(Command::MidiInput(input));
     }
-
-    pub fn midi_shared(&self) -> Arc<daw_engine::engine::Shared> { self.handle.shared.clone() }
 
     pub fn note(&mut self, node: u64, key: u8, velocity: f32) {
         self.send(Command::Note { node, key, velocity });
@@ -449,9 +436,15 @@ impl Session {
     fn remember_plugin(&mut self, id: InstanceId) {
         let Some(controller) = self.controllers.get(&id) else { return };
         if let Ok(state) = controller.save_state() {
-            let parameters = self.params(id).iter().map(|p| (p.id, controller.param_value(p.id))).collect();
+            let parameters = self.current_parameters(id);
             self.plugin_states.insert(id, PluginState { state, parameters });
         }
+    }
+
+    /// Every parameter of a loaded plugin with its controller's value.
+    fn current_parameters(&self, id: InstanceId) -> Vec<(u32, f32)> {
+        let Some(controller) = self.controllers.get(&id) else { return Vec::new() };
+        self.params(id).iter().map(|p| (p.id, controller.param_value(p.id))).collect()
     }
 
     /// Native callbacks are polled after the plugin has already changed.
@@ -467,7 +460,7 @@ impl Session {
             if let Some(controller) = self.controllers.get(&instance.id) {
                 match controller.save_state() {
                     Ok(state) => {
-                        let values: Vec<_> = self.params(instance.id).iter().map(|p| (p.id, controller.param_value(p.id))).collect();
+                        let values = self.current_parameters(instance.id);
                         instance.state = state.clone();
                         parameters.insert(instance.id, values.clone());
                         self.plugin_states.insert(instance.id, PluginState { state, parameters: values });
@@ -544,20 +537,16 @@ impl Session {
     }
 
     pub fn renderer(&self, project: &Project) -> Result<crate::render::Renderer, String> {
-        let parameters = self.controllers.iter().map(|(&id, controller)| {
-            let values = self.params(id).iter().map(|p| (p.id, controller.param_value(p.id))).collect();
-            (id, values)
-        }).collect();
+        let parameters = self.controllers.keys().map(|&id| (id, self.current_parameters(id))).collect();
         crate::render::Renderer::new(project, self.samples.clone(), parameters, self.sample_rate())
     }
 
     /// Synchronous adapter for audio comparisons.
     #[cfg(test)]
-    pub fn export(&self, project: &Project, path: &Path, _live_mode: PlayMode, options: RenderOptions, stems: &[Stem]) -> Result<(), String> {
+    pub fn export(&self, project: &Project, path: &Path, options: RenderOptions, stems: &[Stem]) -> Result<(), String> {
         let mut renderer = self.renderer(project)?;
         renderer.worker.run(path, options, stems, &crate::processing::Control::default()).map(|_| ())
     }
-
 }
 
 #[cfg(test)]
@@ -578,7 +567,7 @@ mod tests {
         session.wait_preparation(&mut project, PlayMode::Song).unwrap();
         project.playlist.clips[0].audio.semitones = 3.0;
         session.update_song(&project, PlayMode::Song).unwrap();
-        let cancelled_key = daw_engine::audio::cache_key(path, project.playlist.clips[0].audio);
+        let cancelled_key = audio::cache_key(path, project.playlist.clips[0].audio);
         session.cancel_audio();
         assert!(session.wait_preparation(&mut project, PlayMode::Song).is_err());
         assert!(!session.samples.contains_key(&cancelled_key));
@@ -589,12 +578,12 @@ mod tests {
 
         project.playlist.clips[0].audio.semitones = 7.0;
         session.update_song(&project, PlayMode::Song).unwrap();
-        let obsolete_key = daw_engine::audio::cache_key(path, project.playlist.clips[0].audio);
+        let obsolete_key = audio::cache_key(path, project.playlist.clips[0].audio);
         project.playlist.clips[0].audio.semitones = 12.0;
         session.update_song(&project, PlayMode::Song).unwrap();
         session.wait_preparation(&mut project, PlayMode::Song).unwrap();
         assert!(!session.samples.contains_key(&obsolete_key));
-        assert!(session.samples.contains_key(&daw_engine::audio::cache_key(path, project.playlist.clips[0].audio)));
+        assert!(session.samples.contains_key(&audio::cache_key(path, project.playlist.clips[0].audio)));
         project.playlist.clips[0].audio = daw_model::AudioEdit::default();
         session.update_song(&project, PlayMode::Song).unwrap();
         assert!(session.audio_progress().is_none(), "undo reuses the cached audio and peaks immediately");
@@ -612,7 +601,7 @@ mod tests {
         live.start_offline(960);
         let before = live.position();
         // Rendering while the live mutex is held would deadlock a shared-engine export.
-        session.export(&project, &path, PlayMode::Song, RenderOptions { depth: BitDepth::Float32, range: Some((0, 960)), tail_seconds: 0.0 }, &[]).unwrap();
+        session.export(&project, &path, RenderOptions { depth: BitDepth::Float32, range: Some((0, 960)), tail_seconds: 0.0 }, &[]).unwrap();
         assert_eq!(live.position(), before);
         live.render_offline(512, |_, _| {});
         assert!(live.position() > before, "live playback still advances after the export");

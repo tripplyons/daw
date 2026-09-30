@@ -34,7 +34,7 @@ pub fn update(app: &mut App, message: Message) {
     match message {
         Message::Search(search) => app.params.search = search,
         Message::Set(instance, param, value) => {
-            if !value.is_finite() || !(0.0..=1.0).contains(&value)
+            if !(0.0..=1.0).contains(&value)
                 || app.project.plugin(instance).is_none() || app.session.param_value(instance, param) == value { return; }
             app.begin_edit();
             app.session.set_plugin_param(instance, param, value);

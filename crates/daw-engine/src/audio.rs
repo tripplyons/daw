@@ -1,7 +1,8 @@
 //! Audio edits are prepared off the audio thread and shared by playback plans.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ops::{Deref, DerefMut};
+use std::fmt;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use daw_model::{AudioEdit, ClipSource, Project, Source};
@@ -26,11 +27,9 @@ impl Deref for Cache {
     fn deref(&self) -> &Self::Target { &self.samples }
 }
 
-impl DerefMut for Cache {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.samples }
-}
-
 impl Cache {
+    pub fn insert(&mut self, key: String, sample: Arc<Sample>) { self.samples.insert(key, sample); }
+
     pub fn required(project: &Project) -> HashSet<String> {
         let mut needed: HashSet<String> = project.channels.iter().filter_map(|c| match &c.source {
             Source::Audio { path } | Source::Sampler { path, .. } => Some(path.clone()), _ => None,
@@ -67,29 +66,46 @@ impl Cache {
     }
 }
 
+/// Why preparing audio produced no result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error {
+    /// The progress callback asked to stop.
+    Cancelled,
+    Failed(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Cancelled => f.write_str("cancelled"),
+            Error::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
+impl From<String> for Error {
+    fn from(error: String) -> Self { Error::Failed(error) }
+}
+
+impl From<&str> for Error {
+    fn from(error: &str) -> Self { Error::Failed(error.into()) }
+}
+
 pub fn cache_key(path: &str, edit: AudioEdit) -> String {
     if edit == AudioEdit::default() { return path.to_owned(); }
     format!("{path}\0{}:{}:{}", edit.stretch.to_bits(), edit.semitones.to_bits(), edit.reverse)
 }
 
-pub fn transform(sample: &Sample, edit: AudioEdit) -> Result<Sample, String> {
-    transform_with_progress(sample, edit, |_| true)
-}
-
-/// Returning false stops between processing blocks, before publishing a result.
-pub fn transform_with_progress(sample: &Sample, edit: AudioEdit, mut progress: impl FnMut(f32) -> bool) -> Result<Sample, String> {
-    if !progress(0.0) { return Err("cancelled".into()); }
-    if !edit.stretch.is_finite() || !(0.125..=8.0).contains(&edit.stretch) {
-        return Err("audio stretch must be between 0.125 and 8".into());
-    }
-    if !edit.semitones.is_finite() || !(-48.0..=48.0).contains(&edit.semitones) {
-        return Err("audio pitch must be between -48 and 48 semitones".into());
-    }
+/// Returning false from `progress` stops between processing blocks, before
+/// publishing a result.
+pub fn transform(sample: &Sample, edit: AudioEdit, mut progress: impl FnMut(f32) -> bool) -> Result<Sample, Error> {
+    if !progress(0.0) { return Err(Error::Cancelled); }
+    edit.validate().map_err(|e| format!("audio {e}"))?;
     let mut left = sample.left.clone();
     let mut right = sample.right.clone();
     if edit.reverse { left.reverse(); right.reverse(); }
     if edit.stretch == 1.0 && edit.semitones == 0.0 {
-        if !progress(1.0) { return Err("cancelled".into()); }
+        if !progress(1.0) { return Err(Error::Cancelled); }
         return Ok(Sample { sample_rate: sample.sample_rate, left, right });
     }
     let frames = (left.len() as f64 * edit.stretch).round().max(1.0) as usize;
@@ -106,7 +122,7 @@ pub fn transform_with_progress(sample: &Sample, edit: AudioEdit, mut progress: i
     stretch.seek(&input[..input_latency * 2], left.len() as f64 / frames as f64);
     let (mut input_done, mut output_done) = (0, 0);
     while output_done < frames {
-        if !progress(output_done as f32 / frames as f32) { return Err("cancelled".into()); }
+        if !progress(output_done as f32 / frames as f32) { return Err(Error::Cancelled); }
         let output_end = (output_done + 4096).min(frames);
         let input_end = (output_end as f64 * left.len() as f64 / frames as f64).round() as usize;
         stretch.process(&input[(input_latency + input_done) * 2..(input_latency + input_end) * 2], &mut output[output_done * 2..output_end * 2]);
@@ -118,7 +134,7 @@ pub fn transform_with_progress(sample: &Sample, edit: AudioEdit, mut progress: i
     }
     output.copy_within(latency * 2.., 0);
     stretch.flush(&mut output[(frames - latency) * 2..]);
-    if !progress(1.0) { return Err("cancelled".into()); }
+    if !progress(1.0) { return Err(Error::Cancelled); }
     Ok(Sample {
         sample_rate: sample.sample_rate,
         left: output.iter().step_by(2).copied().collect(),
@@ -126,23 +142,20 @@ pub fn transform_with_progress(sample: &Sample, edit: AudioEdit, mut progress: i
     })
 }
 
-pub fn prepare(project: &Project, samples: &mut Cache) -> Result<(), String> {
-    prepare_with_progress(project, samples, |_| true)
-}
-
-pub fn prepare_with_progress(project: &Project, samples: &mut Cache, mut progress: impl FnMut(f32) -> bool) -> Result<(), String> {
+/// Load every file the project uses and apply its clips' edits.
+pub fn prepare(project: &Project, samples: &mut Cache, mut progress: impl FnMut(f32) -> bool) -> Result<(), Error> {
     let needed = Cache::required(project);
     let work = project.channels.len() + project.playlist.clips.len();
     let mut done = 0;
     for channel in &project.channels {
-        if !progress(done as f32 / work.max(1) as f32) { return Err("cancelled".into()); }
+        if !progress(done as f32 / work.max(1) as f32) { return Err(Error::Cancelled); }
         if let Source::Audio { path } | Source::Sampler { path, .. } = &channel.source && !samples.contains_key(path) {
-            samples.insert(path.clone(), Arc::new(Sample::load(path).map_err(|e| format!("could not load {path}: {e}"))?));
+            samples.insert(path.clone(), load(path)?);
         }
         done += 1;
     }
     for clip in &project.playlist.clips {
-        if !progress(done as f32 / work.max(1) as f32) { return Err("cancelled".into()); }
+        if !progress(done as f32 / work.max(1) as f32) { return Err(Error::Cancelled); }
         let base = done;
         done += 1;
         let ClipSource::Audio(channel) = clip.source else { continue };
@@ -152,17 +165,21 @@ pub fn prepare_with_progress(project: &Project, samples: &mut Cache, mut progres
         let source = match samples.get(path) {
             Some(sample) => sample.clone(),
             None => {
-                let sample = Arc::new(Sample::load(path).map_err(|e| format!("could not load {path}: {e}"))?);
+                let sample = load(path)?;
                 samples.insert(path.clone(), sample.clone());
                 sample
             }
         };
-        let sample = transform_with_progress(&source, clip.audio, |p| progress((base as f32 + p) / work.max(1) as f32))?;
+        let sample = transform(&source, clip.audio, |p| progress((base as f32 + p) / work.max(1) as f32))?;
         samples.insert(key, Arc::new(sample));
     }
     samples.retain_recent(&needed);
-    if !progress(1.0) { return Err("cancelled".into()); }
+    if !progress(1.0) { return Err(Error::Cancelled); }
     Ok(())
+}
+
+fn load(path: &str) -> Result<Arc<Sample>, Error> {
+    Sample::load(path).map(Arc::new).map_err(|e| Error::Failed(format!("could not load {path}: {e}")))
 }
 
 #[cfg(test)]
@@ -189,33 +206,33 @@ mod tests {
         let clip = project.add_audio_clip(0, 0, channel, 1920);
         let edit = AudioEdit { semitones: 2.0, ..Default::default() };
         project.playlist.clips.iter_mut().find(|c| c.id == clip).unwrap().audio = edit;
-        prepare(&project, &mut cache).unwrap();
+        prepare(&project, &mut cache, |_| true).unwrap();
         let original = cache[&cache_key("tone.wav", edit)].clone();
         project.playlist.clips[0].audio.semitones = 4.0;
-        prepare(&project, &mut cache).unwrap();
+        prepare(&project, &mut cache, |_| true).unwrap();
         project.playlist.clips[0].audio = edit;
-        prepare(&project, &mut cache).unwrap();
+        prepare(&project, &mut cache, |_| true).unwrap();
         assert!(Arc::ptr_eq(&original, &cache[&cache_key("tone.wav", edit)]));
         for pitch in [6.0, 8.0] {
             project.playlist.clips[0].audio.semitones = pitch;
-            prepare(&project, &mut cache).unwrap();
+            prepare(&project, &mut cache, |_| true).unwrap();
         }
         assert!(!cache.contains_key(&cache_key("tone.wav", edit)));
         assert!(cache.contains_key("tone.wav"));
         assert!(cache.contains_key(&cache_key("tone.wav", project.playlist.clips[0].audio)));
         assert_eq!(cache.len(), 3); // Two active samples plus one inactive result.
         cache.max_bytes = 0;
-        prepare(&project, &mut cache).unwrap();
+        prepare(&project, &mut cache, |_| true).unwrap();
         assert_eq!(cache.len(), 2);
     }
 
     #[test]
     fn stretch_preserves_pitch_and_pitch_preserves_duration() {
         let tone = tone();
-        let stretched = transform(&tone, AudioEdit { stretch: 2.0, ..Default::default() }).unwrap();
+        let stretched = transform(&tone, AudioEdit { stretch: 2.0, ..Default::default() }, |_| true).unwrap();
         assert_eq!(stretched.left.len(), 96_000);
         assert!((frequency(&stretched) - 440.0).abs() < 5.0);
-        let shifted = transform(&tone, AudioEdit { semitones: 12.0, ..Default::default() }).unwrap();
+        let shifted = transform(&tone, AudioEdit { semitones: 12.0, ..Default::default() }, |_| true).unwrap();
         assert_eq!(shifted.left.len(), tone.left.len());
         assert!((frequency(&shifted) - 880.0).abs() < 5.0);
     }
@@ -227,7 +244,7 @@ mod tests {
         for ratio in [0.125, 0.333333, 1.0, 2.375, 8.0] {
             let edit = AudioEdit { stretch: ratio, semitones: 3.25, reverse: true };
             let mut updates = Vec::new();
-            let actual = transform_with_progress(&sample, edit, |p| { updates.push(p); true }).unwrap();
+            let actual = transform(&sample, edit, |p| { updates.push(p); true }).unwrap();
             assert_eq!((*updates.first().unwrap(), *updates.last().unwrap()), (0.0, 1.0));
             assert!(updates.windows(2).all(|p| p[1] >= p[0]));
             let input: Vec<_> = sample.left.iter().rev().zip(sample.right.iter().rev()).flat_map(|(&l, &r)| [l, r]).collect();
@@ -255,19 +272,19 @@ mod tests {
     fn cancellation_stops_before_publishing_a_partial_transform() {
         let edit = AudioEdit { stretch: 8.0, ..Default::default() };
         let mut updates = Vec::new();
-        let result = transform_with_progress(&tone(), edit, |p| { updates.push(p); p < 0.1 });
-        assert_eq!(result.err().as_deref(), Some("cancelled"));
+        let result = transform(&tone(), edit, |p| { updates.push(p); p < 0.1 });
+        assert_eq!(result.err(), Some(Error::Cancelled));
         assert!(*updates.last().unwrap() >= 0.1 && *updates.last().unwrap() < 0.2);
-        assert_eq!(transform_with_progress(&tone(), edit, |_| false).err().as_deref(), Some("cancelled"));
+        assert_eq!(transform(&tone(), edit, |_| false).err(), Some(Error::Cancelled));
     }
 
     #[test]
     fn reverse_preserves_both_channels_and_rejects_invalid_edits() {
         let sample = Sample { sample_rate: 48_000.0, left: vec![1.0, 2.0, 3.0], right: vec![4.0, 5.0, 6.0] };
-        let reversed = transform(&sample, AudioEdit { reverse: true, ..Default::default() }).unwrap();
+        let reversed = transform(&sample, AudioEdit { reverse: true, ..Default::default() }, |_| true).unwrap();
         assert_eq!(reversed.left, vec![3.0, 2.0, 1.0]);
         assert_eq!(reversed.right, vec![6.0, 5.0, 4.0]);
-        assert!(transform(&sample, AudioEdit { stretch: f64::NAN, ..Default::default() }).is_err());
-        assert!(transform(&sample, AudioEdit { semitones: 49.0, ..Default::default() }).is_err());
+        assert!(transform(&sample, AudioEdit { stretch: f64::NAN, ..Default::default() }, |_| true).is_err());
+        assert!(transform(&sample, AudioEdit { semitones: 49.0, ..Default::default() }, |_| true).is_err());
     }
 }
