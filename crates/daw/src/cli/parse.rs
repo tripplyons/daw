@@ -258,3 +258,9 @@ pub fn bounded(text: &str, min: f32, max: f32) -> Result<f32, String> {
     let value: f32 = text.parse().map_err(|_| format!("bad number {text:?}"))?;
     if (min..=max).contains(&value) { Ok(value) } else { Err(format!("{value} is outside {min}..{max}")) }
 }
+
+/// Seconds appended to an offline render for reverb and delay tails.
+pub fn tail(text: &str) -> Result<f64, String> {
+    let value: f64 = text.parse().map_err(|_| format!("bad tail {text:?}"))?;
+    if (0.0..=120.0).contains(&value) { Ok(value) } else { Err("tail must be between 0 and 120 seconds".into()) }
+}

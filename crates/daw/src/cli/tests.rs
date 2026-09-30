@@ -259,3 +259,13 @@ fn audio_channels_place_clips_as_long_as_their_file() {
     assert!(edit(&mut project, "channel add missing --audio /no/such/file.wav").is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn export_tail_arguments_parse_as_f64_and_reject_invalid_seconds() {
+    let parse = |tail: &str| Cli::try_parse_from(["daw", "export", "song.dawproj", "song.wav", "--tail", tail]);
+    for value in ["0", "0.123456789", "120"] {
+        let Some(Command::Export { tail, .. }) = parse(value).unwrap().command else { panic!("export command") };
+        assert_eq!(tail, Some(value.parse::<f64>().unwrap()));
+    }
+    for value in ["NaN", "inf", "120.1", "-1", "oops"] { assert!(parse(value).is_err()); }
+}

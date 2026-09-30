@@ -108,7 +108,7 @@ pub enum Command {
         #[arg(long)]
         stems: Option<PathBuf>,
         /// Effect tail in seconds (0 to 120). Defaults to the project's export tail.
-        #[arg(long, value_parser = |t: &str| parse::bounded(t, 0.0, 120.0))]
+        #[arg(long, value_parser = parse::tail)]
         tail: Option<f64>,
     },
     /// Print peak, RMS, stereo width, and octave-band levels of WAV files, such
