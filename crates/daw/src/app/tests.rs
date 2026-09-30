@@ -1554,3 +1554,49 @@ fn native_plugin_gestures_capture_previous_values_before_polling() {
     let _ = app.update(Message::Action(Action::Undo));
     assert_eq!(app.session.param_value(id, 0), 0.9);
 }
+
+#[test]
+fn precise_audio_values_commit_once_and_reset_without_spurious_undo() {
+    use list::AudioField;
+    let mut app = app();
+    let dir = std::env::temp_dir().join(format!("daw-precise-{}", crate::project_files::stamp()));
+    app.path = Some(dir.join("song.dawproj"));
+    let path = app.place_take(daw_engine::input::Take { start: 0.0, channels: 2, sample_rate: 48_000, samples: vec![0.25; 96_000] }).unwrap().unwrap();
+    let clip = app.project.playlist.clips.last().unwrap().id;
+    app.playlist.selected = vec![clip];
+    app.undo.clear();
+    app.dirty = false;
+    let updates = app.session.song_updates;
+    for (field, value) in [(AudioField::Pitch, "-3"), (AudioField::Cents, "-25.5")] {
+        let _ = app.update(list::Message::AudioText(field, value.into()).into());
+    }
+    assert!(!app.dirty);
+    assert_eq!(app.session.song_updates, updates);
+    let _ = app.update(list::Message::AudioApply(AudioField::Pitch).into());
+    assert_eq!(app.project.playlist.clips.last().unwrap().audio.semitones, -3.255);
+    assert_eq!(app.undo.len(), 1);
+    let old = app.project.playlist.clips.last().unwrap().clone();
+    let _ = app.update(list::Message::AudioText(AudioField::Stretch, "1.333333333".into()).into());
+    let _ = app.update(list::Message::AudioApply(AudioField::Stretch).into());
+    let now = app.project.playlist.clips.last().unwrap();
+    assert_eq!(now.audio.stretch, 1.333333333);
+    assert_eq!(now.length, (old.length as f64 * 1.333333333).round() as Ticks);
+    assert_eq!(app.undo.len(), 2);
+    let _ = app.update(list::Message::AudioText(AudioField::Stretch, "NaN".into()).into());
+    let _ = app.update(list::Message::AudioApply(AudioField::Stretch).into());
+    assert_eq!(app.undo.len(), 2);
+    assert!(app.status.contains("between"));
+    let _ = app.update(list::Message::AudioReset(AudioField::Cents).into());
+    assert_eq!(app.project.playlist.clips.last().unwrap().audio.semitones, -3.0);
+    let _ = app.update(list::Message::AudioReset(AudioField::Pitch).into());
+    let _ = app.update(list::Message::AudioReset(AudioField::Stretch).into());
+    assert_eq!(app.project.playlist.clips.last().unwrap().audio, daw_model::AudioEdit::default());
+    let undos = app.undo.len();
+    let _ = app.update(list::Message::AudioReset(AudioField::Stretch).into());
+    let _ = app.update(list::Message::AudioReset(AudioField::Pitch).into());
+    assert_eq!(app.undo.len(), undos);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.playlist.clips.last().unwrap().audio.stretch, 1.333333333);
+    assert!(path.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

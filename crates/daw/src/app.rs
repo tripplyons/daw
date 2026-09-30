@@ -371,6 +371,7 @@ impl App {
         self.automation.cancel_drag();
         self.playlist.cancel_drag();
         self.playlist.pitch_edit = None;
+        self.playlist.audio_text = None;
         self.bpm_text = None;
         self.editing = false;
         self.history = history::State::default();

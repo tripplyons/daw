@@ -12,7 +12,7 @@ use daw_model::time::{Grid, TICKS_PER_BEAT, Ticks, seconds_to_ticks};
 use daw_model::{Clip, ClipId, ClipSource, Source};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
-use iced::widget::{column, row, slider};
+use iced::widget::{column, row, slider, text_input};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
@@ -48,6 +48,25 @@ pub struct State {
     pub stretch_mode: bool,
     /// Slider preview; audio is prepared only when the drag ends.
     pub pitch_edit: Option<(Vec<ClipId>, f32)>,
+    pub audio_text: Option<AudioText>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AudioField { Pitch, Cents, Stretch }
+
+#[derive(Debug)]
+pub struct AudioText {
+    clip: ClipId,
+    pitch: String,
+    cents: String,
+    stretch: String,
+}
+
+impl AudioText {
+    fn new(clip: &Clip) -> Self {
+        Self { clip: clip.id, pitch: clip.audio.semitones.trunc().to_string(),
+            cents: format!("{:.3}", (clip.audio.semitones - clip.audio.semitones.trunc()) * 100.0), stretch: clip.audio.stretch.to_string() }
+    }
 }
 
 /// A clip edge. Dragging the start trims the clip's beginning and keeps its
@@ -74,6 +93,7 @@ impl Default for State {
             clipboard: Vec::new(),
             stretch_mode: false,
             pitch_edit: None,
+            audio_text: None,
         }
     }
 }
@@ -94,6 +114,9 @@ pub enum Message {
     AudioPitch(f32),
     AudioPitchDone,
     AudioStretch(f64),
+    AudioText(AudioField, String),
+    AudioApply(AudioField),
+    AudioReset(AudioField),
     StretchMode,
     MuteSelection,
     View(TimeView),
@@ -213,6 +236,7 @@ pub fn update(app: &mut App, message: Message) {
             if !app.project.playlist.clips.iter().any(|c| selected.contains(&c.id)
                 && matches!(c.source, ClipSource::Audio(_)) && c.audio.semitones != pitch) { return; }
             app.checkpoint();
+            app.playlist.audio_text = None;
             for clip in &mut app.project.playlist.clips {
                 if selected.contains(&clip.id) && matches!(clip.source, ClipSource::Audio(_)) {
                     clip.audio.semitones = pitch;
@@ -223,7 +247,14 @@ pub fn update(app: &mut App, message: Message) {
         Message::Reverse | Message::AudioStretch(_) => {
             if let Message::AudioStretch(value) = message
                 && (!value.is_finite() || !(0.125..=8.0).contains(&value)) { return; }
+            let changed = app.project.playlist.clips.iter().any(|c| app.playlist.selected.contains(&c.id)
+                && matches!(c.source, ClipSource::Audio(_)) && match message {
+                    Message::AudioStretch(value) => c.audio.stretch != value,
+                    _ => true,
+                });
+            if !changed { return; }
             app.begin_edit();
+            app.playlist.audio_text = None;
             for clip in &mut app.project.playlist.clips {
                 if !app.playlist.selected.contains(&clip.id) || !matches!(clip.source, ClipSource::Audio(_)) { continue; }
                 match message {
@@ -239,6 +270,46 @@ pub fn update(app: &mut App, message: Message) {
             }
             app.edited();
             let _ = app.update(AppMessage::EndEdit);
+        }
+        Message::AudioText(field, value) => {
+            let Some(clip) = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_))) else { return };
+            if app.playlist.audio_text.as_ref().is_none_or(|text| text.clip != clip.id) { app.playlist.audio_text = Some(AudioText::new(clip)); }
+            let text = app.playlist.audio_text.as_mut().unwrap();
+            match field { AudioField::Pitch => text.pitch = value, AudioField::Cents => text.cents = value, AudioField::Stretch => text.stretch = value }
+        }
+        Message::AudioApply(field) => {
+            let Some(text) = app.playlist.audio_text.as_ref() else { return };
+            if !app.playlist.selected.contains(&text.clip) { app.playlist.audio_text = None; return; }
+            match field {
+                AudioField::Stretch => {
+                    let Ok(value) = text.stretch.trim().parse::<f64>() else { app.set_status("stretch must be a number between 0.125 and 8"); return };
+                    if !value.is_finite() || !(0.125..=8.0).contains(&value) { app.set_status("stretch must be between 0.125 and 8"); return; }
+                    update(app, Message::AudioStretch(value));
+                }
+                _ => {
+                    let parsed = text.pitch.trim().parse::<f32>().ok().zip(text.cents.trim().parse::<f32>().ok());
+                    let Some((pitch, cents)) = parsed else { app.set_status("pitch and cents must be numbers"); return };
+                    let value = pitch + cents / 100.0;
+                    if !pitch.is_finite() || !cents.is_finite() || !value.is_finite() || !(-48.0..=48.0).contains(&value) {
+                        app.set_status("combined pitch must be between -48 and 48 semitones"); return;
+                    }
+                    update(app, Message::AudioPitch(value));
+                    update(app, Message::AudioPitchDone);
+                }
+            }
+            app.playlist.audio_text = None;
+        }
+        Message::AudioReset(field) => {
+            match field {
+                AudioField::Stretch => update(app, Message::AudioStretch(1.0)),
+                AudioField::Pitch => { update(app, Message::AudioPitch(0.0)); update(app, Message::AudioPitchDone); }
+                AudioField::Cents => {
+                    let Some(clip) = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_))) else { return };
+                    update(app, Message::AudioPitch(clip.audio.semitones.trunc()));
+                    update(app, Message::AudioPitchDone);
+                }
+            }
+            app.playlist.audio_text = None;
         }
         Message::View(view) => app.playlist.time = view,
         Message::ZoomTracks { steps, y } => {
@@ -582,13 +653,27 @@ pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
     let Some(clip) = selected else { return canvas.into() };
     let semitones = app.playlist.pitch_edit.as_ref().filter(|(ids, _)| ids.contains(&clip.id))
         .map_or(clip.audio.semitones, |(_, pitch)| *pitch);
+    let mut current = AudioText::new(clip);
+    current.pitch = semitones.trunc().to_string();
+    current.cents = format!("{:.3}", (semitones - semitones.trunc()) * 100.0);
+    let draft = app.playlist.audio_text.as_ref().filter(|text| text.clip == clip.id).unwrap_or(&current);
+    let audio_input = |placeholder: &str, value: &str, field| text_input(placeholder, value)
+        .on_input(move |s| Message::AudioText(field, s).into()).on_submit(Message::AudioApply(field).into())
+        .width(72).size(theme::SMALL).padding([3, 6]).style(theme::input);
     let pitch = row![
         label("audio pitch"), slider(-48.0..=48.0, semitones, |p| Message::AudioPitch(p).into())
-            .step(1.0_f32).on_release(Message::AudioPitchDone.into()).width(120).style(theme::fader),
-        label(format!("{semitones} st")),
+            .step(0.01_f32).on_release(Message::AudioPitchDone.into()).width(100).style(theme::fader),
+        audio_input("pitch", &draft.pitch, AudioField::Pitch), label("st"),
+        audio_input("cents", &draft.cents, AudioField::Cents), label("cents"),
+        tool("set pitch", Message::AudioApply(AudioField::Pitch).into()),
+        tool("reset pitch", Message::AudioReset(AudioField::Pitch).into()),
+        tool("reset cents", Message::AudioReset(AudioField::Cents).into()),
     ].spacing(6).align_y(iced::Alignment::Center);
     let options = row![
         label("duration"), pick(vec![0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0], Some(clip.audio.stretch), |s| Message::AudioStretch(s).into()),
+        audio_input("ratio", &draft.stretch, AudioField::Stretch), label("x"),
+        tool("set ratio", Message::AudioApply(AudioField::Stretch).into()),
+        tool("reset ratio", Message::AudioReset(AudioField::Stretch).into()),
         toggle("reverse", clip.audio.reverse, Message::Reverse.into()),
         tool("mute clips", Message::MuteSelection.into()),
     ].spacing(6).align_y(iced::Alignment::Center);
