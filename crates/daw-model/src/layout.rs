@@ -112,6 +112,15 @@ impl Rect {
     }
 }
 
+/// A split node's geometry: its path from the root, the area it divides, and the gap between its children.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Split {
+    pub path: Vec<bool>,
+    pub axis: Axis,
+    pub area: Rect,
+    pub line: Rect,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tile {
     pub id: TileId,
@@ -203,12 +212,12 @@ impl Layout {
         out
     }
 
-    /// Split lines as (path to split node, axis, line rect) for mouse resizing.
-    pub fn splits(&self, area: Rect) -> Vec<(Vec<bool>, Axis, Rect)> {
+    /// Splits within `area`, for mouse resizing.
+    pub fn splits(&self, area: Rect) -> Vec<Split> {
         self.splits_with_gap(area, 0.0)
     }
 
-    pub fn splits_with_gap(&self, area: Rect, gap: f32) -> Vec<(Vec<bool>, Axis, Rect)> {
+    pub fn splits_with_gap(&self, area: Rect, gap: f32) -> Vec<Split> {
         let mut out = Vec::new();
         if !self.zoomed {
             collect_splits(&self.root, area, gap, &mut Vec::new(), &mut out);
@@ -419,10 +428,14 @@ fn collect_rects(node: &Node, area: Rect, gap: f32, out: &mut Vec<(TileId, Rect)
     }
 }
 
-fn collect_splits(node: &Node, area: Rect, gap: f32, path: &mut Vec<bool>, out: &mut Vec<(Vec<bool>, Axis, Rect)>) {
+fn collect_splits(node: &Node, area: Rect, gap: f32, path: &mut Vec<bool>, out: &mut Vec<Split>) {
     if let Node::Split { axis, ratio, first, second } = node {
-        out.push((path.clone(), *axis, area));
         let (a, b) = if gap == 0.0 { area.split(*axis, *ratio) } else { split_with_gap(area, *axis, *ratio, gap) };
+        let line = match axis {
+            Axis::Horizontal => Rect { x: a.x + a.width, width: b.x - a.x - a.width, ..area },
+            Axis::Vertical => Rect { y: a.y + a.height, height: b.y - a.y - a.height, ..area },
+        };
+        out.push(Split { path: path.clone(), axis: *axis, area, line });
         path.push(false);
         collect_splits(first, a, gap, path, out);
         path.pop();
@@ -518,7 +531,12 @@ mod tests {
             (c, Rect { x: 20.0, y: 368.0, width: 1000.0, height: 296.0 }),
         ]);
         let splits = layout.splits_with_gap(area, 8.0);
-        assert_eq!(splits[1], (vec![false], Axis::Horizontal, Rect { x: 20.0, y: 64.0, width: 1000.0, height: 296.0 }));
+        assert_eq!(splits[1], Split {
+            path: vec![false],
+            axis: Axis::Horizontal,
+            area: Rect { x: 20.0, y: 64.0, width: 1000.0, height: 296.0 },
+            line: Rect { x: 516.0, y: 64.0, width: 8.0, height: 296.0 },
+        });
     }
 
     #[test]

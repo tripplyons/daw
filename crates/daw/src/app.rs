@@ -478,9 +478,9 @@ impl App {
                 if self.menu.is_some() { return Task::none(); }
                 let point = self.cursor;
                 let area = self.tile_area();
-                let hit = self.layout().rects_with_gap(area, view::GUTTER).into_iter().find(|(_, r)| {
-                    point.x >= r.x && point.x < r.x + r.width && point.y >= r.y && point.y < r.y + r.height
-                });
+                let contains = |r: Rect| point.x >= r.x && point.x < r.x + r.width && point.y >= r.y && point.y < r.y + r.height;
+                if self.layout().splits_with_gap(area, view::GUTTER).iter().any(|s| contains(view::handle_rect(s))) { return Task::none(); }
+                let hit = self.layout().rects_with_gap(area, view::GUTTER).into_iter().find(|(_, r)| contains(*r));
                 if let Some((tile, _)) = hit {
                     self.layout_mut().focused = tile;
                 }
@@ -721,8 +721,9 @@ impl App {
 
     fn drag_split(&mut self, path: &[bool], point: Point) {
         let area = self.tile_area();
-        let Some((_, axis, rect)) = self.layout().splits_with_gap(area, view::GUTTER).into_iter().find(|(p, _, _)| p == path) else { return };
-        let ratio = match axis {
+        let Some(split) = self.layout().splits_with_gap(area, view::GUTTER).into_iter().find(|s| s.path == path) else { return };
+        let rect = split.area;
+        let ratio = match split.axis {
             Axis::Horizontal => (point.x - rect.x - view::GUTTER / 2.0) / (rect.width - view::GUTTER).max(1.0),
             Axis::Vertical => (point.y - rect.y - view::GUTTER / 2.0) / (rect.height - view::GUTTER).max(1.0),
         };

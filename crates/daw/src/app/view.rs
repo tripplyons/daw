@@ -1,10 +1,10 @@
 //! The window: transport, background jobs, and the tiled panels.
 
 use daw_engine::song::PlayMode;
-use daw_model::layout::{Axis, Node, Panel, TileId};
+use daw_model::layout::{Axis, Node, Panel, Rect, Split, TileId};
 use daw_model::PatternId;
 use daw_plugins::scan::Progress;
-use iced::widget::{Space, column, container, mouse_area, pick_list, progress_bar, responsive, row, rule, stack, text, text_input};
+use iced::widget::{Space, Stack, column, container, mouse_area, pick_list, pin, progress_bar, responsive, row, rule, stack, text, text_input};
 use iced::{Element, Length, mouse};
 
 use super::{App, JOBS_HEIGHT, Message, TRANSPORT_HEIGHT};
@@ -13,12 +13,15 @@ use crate::menu;
 use crate::panels::{self, automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
 use crate::theme;
 
-pub(super) const GUTTER: f32 = 8.0;
+/// Width of the line between tiles.
+pub(super) const GUTTER: f32 = 1.0;
+/// Width of the invisible handle that drags a split line.
+const HANDLE: f32 = 8.0;
 
 impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let layout = self.layout();
-        let tiles = if layout.zoomed { self.tile(layout.focused) } else { self.node(&layout.root, &mut Vec::new()) };
+        let tiles = if layout.zoomed { self.tile(layout.focused) } else { stack![self.node(&layout.root), self.tile_overlay()].into() };
         let mut base = column![self.transport()];
         if self.showing_jobs() { base = base.push(self.jobs()); }
         let base = base.push(tiles);
@@ -41,57 +44,62 @@ impl App {
         container(jobs).height(JOBS_HEIGHT).padding([2, 4]).into()
     }
 
-    fn node<'a>(&'a self, node: &Node, path: &mut Vec<bool>) -> Element<'a, Message> {
+    fn node<'a>(&'a self, node: &Node) -> Element<'a, Message> {
         match node {
             Node::Leaf(id) => self.tile(*id),
             Node::Split { axis, ratio, first, second } => {
                 let a = ((ratio * 1000.0).round() as u16).max(1);
                 let b = (1000u16.saturating_sub(a)).max(1);
-                path.push(false);
-                let first = self.node(first, path);
-                path.pop();
-                path.push(true);
-                let second = self.node(second, path);
-                path.pop();
-                let handle = path.clone();
+                let line = container(Space::new()).style(theme::fill(theme::LINE));
                 match axis {
-                    Axis::Horizontal => {
-                        let gutter = mouse_area(
-                            container(rule::vertical(1).style(|_| rule_style()))
-                                .width(GUTTER)
-                                .height(Length::Fill)
-                                .center_x(GUTTER),
-                        )
-                        .on_press(Message::SplitDrag(handle))
-                        .interaction(mouse::Interaction::ResizingHorizontally);
-                        row![
-                            container(first).width(Length::FillPortion(a)),
-                            gutter,
-                            container(second).width(Length::FillPortion(b))
-                        ]
-                        .height(Length::Fill)
-                        .into()
-                    }
-                    Axis::Vertical => {
-                        let gutter = mouse_area(
-                            container(rule::horizontal(1).style(|_| rule_style()))
-                                .height(GUTTER)
-                                .width(Length::Fill)
-                                .center_y(GUTTER),
-                        )
-                        .on_press(Message::SplitDrag(handle))
-                        .interaction(mouse::Interaction::ResizingVertically);
-                        column![
-                            container(first).height(Length::FillPortion(a)),
-                            gutter,
-                            container(second).height(Length::FillPortion(b))
-                        ]
-                        .width(Length::Fill)
-                        .into()
-                    }
+                    Axis::Horizontal => row![
+                        container(self.node(first)).width(Length::FillPortion(a)),
+                        line.width(GUTTER).height(Length::Fill),
+                        container(self.node(second)).width(Length::FillPortion(b))
+                    ]
+                    .height(Length::Fill)
+                    .into(),
+                    Axis::Vertical => column![
+                        container(self.node(first)).height(Length::FillPortion(a)),
+                        line.height(GUTTER).width(Length::Fill),
+                        container(self.node(second)).height(Length::FillPortion(b))
+                    ]
+                    .width(Length::Fill)
+                    .into(),
                 }
             }
         }
+    }
+
+    /// Split handles wider than the lines they drag, and the focused tile's outline, drawn over the tiles.
+    fn tile_overlay(&self) -> Element<'_, Message> {
+        let layout = self.layout();
+        let area = self.tile_area();
+        let area = Rect { x: 0.0, y: 0.0, ..area };
+        let mut layers: Vec<Element<'_, Message>> = layout.splits_with_gap(area, GUTTER).into_iter().map(|split| {
+            let rect = handle_rect(&split);
+            let interaction = match split.axis {
+                Axis::Horizontal => mouse::Interaction::ResizingHorizontally,
+                Axis::Vertical => mouse::Interaction::ResizingVertically,
+            };
+            let handle = mouse_area(Space::new().width(rect.width).height(rect.height))
+                .on_press(Message::SplitDrag(split.path))
+                .interaction(interaction);
+            pin(handle).x(rect.x).y(rect.y).into()
+        }).collect();
+        if layout.leaves().len() > 1 && let Some((_, rect)) = layout.rects_with_gap(area, GUTTER).into_iter().find(|(id, _)| *id == layout.focused) {
+            // Cover the shared lines around the tile, staying inside the window at its edges.
+            let x = (rect.x - GUTTER).max(0.0);
+            let y = (rect.y - GUTTER).max(0.0);
+            let right = (rect.x + rect.width + GUTTER).min(area.width);
+            let bottom = (rect.y + rect.height + GUTTER).min(area.height);
+            let outline = container(Space::new()).width(right - x).height(bottom - y).style(|_| container::Style {
+                border: iced::Border { color: theme::TEXT_DIM, width: 1.0, radius: 0.0.into() },
+                ..container::Style::default()
+            });
+            layers.push(pin(outline).x(x).y(y).into());
+        }
+        Stack::with_children(layers).width(Length::Fill).height(Length::Fill).into()
     }
 
     fn tile(&self, id: TileId) -> Element<'_, Message> {
@@ -149,12 +157,7 @@ impl App {
         container(column![header, container(body).width(Length::Fill).height(Length::Fill).clip(true)])
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(1)
-            .style(move |t| {
-                let mut style = theme::panel(t);
-                style.border = iced::Border { color: if highlight { theme::TEXT_DIM } else { theme::LINE }, width: 1.0, radius: 0.0.into() };
-                style
-            })
+            .style(theme::panel)
             .into()
     }
 
@@ -278,6 +281,15 @@ fn job(label: &str, progress: f32, cancel: Message) -> Element<'_, Message> {
     .spacing(6)
     .align_y(iced::Alignment::Center)
     .into()
+}
+
+/// The draggable area around a split line, centered on it.
+pub(super) fn handle_rect(split: &Split) -> Rect {
+    let line = split.line;
+    match split.axis {
+        Axis::Horizontal => Rect { x: line.x + (line.width - HANDLE) / 2.0, width: HANDLE, ..line },
+        Axis::Vertical => Rect { y: line.y + (line.height - HANDLE) / 2.0, height: HANDLE, ..line },
+    }
 }
 
 fn rule_style() -> rule::Style {
