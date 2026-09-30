@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use daw_engine::output::BitDepth;
 use daw_engine::song::PlayMode;
@@ -49,6 +49,9 @@ pub enum Message {
     BpmDone,
     SelectPattern(PatternId),
     NewPattern,
+    ClonePattern(PatternId),
+    PackPicked(Option<PathBuf>),
+    RecoverPicked(Option<PathBuf>),
     /// Length of the selected pattern, in bars.
     PatternBars(u64),
     ScanProgress(Progress),
@@ -102,6 +105,7 @@ pub enum Pending {
     Close,
     New,
     Open(PathBuf),
+    Recover(PathBuf),
 }
 
 impl Pending {
@@ -110,6 +114,7 @@ impl Pending {
             Pending::Close => "closing".into(),
             Pending::New => "starting a new project".into(),
             Pending::Open(path) => format!("opening \"{}\"", path.file_name().unwrap_or_default().to_string_lossy()),
+            Pending::Recover(_) => "recovering a backup".into(),
         }
     }
 }
@@ -118,6 +123,11 @@ pub struct App {
     pub project: Project,
     pub path: Option<PathBuf>,
     pub session: Session,
+    pub midi: crate::midi::State,
+    pub last_autosave: Instant,
+    pub backup_key: String,
+    revision: u64,
+    autosaved_revision: u64,
     pub catalog: Catalog,
     pub scan: Option<Progress>,
     pub mode: PlayMode,
@@ -177,6 +187,11 @@ impl App {
             project,
             path: None,
             session: Session::new(),
+            midi: crate::midi::State::default(),
+            last_autosave: Instant::now(),
+            backup_key: crate::project_files::stamp(),
+            revision: 0,
+            autosaved_revision: 0,
             catalog: Catalog::default(),
             scan: Some(Progress { done: 0, total: 0 }),
             mode: PlayMode::Song,
@@ -224,6 +239,15 @@ impl App {
         app.refresh();
         if let Some(path) = STARTUP_PROJECT.get().cloned().flatten() {
             app.open(path);
+        }
+        if let Err(error) = app.midi.rescan() { app.set_status(format!("MIDI scan failed: {error}")); }
+        if let Some(name) = &app.config.midi_input {
+            if let Some(port) = app.midi.ports.iter().find(|p| &p.name == name).cloned() {
+                match app.midi.connect(port, app.session.midi_shared()) {
+                    Ok(input) => app.session.attach_midi(input),
+                    Err(error) => app.set_status(format!("MIDI input failed: {error}")),
+                }
+            } else { app.set_status(format!("MIDI input {name} unavailable; select an input in settings")); }
         }
         #[cfg(target_os = "macos")]
         forward_plugin_keys();
@@ -314,6 +338,7 @@ impl App {
         project.workspaces = self.project.workspaces.clone();
         self.project = project;
         self.dirty = true;
+        self.revision += 1;
         self.validate_selection();
         self.refresh();
     }
@@ -349,11 +374,15 @@ impl App {
     /// Bring engine and plugins in line with the project after any edit.
     pub fn refresh(&mut self) {
         self.session.sync(&mut self.project);
-        self.session.update_song(&self.project, self.mode);
+        if let Err(error) = self.session.update_song(&self.project, self.mode) {
+            self.set_status(format!("audio preparation failed: {error}"));
+        }
+        self.midi_target();
     }
 
     /// Mark an edit that already has a checkpoint.
     pub fn edited(&mut self) {
+        self.revision += 1;
         self.dirty = true;
         self.refresh();
     }
@@ -563,6 +592,22 @@ impl App {
                 self.project.set_pattern_length(self.selected_pattern, bars.max(1) * bar);
                 self.edited();
             }
+            Message::ClonePattern(source) => {
+                if self.project.pattern(source).is_none() { return Task::none(); }
+                self.checkpoint();
+                let id = self.project.clone_pattern(source).expect("existing pattern");
+                self.edited();
+                return self.update(Message::SelectPattern(id));
+            }
+            Message::PackPicked(Some(path)) => {
+                self.session.store_states(&mut self.project);
+                let path = if path.extension().is_none() { path.with_extension("dawzip") } else { path };
+                match crate::project_files::pack(&path, &self.project) {
+                    Ok(()) => self.set_status(format!("packaged {}", path.display())),
+                    Err(error) => self.set_status(format!("package failed: {error}")),
+                }
+            }
+            Message::PackPicked(None) => {}
             Message::NewPattern => {
                 self.checkpoint();
                 let id = self.project.add_pattern();
@@ -636,13 +681,15 @@ impl App {
                 let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase());
                 return match extension.as_deref() {
                     Some("wav" | "wave") => self.update(Message::ImportAudio(Some(path))),
-                    Some("dawproj") => self.guard(Pending::Open(path)),
+                    Some("dawproj" | "dawzip") => self.guard(Pending::Open(path)),
                     _ => {
-                        self.set_status(format!("cannot open {}; drop a .wav or .dawproj file", path.display()));
+                        self.set_status(format!("cannot open {}; drop a .wav, .dawproj, or .dawzip file", path.display()));
                         Task::none()
                     }
                 };
             }
+            Message::RecoverPicked(Some(path)) => return self.guard(Pending::Recover(path)),
+            Message::RecoverPicked(None) => {},
             Message::SavedAs(path) => {
                 if let Some(path) = path {
                     self.path = Some(path);
@@ -731,6 +778,23 @@ impl App {
             }
         }
         self.collect_takes();
+        self.poll_midi();
+        if was_playing && !self.playing { self.finish_midi(); }
+        let minutes = self.config.autosave_minutes;
+        if minutes > 0 && self.dirty && self.revision != self.autosaved_revision
+            && self.last_autosave.elapsed() >= Duration::from_secs(minutes.saturating_mul(60)) {
+            self.autosave();
+        }
+    }
+
+    pub fn autosave(&mut self) {
+        self.last_autosave = Instant::now();
+        if !self.playing { self.session.store_states(&mut self.project); }
+        let folder = crate::project_files::backups_dir().join(&self.backup_key);
+        match crate::project_files::snapshot(&folder, &self.project) {
+            Ok(_) => self.autosaved_revision = self.revision,
+            Err(error) => self.set_status(format!("autosave failed: {error}")),
+        }
     }
 
     fn drag_split(&mut self, path: &[bool], point: Point) {
@@ -793,6 +857,7 @@ impl App {
                 });
             }
             Action::ToggleRecord => self.record = !self.record,
+            Action::ToggleMidiRecord => self.toggle_midi_recording(),
             Action::ToggleAudioRecord => self.toggle_audio_recording(),
             Action::ImportAudio => {
                 return Task::perform(
@@ -830,6 +895,8 @@ impl App {
                 }
             }
             Action::ToggleMode => {
+                self.poll_midi();
+                self.finish_midi();
                 self.mode = match self.mode {
                     PlayMode::Song => {
                         self.stop_audio_recording();
@@ -841,6 +908,7 @@ impl App {
                 self.return_to_start();
             }
             Action::PlayPause => {
+                if self.playing { self.poll_midi(); self.finish_midi(); }
                 // Play starts at the pattern start or the song marker, and
                 // pausing goes back there, so the marker never drifts.
                 let was_playing = self.playing;
@@ -854,6 +922,8 @@ impl App {
                 self.playing = !was_playing;
             }
             Action::Stop => {
+                self.poll_midi();
+                self.finish_midi();
                 self.session.stop();
                 self.playing = false;
                 self.song_start = self.project.playlist.loop_range.map(|(s, _)| s as f64).unwrap_or(0.0);
@@ -879,7 +949,7 @@ impl App {
                 return Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
-                            .add_filter("project", &["dawproj"])
+                            .add_filter("project", &["dawproj", "dawzip"])
                             .pick_file()
                             .await
                             .map(|f| f.path().to_owned())
@@ -889,6 +959,18 @@ impl App {
             }
             Action::Save if self.path.is_some() => self.save(),
             Action::Save | Action::SaveAs => return Task::perform(save_dialog(), Message::SavedAs),
+            Action::Pack => {
+                return Task::perform(async {
+                    rfd::AsyncFileDialog::new().add_filter("portable project", &["dawzip"])
+                        .set_file_name("project.dawzip").save_file().await.map(|f| f.path().to_owned())
+                }, Message::PackPicked);
+            }
+            Action::Recover => {
+                return Task::perform(async {
+                    rfd::AsyncFileDialog::new().add_filter("backup", &["dawproj"])
+                        .set_directory(crate::project_files::backups_dir()).pick_file().await.map(|f| f.path().to_owned())
+                }, Message::RecoverPicked);
+            }
             Action::Export => {
                 return Task::perform(
                     async {
@@ -924,6 +1006,8 @@ impl App {
     /// Run `next` now, or first ask to save unsaved changes. Ignored while
     /// the prompt is already showing.
     fn guard(&mut self, next: Pending) -> Task<Message> {
+        self.poll_midi();
+        self.finish_midi();
         if self.pending.is_some() {
             return Task::none();
         }
@@ -940,11 +1024,24 @@ impl App {
             Pending::Close => return iced::exit(),
             Pending::New => self.new_project(),
             Pending::Open(path) => self.open(path),
+            Pending::Recover(path) => {
+                self.open(path.clone());
+                if self.path.as_ref() == Some(&path) {
+                    self.path = None;
+                    self.dirty = true;
+                    self.revision = self.revision.wrapping_add(1);
+                    self.set_status("backup recovered; Save As to keep the recovered project");
+                }
+            }
         }
         Task::none()
     }
 
     fn new_project(&mut self) {
+        self.suspend_midi_input();
+        if self.midi.recording { self.toggle_midi_recording(); }
+        self.backup_key = crate::project_files::stamp();
+        self.last_autosave = Instant::now();
         self.stop_audio_recording();
         self.session.clear();
         self.project = Project::new();
@@ -958,6 +1055,7 @@ impl App {
         self.mode = PlayMode::Song;
         self.validate_selection();
         self.refresh();
+        self.reset_midi_input();
     }
 
     fn ask_to_save(&self, next: &Pending) -> Task<Message> {
@@ -1002,10 +1100,11 @@ impl App {
         if let Some(name) = path.file_stem() {
             self.project.name = name.to_string_lossy().into_owned();
         }
-        let result = self.project.to_ron().map_err(|e| e.to_string()).and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()));
+        let result = crate::project_files::save(&path, &self.project);
         match result {
             Ok(()) => {
                 self.dirty = false;
+                self.backup_key = crate::project_files::backup_key(&self.project.name, &path);
                 self.set_status(format!("saved {}", path.display()));
             }
             Err(error) => self.set_status(format!("save failed: {error}")),
@@ -1013,11 +1112,13 @@ impl App {
     }
 
     pub fn open(&mut self, path: PathBuf) {
-        let loaded = std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|text| Project::from_ron(&text).map_err(|e| e.to_string()));
+        let loaded = crate::project_files::load(&path);
         match loaded {
             Ok(project) => {
+                self.suspend_midi_input();
+                if self.midi.recording { self.toggle_midi_recording(); }
+                self.backup_key = crate::project_files::backup_key(&project.name, &path);
+                self.last_autosave = Instant::now();
                 self.stop_audio_recording();
                 self.session.clear();
                 self.project = project;
@@ -1031,8 +1132,11 @@ impl App {
                 self.mode = PlayMode::Song;
                 self.validate_selection();
                 self.refresh();
+                self.reset_midi_input();
                 let failures = self.session.load_errors.len();
-                self.set_status(if failures == 0 {
+                self.set_status(if let Some(error) = &self.session.preparation_error {
+                    format!("opened; audio preparation failed: {error}")
+                } else if failures == 0 {
                     "opened".to_string()
                 } else {
                     format!("opened; {failures} plugins failed to load")
@@ -1157,6 +1261,9 @@ impl App {
             Panel::Parameters => parameters::toolbar(self),
             Panel::Settings => settings::toolbar(self),
         };
+        let tools = if panel == Panel::Playlist {
+            crate::panels::scroll(tools, false, true).width(Length::Fill).height(theme::HEADER_HEIGHT).into()
+        } else { tools };
         let marker = if layout.zoomed { text("focus").size(theme::SMALL).color(theme::TEXT_DIM) } else { text("") };
         let header = container(row![picker, tools, marker].spacing(6).align_y(iced::Alignment::Center))
             .height(theme::HEADER_HEIGHT)
@@ -1250,6 +1357,8 @@ impl App {
             button(small("+ pattern")).on_press(Message::NewPattern).style(theme::control).padding([3, 8]),
             button(small("bind")).on_press(Message::Action(Action::ToggleBind)).style(theme::toggle(self.bind_mode)).padding([3, 8]),
             button(small("rec")).on_press(Message::Action(Action::ToggleRecord)).style(theme::toggle(self.record)).padding([3, 8]),
+            button(small("rec midi")).on_press(Message::Action(Action::ToggleMidiRecord))
+                .style(theme::toggle(self.midi.recording)).padding([3, 8]),
             button(small("rec audio"))
                 .on_press(Message::Action(Action::ToggleAudioRecord))
                 .style(theme::toggle(self.session.recording_armed()))

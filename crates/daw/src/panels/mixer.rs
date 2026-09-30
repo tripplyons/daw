@@ -1,6 +1,6 @@
 //! Mixer inserts with meters, and the effect chain of the selected insert.
 
-use daw_model::{InsertId, Target};
+use daw_model::{InsertId, Send, Target};
 use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::{Space, button, column, container, mouse_area, row, slider, text, vertical_slider};
 use iced::{Element, Length, Task, mouse};
@@ -25,6 +25,9 @@ pub enum Message {
     AddInsert,
     DeleteInsert,
     Output(InsertId, InsertId),
+    Send(InsertId, InsertId, bool),
+    SendLevel(InsertId, InsertId, f32),
+    RemoveSend(InsertId, InsertId),
     /// A wheel step the strip area did not use: plain up/down scrolling,
     /// turned into sideways scrolling since the strips only scroll sideways.
     Wheel(mouse::ScrollDelta),
@@ -56,6 +59,23 @@ pub fn delete_selected(app: &mut App) -> bool {
 
 pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     match message {
+        Message::Send(from, to, sidechain) => {
+            if !app.project.mixer.can_route(from, to) { app.set_status("that send would create feedback"); return Task::none(); }
+            app.checkpoint();
+            app.project.mixer.set_send(from, Send { to, level: 1.0, sidechain });
+            app.edited();
+        }
+        Message::SendLevel(from, to, level) => {
+            if !level.is_finite() || !(0.0..=2.0).contains(&level) { return Task::none(); }
+            app.begin_edit();
+            if let Some(send) = app.project.mixer.insert_mut(from).and_then(|i| i.sends.iter_mut().find(|s| s.to == to)) { send.level = level; }
+            app.edited();
+        }
+        Message::RemoveSend(from, to) => {
+            app.checkpoint();
+            if let Some(insert) = app.project.mixer.insert_mut(from) { insert.sends.retain(|s| s.to != to); }
+            app.edited();
+        }
         Message::Select(id) => app.selected_insert = id,
         Message::Volume(id, volume) => {
             app.begin_edit();
@@ -237,6 +257,23 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                     .align_y(iced::Alignment::Center),
             );
         }
+        if insert.id != daw_model::MASTER {
+            let from = insert.id;
+            let choices: Vec<InsertChoice> = app.project.mixer.inserts.iter()
+                .filter(|i| app.project.mixer.can_route(from, i.id) && !insert.sends.iter().any(|s| s.to == i.id))
+                .map(|i| InsertChoice { id: i.id, name: i.name.clone() }).collect();
+            let audio = choices.iter().filter(|i| i.id != insert.output).cloned().collect();
+            chain = chain.push(row![label("send"), pick(audio, None, move |c: InsertChoice| Message::Send(from, c.id, false).into())].spacing(4));
+            chain = chain.push(row![label("sidechain"), pick(choices, None, move |c: InsertChoice| Message::Send(from, c.id, true).into())].spacing(4));
+            for send in &insert.sends {
+                let to = send.to;
+                let name = app.project.mixer.insert(to).map(|i| i.name.clone()).unwrap_or_default();
+                chain = chain.push(row![label(format!("{} {name}", if send.sidechain { "sc" } else { "send" })),
+                    tool("x", Message::RemoveSend(from, to).into())].spacing(4));
+                chain = chain.push(slider(0.0..=2.0, send.level, move |v| Message::SendLevel(from, to, v).into())
+                    .step(0.01_f32).on_release(AppMessage::EndEdit).style(theme::fader));
+            }
+        }
         for (index, &instance) in insert.effects.iter().enumerate() {
             let name = app.project.plugin(instance).map(|p| p.plugin.name.clone()).unwrap_or_default();
             let failed = app.session.load_errors.contains_key(&instance);
@@ -261,7 +298,7 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
     row![
         mouse_area(super::scroll(strips, false, true).id(STRIPS).width(Length::Fill).height(Length::Fill))
             .on_scroll(|delta| Message::Wheel(delta).into()),
-        container(chain).height(Length::Fill).style(theme::fill(theme::HEADER)),
+        container(super::scroll(chain, true, false)).height(Length::Fill).style(theme::fill(theme::HEADER)),
     ]
     .spacing(3)
     .into()

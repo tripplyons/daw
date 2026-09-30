@@ -56,7 +56,16 @@ impl Node {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LiveNote {
+    pub node: u64,
+    pub key: u8,
+    pub velocity: f32,
+}
+
 pub enum Command {
+    MidiInput(rtrb::Consumer<LiveNote>),
+    ReleaseNotes,
     Song(Box<Song>),
     AddNode(Box<Node>),
     RemoveNode(u64),
@@ -70,6 +79,7 @@ pub enum Command {
 
 /// Objects the audio thread hands back to be dropped on the UI thread.
 pub enum Garbage {
+    MidiInput(rtrb::Consumer<LiveNote>),
     Song(Box<Song>),
     Node(Box<Node>),
 }
@@ -77,6 +87,7 @@ pub enum Garbage {
 /// State the UI reads without locks.
 pub struct Shared {
     position: AtomicU64,
+    record_position: AtomicU64,
     bpm: AtomicU64,
     playing: AtomicBool,
     /// Peak per insert and side, as f32 bits; the UI resets them when read.
@@ -155,6 +166,8 @@ impl Clock {
 }
 
 impl Shared {
+    /// Ticks played without loop wraps or seeks, for measuring recorded notes.
+    pub fn record_position(&self) -> f64 { f64::from_bits(self.record_position.load(Ordering::Relaxed)) }
     pub fn position(&self) -> f64 {
         f64::from_bits(self.position.load(Ordering::Relaxed))
     }
@@ -213,6 +226,7 @@ impl EngineHandle {
 pub struct Engine {
     sample_rate: f64,
     commands: rtrb::Consumer<Command>,
+    midi: Option<rtrb::Consumer<LiveNote>>,
     garbage: rtrb::Producer<Garbage>,
     shared: Arc<Shared>,
     song: Option<Box<Song>>,
@@ -222,6 +236,7 @@ pub struct Engine {
     playing: bool,
     /// Transport position in ticks.
     position: f64,
+    record_position: f64,
     /// Frames since song start, for plugins that want a sample position.
     frames: i64,
     scratch: [Box<[f32]>; 2],
@@ -236,6 +251,7 @@ pub fn create(sample_rate: f64) -> (Engine, EngineHandle) {
     let (garbage_tx, garbage_rx) = rtrb::RingBuffer::new(4096);
     let shared = Arc::new(Shared {
         position: AtomicU64::new(0f64.to_bits()),
+        record_position: AtomicU64::new(0f64.to_bits()),
         bpm: AtomicU64::new(0f64.to_bits()),
         playing: AtomicBool::new(false),
         peaks: (0..MAX_METERS * 2).map(|_| AtomicU32::new(0)).collect(),
@@ -244,12 +260,14 @@ pub fn create(sample_rate: f64) -> (Engine, EngineHandle) {
     let engine = Engine {
         sample_rate,
         commands: command_rx,
+        midi: None,
         garbage: garbage_tx,
         shared: shared.clone(),
         song: None,
         nodes: Vec::with_capacity(MAX_NODES),
         playing: false,
         position: 0.0,
+        record_position: 0.0,
         frames: 0,
         scratch: [vec![0.0; MAX_BLOCK].into_boxed_slice(), vec![0.0; MAX_BLOCK].into_boxed_slice()],
         capture: Vec::new(),
@@ -263,17 +281,17 @@ fn apply_pan(pan: f32, gain: f32) -> (f32, f32) {
     (gain * (1.0 - pan).min(1.0), gain * (1.0 + pan).min(1.0))
 }
 
-/// An insert and the insert it sends to, borrowed together. Compiled songs
-/// never route an insert into itself.
-fn pair_mut(inserts: &mut [InsertPlan], index: usize) -> (&mut InsertPlan, &mut InsertPlan) {
-    let output = inserts[index].output;
-    if index < output {
-        let (low, high) = inserts.split_at_mut(output);
-        (&mut low[index], &mut high[0])
+fn route(inserts: &mut [InsertPlan], from: usize, to: usize, level: f32, sidechain: bool, frames: usize) {
+    if from == to { return; }
+    let (source, target) = if from < to {
+        let (low, high) = inserts.split_at_mut(to);
+        (&low[from], &mut high[0])
     } else {
-        let (low, high) = inserts.split_at_mut(index);
-        (&mut high[0], &mut low[output])
-    }
+        let (low, high) = inserts.split_at_mut(from);
+        (&high[0], &mut low[to])
+    };
+    let (l, r) = if sidechain { (&mut target.side_left, &mut target.side_right) } else { (&mut target.left, &mut target.right) };
+    for i in 0..frames { l[i] += source.left[i] * level; r[i] += source.right[i] * level; }
 }
 
 fn peak(buffer: &[f32]) -> f32 {
@@ -285,10 +303,10 @@ fn peak(buffer: &[f32]) -> f32 {
 /// position follows the song's tempo rather than stretching.
 fn mix_audio(plan: &AudioPlan, from: f64, per_frame: f64, bpm: f64, left: &mut [f32], right: &mut [f32]) {
     let to = from + per_frame * left.len() as f64;
-    let sample = &*plan.sample;
-    let frames_per_tick = sample.sample_rate * 60.0 / (bpm * f64::from(TICKS_PER_BEAT));
     let fade = per_frame * DECLICK_FRAMES;
     for clip in plan.clips.iter().take_while(|c| (c.start as f64) < to) {
+        let sample = &*clip.sample;
+        let frames_per_tick = sample.sample_rate * 60.0 / (bpm * f64::from(TICKS_PER_BEAT));
         let (start, end) = (clip.start as f64, clip.end as f64);
         if end <= from {
             continue;
@@ -329,6 +347,11 @@ impl Engine {
     fn handle_commands(&mut self) {
         while let Ok(command) = self.commands.pop() {
             match command {
+                Command::ReleaseNotes => self.release_all(0),
+                Command::MidiInput(input) => {
+                    self.release_all(0);
+                    if let Some(old) = self.midi.replace(input) { self.discard(Garbage::MidiInput(old)); }
+                }
                 Command::Song(song) => {
                     if let Some(old) = self.song.replace(song) {
                         self.discard(Garbage::Song(old));
@@ -373,6 +396,12 @@ impl Engine {
                         node.push(Event { offset: 0, kind });
                     }
                 }
+            }
+        }
+        while let Some(note) = self.midi.as_mut().and_then(|input| input.pop().ok()) {
+            if let Some(node) = self.node_mut(note.node) {
+                let kind = if note.velocity > 0.0 { EventKind::NoteOn { key: note.key, velocity: note.velocity } } else { EventKind::NoteOff { key: note.key } };
+                node.push(Event { offset: 0, kind });
             }
         }
     }
@@ -440,6 +469,7 @@ impl Engine {
             start = end;
         }
         self.shared.position.store(self.position.to_bits(), Ordering::Relaxed);
+        self.shared.record_position.store(self.record_position.to_bits(), Ordering::Relaxed);
         self.shared.bpm.store(self.bpm().to_bits(), Ordering::Relaxed);
         self.shared.playing.store(self.playing, Ordering::Relaxed);
     }
@@ -475,6 +505,8 @@ impl Engine {
         for insert in &mut song.inserts {
             insert.left[..frames].fill(0.0);
             insert.right[..frames].fill(0.0);
+            insert.side_left[..frames].fill(0.0);
+            insert.side_right[..frames].fill(0.0);
         }
         let [scratch_l, scratch_r] = &mut self.scratch;
         let (scratch_l, scratch_r) = (&mut scratch_l[..frames], &mut scratch_r[..frames]);
@@ -508,32 +540,37 @@ impl Engine {
         }
 
         for &index in &song.order {
-            let (insert, output) = pair_mut(&mut song.inserts, index);
-            let (l, r) = (&mut insert.left[..frames], &mut insert.right[..frames]);
-            for key in &insert.effects {
-                if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
-                    node.processor.process(&transport, &node.events, l, r);
-                    node.events.clear();
+            {
+                let insert = &mut song.inserts[index];
+                let (l, r) = (&mut insert.left[..frames], &mut insert.right[..frames]);
+                for key in &insert.effects {
+                    if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
+                        node.processor.process_sidechain(&transport, &node.events, l, r,
+                            (&insert.side_left[..frames], &insert.side_right[..frames]));
+                        node.events.clear();
+                    }
                 }
+                let (gl, gr) = if insert.silent { (0.0, 0.0) } else { apply_pan(insert.pan, insert.volume) };
+                for i in 0..frames { l[i] *= gl; r[i] *= gr; }
+                if let Some([cl, cr]) = self.capture.get_mut(index) {
+                    cl[offset..offset + frames].copy_from_slice(l);
+                    cr[offset..offset + frames].copy_from_slice(r);
+                }
+                self.shared.raise_peak(index, peak(l), peak(r));
             }
-            let (gl, gr) = if insert.silent { (0.0, 0.0) } else { apply_pan(insert.pan, insert.volume) };
-            for i in 0..frames {
-                l[i] *= gl;
-                r[i] *= gr;
-                output.left[i] += l[i];
-                output.right[i] += r[i];
+            let output = song.inserts[index].output;
+            route(&mut song.inserts, index, output, 1.0, false, frames);
+            for send in 0..song.inserts[index].sends.len() {
+                let send = &song.inserts[index].sends[send];
+                let (to, level, sidechain) = (send.to, send.level, send.sidechain);
+                route(&mut song.inserts, index, to, level, sidechain, frames);
             }
-            if let Some([cl, cr]) = self.capture.get_mut(index) {
-                cl[offset..offset + frames].copy_from_slice(l);
-                cr[offset..offset + frames].copy_from_slice(r);
-            }
-            self.shared.raise_peak(index, peak(l), peak(r));
         }
         let master = &mut song.inserts[0];
         let (l, r) = (&mut master.left[..frames], &mut master.right[..frames]);
         for key in &master.effects {
             if let Some(node) = self.nodes.iter_mut().find(|n| n.key == *key) {
-                node.processor.process(&transport, &node.events, l, r);
+                node.processor.process_sidechain(&transport, &node.events, l, r, (&master.side_left[..frames], &master.side_right[..frames]));
                 node.events.clear();
             }
         }
@@ -657,7 +694,9 @@ impl Engine {
     }
 
     fn advance(&mut self, frames: usize) {
-        self.position += self.ticks_per_frame() * frames as f64;
+        let ticks = self.ticks_per_frame() * frames as f64;
+        self.position += ticks;
+        self.record_position += ticks;
         self.frames += frames as i64;
         if let Some((loop_start, loop_end)) = self.song.as_ref().and_then(|s| s.loop_range)
             && self.position >= loop_end as f64

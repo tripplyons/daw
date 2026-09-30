@@ -28,6 +28,7 @@ pub struct Session {
     handle: EngineHandle,
     _stream: Option<cpal::Stream>,
     pub audio_error: Option<String>,
+    pub preparation_error: Option<String>,
     controllers: HashMap<InstanceId, Box<dyn Controller>>,
     params: HashMap<InstanceId, Vec<ParamInfo>>,
     pub load_errors: HashMap<InstanceId, String>,
@@ -63,6 +64,7 @@ impl Session {
             handle,
             _stream: stream,
             audio_error,
+            preparation_error: None,
             controllers: HashMap::new(),
             params: HashMap::new(),
             load_errors: HashMap::new(),
@@ -205,9 +207,20 @@ impl Session {
         Some((self.samples.get(path)?, self.peaks.get(path)?))
     }
 
-    pub fn update_song(&mut self, project: &Project, mode: PlayMode) {
+    pub fn update_song(&mut self, project: &Project, mode: PlayMode) -> Result<(), String> {
+        let prepared = daw_engine::audio::prepare(project, &mut self.samples);
+        self.preparation_error = prepared.as_ref().err().cloned();
+        self.peaks.retain(|key, _| self.samples.contains_key(key));
+        for (path, sample) in &self.samples {
+            if !self.peaks.contains_key(path) {
+                let peaks = sample.left.chunks(PEAK_FRAMES).zip(sample.right.chunks(PEAK_FRAMES))
+                    .map(|(l, r)| l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs()))).collect();
+                self.peaks.insert(path.clone(), peaks);
+            }
+        }
         let song = compile(project, mode, MAX_BLOCK, &self.samples);
         self.send(Command::Song(Box::new(song)));
+        prepared
     }
 
     pub fn play(&mut self) {
@@ -222,9 +235,17 @@ impl Session {
         self.send(Command::Seek(tick));
     }
 
+    pub fn attach_midi(&mut self, input: rtrb::Consumer<daw_engine::engine::LiveNote>) {
+        self.send(Command::MidiInput(input));
+    }
+
+    pub fn midi_shared(&self) -> Arc<daw_engine::engine::Shared> { self.handle.shared.clone() }
+
     pub fn note(&mut self, node: u64, key: u8, velocity: f32) {
         self.send(Command::Note { node, key, velocity });
     }
+
+    pub fn release_notes(&mut self) { self.send(Command::ReleaseNotes); }
 
     /// Open the default input device; audio is recorded whenever the song plays.
     pub fn arm_recording(&mut self) -> Result<(), String> {
@@ -360,8 +381,12 @@ impl Session {
         range: Option<(Ticks, Ticks)>,
         stems: &[Stem],
     ) -> Result<(), String> {
+        daw_engine::audio::prepare(project, &mut self.samples)?;
+        if !self.load_errors.is_empty() { return Err("one or more plugins failed to load".into()); }
         self.stop();
-        self.update_song(project, PlayMode::Song);
+        let mut render = project.clone();
+        render.playlist.loop_range = None;
+        self.update_song(&render, PlayMode::Song)?;
         let (start, seconds) = match range {
             Some((start, end)) => (start, ticks_to_seconds(end.saturating_sub(start) as f64, project.bpm)),
             None => (0, ticks_to_seconds(project.song_length() as f64, project.bpm) + 2.0),
@@ -371,8 +396,38 @@ impl Session {
             let mut engine = self.engine.lock().map_err(|_| "audio engine lock poisoned")?;
             output::export_wav(&mut engine, path, start, frames, depth, stems).map_err(|e| e.to_string())
         };
-        self.update_song(project, live_mode);
+        self.update_song(project, live_mode)?;
         self.seek(0.0);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_audio_replaces_the_previous_playback_plan() {
+        let mut session = Session::new();
+        let mut project = Project::new();
+        let path = "cached.wav";
+        let channel = project.add_channel("audio", Source::Audio { path: path.into() });
+        project.add_audio_clip(0, 0, channel, 3840);
+        session.samples.insert(path.into(), Arc::new(Sample { sample_rate: 48_000.0, left: vec![0.5; 48_000], right: vec![0.5; 48_000] }));
+        session.update_song(&project, PlayMode::Song).unwrap();
+        {
+            let mut engine = session.engine.lock().unwrap();
+            engine.start_offline(0);
+            let mut audible = false;
+            engine.render_offline(512, |l, _| audible |= l.iter().any(|s| s.abs() > 0.01));
+            assert!(audible);
+        }
+        project.channel_mut(channel).unwrap().source = Source::Audio {
+            path: std::env::temp_dir().join(format!("missing-{}.wav", crate::project_files::stamp())).to_string_lossy().into_owned(),
+        };
+        assert!(session.update_song(&project, PlayMode::Song).is_err());
+        let mut engine = session.engine.lock().unwrap();
+        engine.start_offline(0);
+        engine.render_offline(512, |l, r| assert!(l.iter().chain(r).all(|s| *s == 0.0)));
     }
 }

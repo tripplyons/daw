@@ -10,3 +10,4 @@ rtrb.workspace = true
 hound.workspace = true
 log.workspace = true
 thiserror.workspace = true
+signalsmith-stretch = "0.1.3"

@@ -33,6 +33,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Bundle the project and referenced WAV files into a portable .dawzip archive.
+    Pack { file: PathBuf, out: PathBuf },
+    /// Extract a portable project into a new folder.
+    Unpack { archive: PathBuf, folder: PathBuf },
     /// Create a project with the master, 8 mixer inserts, a synth channel, and one empty pattern.
     New {
         file: PathBuf,
@@ -157,6 +161,14 @@ pub fn run(command: Command) -> ExitCode {
 
 fn execute(command: Command) -> Result<String, String> {
     match command {
+        Command::Pack { file, out } => {
+            crate::project_files::pack(&out, &load(&file)?)?;
+            Ok(format!("packaged {}", out.display()))
+        }
+        Command::Unpack { archive, folder } => {
+            let path = crate::project_files::unpack(&archive, &folder)?;
+            Ok(path.display().to_string())
+        }
         Command::New { file, force } => {
             if file.exists() && !force {
                 return Err(format!("{} exists; pass --force to replace it", file.display()));
@@ -247,18 +259,12 @@ fn execute(command: Command) -> Result<String, String> {
 }
 
 fn load(path: &Path) -> Result<Project, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    Project::from_ron(&text).map_err(|e| format!("could not parse {}: {e}", path.display()))
+    crate::project_files::load(path)
 }
 
-/// Write through a temporary file so a failed write leaves the old project intact.
+/// Save the project and its audio in one archive through a temporary file.
 fn save(path: &Path, project: &Project) -> Result<(), String> {
-    let text = project.to_ron().map_err(|e| e.to_string())?;
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    std::fs::write(&temporary, text)
-        .and_then(|_| std::fs::rename(&temporary, path))
-        .map_err(|e| format!("could not write {}: {e}", path.display()))
+    crate::project_files::save(path, project)
 }
 
 /// Find an installed plugin by exact id or case-insensitive name.

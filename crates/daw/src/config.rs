@@ -5,11 +5,17 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Key chords per action id, e.g. `"focus-left": ["alt+h", "alt+left"]`.
     pub keys: BTreeMap<String, Vec<String>>,
+    pub autosave_minutes: u64,
+    pub midi_input: Option<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self { Self { keys: BTreeMap::new(), autosave_minutes: 2, midi_input: None } }
 }
 
 pub fn path() -> PathBuf {

@@ -5,7 +5,7 @@ description: Inspect, create, edit, and render DAW .dawproj project files with t
 
 # Working on .dawproj projects
 
-Use the `daw` subcommands to change projects instead of editing the RON file by hand. The commands keep ids unique, clean up references when something is removed, and refuse edits the app would not allow, such as mixer routes that loop.
+Use the `daw` subcommands to change projects. A `.dawproj` is a ZIP archive containing the project document and referenced WAVs. Normal saves, CLI edits, and autosaves include the audio, so the project file can be moved alone. Older text-only projects are upgraded on save. The commands keep ids unique, clean up references when something is removed, and refuse edits the app would not allow, such as mixer routes that loop.
 
 ## Setup
 
@@ -57,7 +57,7 @@ Variables hold only command outputs, not environment variables, so write paths o
 - Channels, patterns, automation clips, playlist clips, mixer inserts, and plugin instances share one id counter, so an id names exactly one thing. Read ids from `show`; never guess them. Insert 0 is the master.
 - Notes belong to a pattern and a channel. Notes and automation points have no ids: notes are matched by key and start, points by index.
 - Nothing plays in song mode until it is on the playlist. After making a pattern or automation clip, place it with `clip add`.
-- Audio clips play part of a WAV file at its own speed. Add the file with `channel add NAME --audio WAV`, which stores its absolute path, then place it with `clip add audio:CHANNEL TRACK START`. `--offset` skips into the file. Changing the tempo does not stretch the audio or change clip lengths.
+- Audio clips play part of a WAV file at its own speed. Add the file with `channel add NAME --audio WAV`, which embeds the WAV on save, then place it with `clip add audio:CHANNEL TRACK START`. `--offset` skips into the file. Changing the tempo does not stretch the audio or change clip lengths.
 - A new project (`$DAW new song.dawproj`) has 8 mixer inserts, a saw synth channel on insert 1, one empty 1-bar pattern, and 16 empty tracks. Channels added later take the next unused insert.
 
 ## Value forms

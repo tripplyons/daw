@@ -4,7 +4,7 @@ use iced::keyboard::Event;
 use iced::widget::{column, container, row, text};
 use iced::{Element, Length};
 
-use super::{label, tool, toggle};
+use super::{label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage};
 use crate::keys::{self, BINDINGS, Chord};
 use crate::theme;
@@ -17,6 +17,9 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    MidiPort(crate::midi::Port),
+    MidiRescan,
+    Autosave(u64),
     Capture(&'static str),
     Cancel,
     Remove(&'static str, Chord),
@@ -32,6 +35,26 @@ impl From<Message> for AppMessage {
 
 pub fn update(app: &mut App, message: Message) {
     match message {
+        Message::MidiRescan => {
+            if let Err(error) = app.midi.rescan() { app.set_status(format!("MIDI scan failed: {error}")); }
+        }
+        Message::MidiPort(port) => {
+            app.poll_midi();
+            app.finish_midi();
+            let name = port.index.map(|_| port.name.clone());
+            match app.midi.connect(port, app.session.midi_shared()) {
+                Ok(input) => {
+                    app.session.attach_midi(input);
+                    app.config.midi_input = name;
+                    app.save_config("MIDI input changed".into());
+                }
+                Err(error) => app.set_status(format!("MIDI input failed: {error}")),
+            }
+        }
+        Message::Autosave(minutes) => {
+            app.config.autosave_minutes = minutes;
+            app.save_config(if minutes == 0 { "autosave off".into() } else { format!("autosave every {minutes} minutes") });
+        }
         Message::Capture(id) => app.settings.capturing = Some(id),
         Message::Cancel => app.settings.capturing = None,
         Message::Remove(id, chord) => {
@@ -84,7 +107,15 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 }
 
 pub fn view(app: &App) -> Element<'_, AppMessage> {
-    let mut list = column![].spacing(1).padding([4, 8]);
+    let mut list = column![
+        label("MIDI input"),
+        pick(app.midi.ports.clone(), app.midi.selected.clone(), |p| Message::MidiPort(p).into()),
+        row![tool("rescan inputs", Message::MidiRescan.into())],
+        row![label("autosave minutes (0 = off)"), pick(vec![0u64, 1, 2, 5, 10], Some(app.config.autosave_minutes), |m| Message::Autosave(m).into())].spacing(6),
+        row![
+            tool("recover backup", AppMessage::Action(crate::keys::Action::Recover)),
+            tool("package project", AppMessage::Action(crate::keys::Action::Pack))].spacing(6),
+    ].spacing(6).padding([4, 8]);
     if let Some(error) = &app.config_error {
         list = list.push(container(text(error.clone()).size(theme::SMALL).color(theme::BRIGHT)).padding([2, 0]));
     }
@@ -129,4 +160,3 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
     list = list.push(container(label(note)).padding([8, 0]));
     super::scroll(list, true, false).height(Length::Fill).into()
 }
-

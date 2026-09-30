@@ -6,6 +6,8 @@ mod keys;
 mod menu;
 mod open_files;
 mod panels;
+mod project_files;
+mod midi;
 mod quit;
 mod session;
 mod theme;

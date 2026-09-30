@@ -36,6 +36,12 @@ pub trait Processor: Send {
     /// Events are sorted by offset and fall inside the block.
     fn process(&mut self, transport: &TransportInfo, events: &[Event], left: &mut [f32], right: &mut [f32]);
 
+    /// Detector audio is separate from the audible input. Sources and
+    /// effects without an auxiliary input use the ordinary process method.
+    fn process_sidechain(&mut self, transport: &TransportInfo, events: &[Event], left: &mut [f32], right: &mut [f32], _side: (&[f32], &[f32])) {
+        self.process(transport, events, left, right);
+    }
+
     /// Silence all voices and tails, e.g. after a seek.
     fn reset(&mut self);
 }

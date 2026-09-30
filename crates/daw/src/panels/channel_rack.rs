@@ -44,6 +44,7 @@ pub fn select(app: &mut App, id: ChannelId) {
             _ => None,
         };
     }
+    app.midi_target();
 }
 
 /// Delete the selected channel with its notes, plugin, and automation.

@@ -176,7 +176,7 @@ unsafe impl Sync for TransportCell {}
 unsafe impl Send for TransportCell {}
 
 /// Input audio for effects, read by the pull-input block during render.
-struct InputCell(UnsafeCell<[*const f32; 2]>);
+struct InputCell(UnsafeCell<[*const f32; 4]>);
 
 unsafe impl Sync for InputCell {}
 unsafe impl Send for InputCell {}
@@ -211,6 +211,7 @@ struct AuProcessor {
     transport: Arc<TransportCell>,
     input: Arc<InputCell>,
     buffers: [Box<[f32]>; 2],
+    silence: Box<[f32]>,
     sample_time: f64,
     max_block: usize,
 }
@@ -227,6 +228,10 @@ impl AuProcessor {
 
 impl Processor for AuProcessor {
     fn process(&mut self, transport: &TransportInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+        self.process_sidechain(transport, events, left, right, (&[], &[]));
+    }
+
+    fn process_sidechain(&mut self, transport: &TransportInfo, events: &[Event], left: &mut [f32], right: &mut [f32], side: (&[f32], &[f32])) {
         let frames = left.len().min(self.max_block);
         unsafe { *self.transport.0.get() = *transport };
         for event in events {
@@ -252,7 +257,9 @@ impl Processor for AuProcessor {
             }
         }
 
-        unsafe { *self.input.0.get() = [left.as_ptr(), right.as_ptr()] };
+        let side_l = if side.0.len() >= frames { side.0.as_ptr() } else { self.silence.as_ptr() };
+        let side_r = if side.1.len() >= frames { side.1.as_ptr() } else { self.silence.as_ptr() };
+        unsafe { *self.input.0.get() = [left.as_ptr(), right.as_ptr(), side_l, side_r] };
         let byte_size = (frames * std::mem::size_of::<f32>()) as u32;
         let [out_l, out_r] = &mut self.buffers;
         let mut list = StereoBufferList {
@@ -309,7 +316,7 @@ fn set_bus_format(unit: &AUAudioUnit, output: bool, sample_rate: f64) -> Result<
         // `setFormat:error:` takes an AVAudioFormat, which the AudioToolbox bindings omit.
         let result: Result<(), Retained<NSError>> = unsafe { msg_send![&*bus, setFormat: &*format, error: _] };
         // Bridged v2 effects report "no connection" unless the main bus is enabled.
-        let _: () = unsafe { msg_send![&*bus, setEnabled: index == 0] };
+        let _: () = unsafe { msg_send![&*bus, setEnabled: index == 0 || (!output && index == 1)] };
         if let Err(error) = result
             && index == 0 {
                 return Err(PluginError::Load(format!("bus format rejected: {}", error.localizedDescription())));
@@ -470,14 +477,14 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
     ranges.sort_by_key(|r| r.address);
     let ranges = Arc::new(ranges);
 
-    let input = Arc::new(InputCell(UnsafeCell::new([std::ptr::null(); 2])));
+    let input = Arc::new(InputCell(UnsafeCell::new([std::ptr::null(); 4])));
     let pull_input = is_effect.then(|| {
         let input = input.clone();
         RcBlock::new(
             move |_: NonNull<AudioUnitRenderActionFlags>,
                   _: NonNull<AudioTimeStamp>,
                   frames: u32,
-                  _: isize,
+                  bus: isize,
                   list: NonNull<AudioBufferList>|
                   -> i32 {
                 let sources = unsafe { *input.0.get() };
@@ -485,7 +492,7 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
                 let count = unsafe { (*list).mNumberBuffers } as usize;
                 let buffers = unsafe { std::slice::from_raw_parts_mut((*list).mBuffers.as_mut_ptr(), count) };
                 for (index, buffer) in buffers.iter_mut().enumerate() {
-                    let source = sources[index.min(1)];
+                    let source = sources[index.min(1) + if bus == 0 { 0 } else { 2 }];
                     if source.is_null() {
                         continue;
                     }
@@ -508,6 +515,7 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
         schedule_param: unsafe { RcBlock::copy(unit.scheduleParameterBlock()) },
         unit: unit.clone(),
         pull_input,
+        silence: vec![0.0; max_block].into_boxed_slice(),
         ranges: ranges.clone(),
         transport,
         input,

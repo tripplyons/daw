@@ -32,13 +32,13 @@ pub struct ChannelPlan {
 }
 
 pub struct AudioPlan {
-    pub sample: Arc<Sample>,
     /// Sorted by start.
     pub clips: Vec<AudioClip>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone)]
 pub struct AudioClip {
+    pub sample: Arc<Sample>,
     pub start: Ticks,
     pub end: Ticks,
     /// Ticks into the file at the clip's start.
@@ -53,8 +53,17 @@ pub struct InsertPlan {
     pub silent: bool,
     /// Index of the insert this one sums into; 0 is the master.
     pub output: usize,
+    pub sends: Vec<SendPlan>,
+    pub side_left: Box<[f32]>,
+    pub side_right: Box<[f32]>,
     pub left: Box<[f32]>,
     pub right: Box<[f32]>,
+}
+
+pub struct SendPlan {
+    pub to: usize,
+    pub level: f32,
+    pub sidechain: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -136,7 +145,7 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
             mute: c.mute,
             events: Vec::new(),
             audio: match &c.source {
-                Source::Audio { path } => samples.get(path).map(|sample| AudioPlan { sample: sample.clone(), clips: Vec::new() }),
+                Source::Audio { path } => samples.get(path).map(|_| AudioPlan { clips: Vec::new() }),
                 _ => None,
             },
         })
@@ -170,7 +179,7 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
         }
         PlayMode::Song => {
             for clip in &project.playlist.clips {
-                if project.playlist.tracks.get(clip.track).is_some_and(|t| t.mute) {
+                if clip.muted || project.playlist.tracks.get(clip.track).is_some_and(|t| t.mute) {
                     continue;
                 }
                 match clip.source {
@@ -196,7 +205,9 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
                     }
                     ClipSource::Audio(id) => {
                         let Some(index) = channel_index(id) else { continue };
-                        audio_clips.push((index, AudioClip { start: clip.start, end: clip.end(), offset: clip.offset }));
+                        let Some(Source::Audio { path }) = project.channel(id).map(|c| &c.source) else { continue };
+                        let Some(sample) = samples.get(&crate::audio::cache_key(path, clip.audio)) else { continue };
+                        audio_clips.push((index, AudioClip { sample: sample.clone(), start: clip.start, end: clip.end(), offset: clip.offset }));
                     }
                 }
             }
@@ -234,23 +245,32 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
                 pan: i.pan,
                 silent: i.mute || (index > 0 && !audible(i.id)),
                 output: if output == index { 0 } else { output },
+                sends: i.sends.iter().filter(|s| mixer.can_route(i.id, s.to)).map(|s| SendPlan {
+                    to: insert_index(s.to), level: s.level, sidechain: s.sidechain,
+                }).collect(),
+                side_left: vec![0.0; max_block].into_boxed_slice(),
+                side_right: vec![0.0; max_block].into_boxed_slice(),
                 left: vec![0.0; max_block].into_boxed_slice(),
                 right: vec![0.0; max_block].into_boxed_slice(),
             }
         })
         .collect();
-    // Farthest from the master first, so every insert is complete before
-    // it is added to its output.
-    let hops = |mut index: usize| {
-        let mut hops = 0;
-        while index != 0 && hops < inserts.len() {
-            index = inserts[index].output;
-            hops += 1;
+    // Topological order includes detector routes, so sidechains reach the
+    // destination before its effects run.
+    let mut order = Vec::new();
+    let mut incoming = vec![0usize; inserts.len()];
+    for insert in inserts.iter().skip(1) {
+        incoming[insert.output] += 1;
+        for send in &insert.sends { incoming[send.to] += 1; }
+    }
+    let mut ready: Vec<usize> = (1..inserts.len()).filter(|&i| incoming[i] == 0).collect();
+    while let Some(index) = ready.pop() {
+        order.push(index);
+        for destination in std::iter::once(inserts[index].output).chain(inserts[index].sends.iter().map(|s| s.to)) {
+            incoming[destination] -= 1;
+            if destination != 0 && incoming[destination] == 0 { ready.push(destination); }
         }
-        hops
-    };
-    let mut order: Vec<usize> = (1..inserts.len()).collect();
-    order.sort_by_key(|&index| std::cmp::Reverse(hops(index)));
+    }
 
     Song { bpm: project.bpm, signature: project.signature, loop_range, channels, inserts, order, automation }
 }

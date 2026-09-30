@@ -576,7 +576,7 @@ fn new_and_open_ask_to_save_unsaved_changes_first() {
     let _ = app.update(Message::NewPattern);
     let _ = app.update(Message::Opened(Some(other.clone())));
     let _ = app.update(Message::SaveChoice(SaveChoice::Save));
-    assert_eq!(Project::from_ron(&std::fs::read_to_string(&saved).unwrap()).unwrap().patterns.len(), 2);
+    assert_eq!(crate::project_files::load(&saved).unwrap().patterns.len(), 2);
     assert_eq!(app.path.as_deref(), Some(other.as_path()));
     assert!(!app.dirty && app.pending.is_none());
 }
@@ -605,7 +605,7 @@ fn closing_prompts_only_with_unsaved_changes_and_saves_before_quitting() {
     let _ = app.update(Message::CloseRequested);
     let _ = app.update(Message::SaveChoice(SaveChoice::Save));
     assert!(!app.dirty);
-    assert_eq!(Project::from_ron(&std::fs::read_to_string(&path).unwrap()).unwrap().patterns.len(), 2);
+    assert_eq!(crate::project_files::load(&path).unwrap().patterns.len(), 2);
 
     // A failed save keeps the app open with the changes.
     let _ = app.update(Message::NewPattern);
@@ -753,4 +753,278 @@ fn dropped_audio_places_a_clip_that_trims_from_both_edges() {
     let added = app.project.playlist.clips.last().unwrap();
     assert_eq!((added.start, added.length, added.source), (7680, 1920, ClipSource::Audio(channel.id)));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn midi_packet(app: &App, tick: f64, velocity: f32) -> crate::midi::Packet {
+    let channel = app.project.channels[0].id;
+    crate::midi::Packet { midi_channel: 0, channel, node: channel.0, key: 64, velocity, tick, elapsed: tick, recording: true }
+}
+
+#[test]
+fn midi_recording_splits_looped_notes_and_keeps_original_channel() {
+    let mut app = app();
+    let pattern = app.selected_pattern;
+    app.mode = PlayMode::Pattern(pattern);
+    app.midi.recording = true;
+    let bar = app.project.signature.ticks_per_bar();
+    app.midi_packet(midi_packet(&app, (bar - 240) as f64, 0.7));
+    app.selected_channel = Some(app.project.add_channel("other", daw_model::Source::Synth(Default::default())));
+    let mut off = midi_packet(&app, 120.0, 0.0);
+    off.elapsed = (bar + 120) as f64;
+    app.midi_packet(off);
+    let notes = app.project.pattern(pattern).unwrap().notes(app.project.channels[0].id);
+    assert_eq!(notes.len(), 2);
+    assert_eq!((notes[0].start, notes[0].length, notes[0].key, notes[0].velocity), (0, 120, 64, 0.7));
+    assert_eq!((notes[1].start, notes[1].length), (bar - 240, 240));
+    let _ = app.update(Message::Action(Action::Undo));
+    assert!(app.project.pattern(pattern).unwrap().notes(app.project.channels[0].id).is_empty());
+}
+
+#[test]
+fn song_midi_recording_creates_and_grows_one_take() {
+    let mut app = app();
+    app.mode = PlayMode::Song;
+    app.song_start = 960.0;
+    app.midi.recording = true;
+    let count = app.project.patterns.len();
+    app.midi_packet(midi_packet(&app, 1020.0, 1.0));
+    app.midi_packet(midi_packet(&app, 1500.0, 0.0));
+    app.midi_packet(midi_packet(&app, 6000.0, 0.5));
+    app.midi_packet(midi_packet(&app, 10000.0, 0.0));
+    assert_eq!(app.project.patterns.len(), count + 1);
+    let pattern = app.project.patterns.last().unwrap();
+    let notes = pattern.notes(app.project.channels[0].id);
+    assert_eq!((notes[0].start, notes[0].length), (60, 480));
+    assert_eq!((notes[1].start, notes[1].length), (5040, 4000));
+    let clip = app.project.playlist.clips.last().unwrap();
+    assert_eq!(clip.start, 960);
+    assert_eq!(clip.source, ClipSource::Pattern(pattern.id));
+    assert_eq!(clip.length, pattern.length);
+    assert!(pattern.length >= notes[1].end());
+}
+
+#[test]
+fn audio_edits_scale_trim_offsets_and_undo_together() {
+    let dir = std::env::temp_dir().join(format!("daw-edits-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let wav = dir.join("clip.wav");
+    write_wav(&wav, 4800);
+    let mut app = app();
+    app.import_audio(&wav, 960).unwrap();
+    let clip = app.project.playlist.clips[0].id;
+    app.project.playlist.clips[0].offset = 20;
+    app.project.playlist.clips[0].length = 100;
+    app.playlist.selected = vec![clip];
+    let _ = app.update(list::Message::AudioStretch(2.0).into());
+    let stretched = &app.project.playlist.clips[0];
+    assert_eq!((stretched.start, stretched.length, stretched.offset, stretched.audio.stretch), (960, 200, 40, 2.0));
+    let _ = app.update(list::Message::Reverse.into());
+    assert!(app.project.playlist.clips[0].audio.reverse);
+    let _ = app.update(list::Message::AudioPitch(12.0).into());
+    let _ = app.update(Message::EndEdit);
+    for _ in 0..3 { let _ = app.update(Message::Action(Action::Undo)); }
+    let restored = &app.project.playlist.clips[0];
+    assert_eq!((restored.length, restored.offset, restored.audio), (100, 20, daw_model::AudioEdit::default()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn stretch_mode_resizes_audio_and_split_keeps_the_edits() {
+    let dir = std::env::temp_dir().join(format!("daw-stretch-drag-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let wav = dir.join("clip.wav");
+    write_wav(&wav, 48_000);
+    let mut app = app();
+    app.project.bpm = 120.0;
+    app.import_audio(&wav, 0).unwrap();
+    let id = app.project.playlist.clips[0].id;
+    let _ = app.update(list::Message::StretchMode.into());
+    let _ = app.update(list::Message::Begin { id, edge: Some(list::Edge::End), additive: false }.into());
+    let _ = app.update(list::Message::Drag { ticks: 1920.0, tracks: 0, bypass: true }.into());
+    let _ = app.update(list::Message::End.into());
+    assert_eq!((app.project.playlist.clips[0].length, app.project.playlist.clips[0].audio.stretch), (3840, 2.0));
+    let _ = app.update(list::Message::Reverse.into());
+    let _ = app.update(list::Message::AudioPitch(7.0).into());
+    let _ = app.update(Message::EndEdit);
+    let _ = app.update(list::Message::Split(id, 1920.0).into());
+    let [left, right] = &app.project.playlist.clips[..] else { panic!("split clips") };
+    assert_eq!(left.audio, right.audio);
+    assert_eq!((left.length, right.offset, right.length), (1920, 1920, 1920));
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.playlist.clips.len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cloning_and_making_unique_are_independent_undo_steps() {
+    let mut app = app();
+    focus(&mut app, Panel::Playlist);
+    let pattern = app.selected_pattern;
+    let channel = app.project.channels[0].id;
+    app.project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    let first = app.project.add_clip(0, 0, ClipSource::Pattern(pattern));
+    app.project.add_clip(1, 3840, ClipSource::Pattern(pattern));
+    app.playlist.selected = vec![first];
+    let _ = app.update(press(Code::KeyU, char_key("u"), Modifiers::COMMAND));
+    let ClipSource::Pattern(unique) = app.project.playlist.clips[0].source else { panic!("unique pattern") };
+    assert_ne!(unique, pattern);
+    assert_eq!(app.project.playlist.clips[1].source, ClipSource::Pattern(pattern));
+    let _ = app.update(Message::ClonePattern(unique));
+    let clone = app.selected_pattern;
+    assert_ne!(clone, unique);
+    app.project.pattern_mut(clone).unwrap().notes_mut(channel)[0].key = 72;
+    assert_eq!(app.project.pattern(unique).unwrap().notes(channel)[0].key, 60);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.patterns.len(), 2);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.patterns.len(), 1);
+    assert_eq!(app.project.playlist.clips[0].source, ClipSource::Pattern(pattern));
+}
+
+#[test]
+fn consolidation_bakes_insert_gain_and_leaves_master_processing_live() {
+    let dir = std::env::temp_dir().join(format!("daw-consolidate-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let mut app = app();
+    app.path = Some(dir.join("song.dawproj"));
+    app.project.bpm = 120.0;
+    let channel = app.project.channels[0].id;
+    let pattern = app.selected_pattern;
+    app.project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    let source = app.project.add_clip(0, 960, ClipSource::Pattern(pattern));
+    app.playlist.selected = vec![source];
+    app.project.mixer.inserts[0].volume = 0.5;
+    app.project.mixer.inserts[1].volume = 0.4;
+    let master_volume = app.project.add_automation("master volume", Target::InsertVolume(daw_model::MASTER), 0.3);
+    app.project.add_clip(1, 0, ClipSource::Automation(master_volume));
+    app.refresh();
+    let end = app.project.playlist.clips[0].end();
+    let before = dir.join("before.wav");
+    app.session.export(&app.project, &before, BitDepth::Float32, app.mode, Some((960, end)), &[]).unwrap();
+    app.consolidate_selection().unwrap();
+    assert!(app.project.playlist.clips[0].muted);
+    let audio = app.project.channels.last().unwrap();
+    assert_eq!((audio.volume, audio.pan, audio.insert), (1.0, 0.0, daw_model::MASTER));
+    assert_eq!(app.project.mixer.inserts[0].volume, 0.5);
+    let after = dir.join("after.wav");
+    app.session.export(&app.project, &after, BitDepth::Float32, app.mode, Some((960, end)), &[]).unwrap();
+    let before = daw_engine::synth::Sample::load(before.to_str().unwrap()).unwrap();
+    let after = daw_engine::synth::Sample::load(after.to_str().unwrap()).unwrap();
+    assert_eq!(before.left.len(), after.left.len());
+    assert!(before.left.iter().any(|s| s.abs() > 0.001));
+    let error = before.left[128..before.left.len() - 128].iter().zip(&after.left[128..after.left.len() - 128])
+        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(error < 0.0001, "consolidated output error: {error}");
+    let _ = app.update(Message::Action(Action::Undo));
+    assert!(!app.project.playlist.clips[0].muted);
+    assert_eq!(app.project.playlist.clips.len(), 2);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn autosave_preserves_dirty_state_and_recovery_requires_save_as() {
+    let dir = std::env::temp_dir().join(format!("daw-backup-audio-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let wav = dir.join("external.wav");
+    write_wav(&wav, 4800);
+    let mut app = app();
+    app.import_audio(&wav, 0).unwrap();
+    app.backup_key = format!("test-{}", crate::project_files::stamp());
+    let folder = crate::project_files::backups_dir().join(&app.backup_key);
+    app.project.name = "recovered song".into();
+    app.dirty = true;
+    app.playing = true;
+    app.autosave();
+    assert!(app.dirty);
+    assert_eq!(app.autosaved_revision, app.revision);
+    let backup = std::fs::read_dir(&folder).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(crate::project_files::load(&backup).unwrap().name, "recovered song");
+    std::fs::remove_file(wav).unwrap();
+    let _ = app.proceed(Pending::Recover(backup));
+    assert!(app.dirty);
+    assert!(app.path.is_none());
+    assert_eq!(app.project.name, "recovered song");
+    assert!(app.session.preparation_error.is_none(), "{}", app.status);
+    let _ = app.update(Message::SavedAs(Some(dir.join("recovered song.dawproj"))));
+    assert!(!app.dirty, "{}", app.status);
+    std::fs::remove_dir_all(folder).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn midi_note_held_across_multiple_loops_fills_one_loop() {
+    let mut app = app();
+    let pattern = app.selected_pattern;
+    let bar = app.project.pattern(pattern).unwrap().length;
+    app.mode = PlayMode::Pattern(pattern);
+    app.midi.recording = true;
+    app.midi_packet(midi_packet(&app, 240.0, 1.0));
+    let mut off = midi_packet(&app, 480.0, 0.0);
+    off.elapsed = (bar * 3 + 480) as f64;
+    app.midi_packet(off);
+    let notes = app.project.pattern(pattern).unwrap().notes(app.project.channels[0].id);
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes.iter().map(|n| n.length).sum::<u64>(), bar);
+    assert!(notes.iter().all(|n| n.end() <= bar));
+}
+
+#[test]
+fn opening_missing_audio_keeps_the_error_visible() {
+    let dir = std::env::temp_dir().join(format!("daw-missing-audio-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("missing.dawproj");
+    let mut project = Project::new();
+    let channel = project.add_channel("missing", daw_model::Source::Audio { path: dir.join("missing.wav").to_string_lossy().into_owned() });
+    project.add_clip(0, 0, ClipSource::Audio(channel));
+    // Legacy projects can still reference missing external files.
+    std::fs::write(&path, project.to_ron().unwrap()).unwrap();
+    let mut app = app();
+    app.open(path);
+    assert!(app.status.contains("audio preparation failed"));
+    assert!(app.status.contains("missing.wav"));
+    assert!(app.session.preparation_error.is_some());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_portable_project_renders_identically_after_removing_the_source_folder() {
+    let dir = std::env::temp_dir().join(format!("daw-portable-render-{}", crate::project_files::stamp()));
+    let source = dir.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let wav = source.join("clip.wav");
+    write_wav(&wav, 24_000);
+    let mut app = app();
+    app.import_audio(&wav, 0).unwrap();
+    app.project.playlist.clips[0].audio = daw_model::AudioEdit { stretch: 2.0, semitones: 7.0, reverse: true };
+    app.project.playlist.clips[0].length *= 2;
+    app.refresh();
+    let end = app.project.song_length();
+    let before = dir.join("before.wav");
+    app.session.export(&app.project, &before, BitDepth::Float32, app.mode, Some((0, end)), &[]).unwrap();
+    let saved = dir.join("song.dawproj");
+    let _ = app.update(Message::SavedAs(Some(saved.clone())));
+    assert!(!app.dirty, "{}", app.status);
+    std::fs::remove_dir_all(&source).unwrap();
+    let moved = dir.join("relocated");
+    std::fs::create_dir(&moved).unwrap();
+    let relocated = moved.join("song.dawproj");
+    std::fs::rename(&saved, &relocated).unwrap();
+    app.open(relocated.clone());
+    assert_eq!(app.path, Some(relocated.clone()));
+    assert!(app.session.preparation_error.is_none());
+    let after = dir.join("after.wav");
+    app.session.export(&app.project, &after, BitDepth::Float32, app.mode, Some((0, end)), &[]).unwrap();
+    let before = daw_engine::synth::Sample::load(before.to_str().unwrap()).unwrap();
+    let after = daw_engine::synth::Sample::load(after.to_str().unwrap()).unwrap();
+    assert!(before.left.iter().any(|s| s.abs() > 0.01));
+    assert_eq!(before.left, after.left);
+    assert_eq!(before.right, after.right);
+    // Editing and saving the moved project keeps it self-contained.
+    let _ = app.update(Message::NewPattern);
+    let _ = app.update(Message::Action(Action::Save));
+    assert!(!app.dirty, "{}", app.status);
+    let loaded = crate::project_files::load(&relocated).unwrap();
+    assert_eq!(loaded.patterns.len(), 2);
+    assert_eq!(loaded.playlist.clips[0].audio, app.project.playlist.clips[0].audio);
+    std::fs::remove_dir_all(dir).unwrap();
 }

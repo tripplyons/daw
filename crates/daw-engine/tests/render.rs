@@ -195,12 +195,19 @@ fn render_does_not_allocate() {
     for step in 0..16 {
         project.pattern_mut(pattern).unwrap().toggle_step(channel, step);
     }
-    let (mut engine, _handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    let [source, bus, detector] = [1, 2, 3].map(|i| project.mixer.inserts[i].id);
+    assert!(project.mixer.set_send(source, daw_model::Send { to: bus, level: 0.5, sidechain: false }));
+    assert!(project.mixer.set_send(source, daw_model::Send { to: detector, level: 0.5, sidechain: true }));
+    let (mut engine, mut handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    let (mut midi, input) = rtrb::RingBuffer::new(8);
+    handle.send(Command::MidiInput(input)).ok().unwrap();
     let mut left = vec![0.0; 256];
     let mut right = vec![0.0; 256];
     engine.render(&mut left, &mut right);
     COUNTING.with(|c| c.set(true));
     for _ in 0..2000 {
+        midi.push(daw_engine::engine::LiveNote { node: channel.0, key: 127, velocity: 0.5 }).unwrap();
+        midi.push(daw_engine::engine::LiveNote { node: channel.0, key: 127, velocity: 0.0 }).unwrap();
         engine.render(&mut left, &mut right);
     }
     COUNTING.with(|c| c.set(false));
@@ -369,6 +376,65 @@ fn muted_tracks_silence_audio_clips() {
     let (mut project, channel) = audio_project();
     project.add_audio_clip(0, 0, channel, TICKS_PER_BEAT as u64);
     project.playlist.tracks[0].mute = true;
+    let mut engine = engine_with_ramp(&project);
+    assert!(render(&mut engine, FRAMES_PER_BEAT).iter().all(|s| *s == 0.0));
+}
+
+struct Detector(Arc<std::sync::atomic::AtomicU32>);
+impl Processor for Detector {
+    fn process(&mut self, _: &TransportInfo, _: &[Event], _: &mut [f32], _: &mut [f32]) {}
+    fn process_sidechain(&mut self, _: &TransportInfo, _: &[Event], _: &mut [f32], _: &mut [f32], side: (&[f32], &[f32])) {
+        for &sample in side.0 { self.0.fetch_max(sample.to_bits(), std::sync::atomic::Ordering::Relaxed); }
+    }
+    fn reset(&mut self) {}
+}
+
+#[test]
+fn parallel_sends_sum_but_sidechains_only_reach_the_detector() {
+    for destination in [1, 0] {
+        let mut project = unity_project();
+        let pattern = project.patterns[0].id;
+        let channel = project.channels[0].id;
+        project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+        let [bus, source] = [destination, 2].map(|i| project.mixer.inserts[i].id);
+        project.channels[0].insert = source;
+        let effect = project.add_plugin(daw_model::PluginRef {
+            format: daw_model::PluginFormat::Vst3, id: "detector".into(), path: String::new(), name: "detector".into(), vendor: String::new(),
+        });
+        project.mixer.insert_mut(bus).unwrap().effects.push(effect);
+        for sidechain in [false, true] {
+            assert!(project.mixer.set_send(source, daw_model::Send { to: bus, level: 0.5, sidechain }));
+            let (mut engine, mut handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+            let peak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            handle.send(Command::AddNode(Node::new(effect.0, Box::new(Detector(peak.clone()))))).ok().unwrap();
+            let signal = render(&mut engine, 512);
+            assert_eq!(signal[0], if sidechain { 1.0 } else { 1.5 });
+            assert_eq!(f32::from_bits(peak.load(std::sync::atomic::Ordering::Relaxed)), if sidechain { 0.5 } else { 0.0 });
+        }
+    }
+}
+
+#[test]
+fn live_midi_queue_plays_without_transport_and_releases_on_disconnect() {
+    let project = unity_project();
+    let pattern = project.patterns[0].id;
+    let (mut engine, mut handle, log) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    handle.send(Command::Stop).ok().unwrap();
+    let (mut sender, receiver) = rtrb::RingBuffer::new(8);
+    handle.send(Command::MidiInput(receiver)).ok().unwrap();
+    sender.push(daw_engine::engine::LiveNote { node: project.channels[0].id.0, key: 64, velocity: 0.8 }).unwrap();
+    assert_eq!(render(&mut engine, 512)[0], 1.0);
+    let (_, replacement) = rtrb::RingBuffer::new(8);
+    handle.send(Command::MidiInput(replacement)).ok().unwrap();
+    render(&mut engine, 512);
+    assert!(log.lock().unwrap().contains(&EventKind::NoteOff { key: 64 }));
+}
+
+#[test]
+fn muted_individual_clips_do_not_play() {
+    let (mut project, channel) = audio_project();
+    project.add_audio_clip(0, 0, channel, TICKS_PER_BEAT as u64);
+    project.playlist.clips[0].muted = true;
     let mut engine = engine_with_ramp(&project);
     assert!(render(&mut engine, FRAMES_PER_BEAT).iter().all(|s| *s == 0.0));
 }

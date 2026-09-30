@@ -190,7 +190,7 @@ pub struct AutomationClip {
 pub enum ClipSource {
     Pattern(PatternId),
     Automation(AutomationId),
-    /// Part of an audio channel's file, played at its original speed.
+    /// Part of an audio channel's file, with per-clip audio edits.
     Audio(ChannelId),
 }
 
@@ -203,6 +203,33 @@ pub struct Clip {
     /// Offset into the source, for clips trimmed at the start.
     pub offset: Ticks,
     pub source: ClipSource,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub audio: AudioEdit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioEdit {
+    /// Duration multiplier, independent of pitch.
+    pub stretch: f64,
+    pub semitones: f32,
+    pub reverse: bool,
+}
+
+impl Default for AudioEdit {
+    fn default() -> Self {
+        Self { stretch: 1.0, semitones: 0.0, reverse: false }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Send {
+    pub to: InsertId,
+    pub level: f32,
+    /// A detector input, not audible audio at the destination.
+    pub sidechain: bool,
 }
 
 impl Clip {
@@ -238,6 +265,8 @@ pub struct Insert {
     /// Insert this one sends its output to. Ignored on the master.
     #[serde(default = "master")]
     pub output: InsertId,
+    #[serde(default)]
+    pub sends: Vec<Send>,
 }
 
 pub const MASTER: InsertId = InsertId(0);
@@ -262,23 +291,43 @@ impl Mixer {
         Some(if self.insert(output).is_some() { output } else { MASTER })
     }
 
-    /// Whether `from`'s signal reaches `to` through insert outputs.
+    /// Whether `from`'s signal reaches `to` through insert outputs and sends.
     pub fn feeds(&self, from: InsertId, to: InsertId) -> bool {
-        let mut at = from;
-        for _ in 0..self.inserts.len() {
-            match self.output(at) {
-                Some(next) if next == to => return true,
-                Some(next) => at = next,
-                None => return false,
+        let mut pending = vec![from];
+        let mut visited = Vec::new();
+        while let Some(at) = pending.pop() {
+            if visited.contains(&at) { continue; }
+            visited.push(at);
+            let Some(insert) = self.insert(at) else { continue };
+            if let Some(output) = self.output(at) {
+                if output == to { return true; }
+                pending.push(output);
+            }
+            for send in &insert.sends {
+                if send.to == to { return true; }
+                pending.push(send.to);
             }
         }
         false
     }
 
+    pub fn set_send(&mut self, from: InsertId, send: Send) -> bool {
+        if !send.level.is_finite() || !(0.0..=2.0).contains(&send.level) || !self.can_route(from, send.to) {
+            return false;
+        }
+        let Some(insert) = self.insert_mut(from) else { return false };
+        if let Some(existing) = insert.sends.iter_mut().find(|s| s.to == send.to) {
+            *existing = send;
+        } else {
+            insert.sends.push(send);
+        }
+        true
+    }
+
     /// Whether `from` may send to `to`: not itself, not the master's output,
     /// and not anything that already feeds `from`, which would loop.
     pub fn can_route(&self, from: InsertId, to: InsertId) -> bool {
-        from != MASTER && from != to && self.insert(to).is_some() && !self.feeds(to, from)
+        from != MASTER && from != to && self.insert(from).is_some() && self.insert(to).is_some() && !self.feeds(to, from)
     }
 
     /// Route an insert's output. Returns false when the route would loop.
@@ -419,6 +468,41 @@ impl Project {
         end.div_ceil(bar).max(1) * bar
     }
 
+    pub fn clone_pattern(&mut self, id: PatternId) -> Option<PatternId> {
+        let mut pattern = self.pattern(id)?.clone();
+        pattern.id = PatternId(self.next_id());
+        pattern.name = format!("{} copy", pattern.name);
+        let id = pattern.id;
+        self.patterns.push(pattern);
+        Some(id)
+    }
+
+    /// Clone a clip's source while keeping its placement and trims.
+    pub fn make_unique(&mut self, id: ClipId) -> Option<ClipSource> {
+        let source = self.playlist.clips.iter().find(|c| c.id == id)?.source;
+        let source = match source {
+            ClipSource::Pattern(pattern) => ClipSource::Pattern(self.clone_pattern(pattern)?),
+            ClipSource::Automation(id) => {
+                let mut clip = self.automation_clip(id)?.clone();
+                clip.id = AutomationId(self.next_id());
+                clip.name = format!("{} copy", clip.name);
+                let id = clip.id;
+                self.automation.push(clip);
+                ClipSource::Automation(id)
+            }
+            ClipSource::Audio(id) => {
+                let mut channel = self.channel(id)?.clone();
+                channel.id = ChannelId(self.next_id());
+                channel.name = format!("{} copy", channel.name);
+                let id = channel.id;
+                self.channels.push(channel);
+                ClipSource::Audio(id)
+            }
+        };
+        self.playlist.clips.iter_mut().find(|c| c.id == id)?.source = source;
+        Some(source)
+    }
+
     pub fn add_plugin(&mut self, plugin: PluginRef) -> InstanceId {
         let id = InstanceId(self.next_id());
         self.plugins.push(PluginInstance { id, plugin, state: Vec::new() });
@@ -441,7 +525,7 @@ impl Project {
             ClipSource::Audio(_) => None,
         }
         .unwrap_or(self.signature.ticks_per_bar());
-        self.playlist.clips.push(Clip { id, track, start, length, offset: 0, source });
+        self.playlist.clips.push(Clip { id, track, start, length, offset: 0, source, muted: false, audio: AudioEdit::default() });
         id
     }
 
@@ -611,6 +695,7 @@ impl Project {
             self.remove_automation(automation);
         }
         self.mixer.inserts.retain(|i| i.id != id);
+        for insert in &mut self.mixer.inserts { insert.sends.retain(|s| s.to != id); }
     }
 
     /// Remove a playlist track and its clips; later tracks move up. The
@@ -642,7 +727,7 @@ impl Project {
 
 impl Insert {
     pub fn new(id: InsertId, name: &str) -> Self {
-        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new(), output: MASTER }
+        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new(), output: MASTER, sends: Vec::new() }
     }
 }
 
@@ -850,5 +935,83 @@ mod tests {
         assert!(!mixer.set_output(MASTER, a));
         project.remove_insert(b);
         assert_eq!(project.mixer.output(a), Some(c));
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+
+    #[test]
+    fn making_a_clip_unique_keeps_other_instances_and_placement() {
+        let mut project = Project::new();
+        let pattern = project.patterns[0].id;
+        let channel = project.channels[0].id;
+        project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+        let first = project.add_clip(0, 960, ClipSource::Pattern(pattern));
+        project.add_clip(1, 3840, ClipSource::Pattern(pattern));
+        project.playlist.clips[0].offset = 240;
+        project.playlist.clips[0].length = 480;
+        let ClipSource::Pattern(copy) = project.make_unique(first).unwrap() else { panic!("pattern") };
+        project.pattern_mut(copy).unwrap().notes_mut(channel)[0].key = 70;
+        assert_eq!(project.pattern(pattern).unwrap().notes(channel)[0].key, 60);
+        let clip = &project.playlist.clips[0];
+        assert_eq!((clip.start, clip.length, clip.offset, clip.track), (960, 480, 240, 0));
+        assert_eq!(project.playlist.clips[1].source, ClipSource::Pattern(pattern));
+        assert_eq!(Project::from_ron(&project.to_ron().unwrap()).unwrap(), project);
+    }
+
+    #[test]
+    fn sends_and_outputs_share_feedback_validation_and_delete_cleanup() {
+        let mut project = Project::new();
+        let [a, b, c] = [1, 2, 3].map(|i| project.mixer.inserts[i].id);
+        assert!(project.mixer.set_send(a, Send { to: b, level: 0.5, sidechain: false }));
+        assert!(project.mixer.set_send(b, Send { to: c, level: 1.0, sidechain: true }));
+        assert!(!project.mixer.set_output(c, a));
+        assert!(!project.mixer.set_send(c, Send { to: a, level: 1.0, sidechain: false }));
+        assert!(!project.mixer.set_send(a, Send { to: c, level: f32::NAN, sidechain: false }));
+        project.remove_insert(b);
+        assert!(project.mixer.insert(a).unwrap().sends.is_empty());
+        assert!(project.mixer.can_route(c, a));
+    }
+
+    #[test]
+    fn unique_audio_and_automation_keep_independent_settings() {
+        let mut project = Project::new();
+        let channel = project.add_channel("audio", Source::Audio { path: "take.wav".into() });
+        let audio = project.add_clip(0, 120, ClipSource::Audio(channel));
+        project.add_clip(1, 960, ClipSource::Audio(channel));
+        project.playlist.clips[0].audio = AudioEdit { stretch: 2.0, semitones: 7.0, reverse: true };
+        let ClipSource::Audio(copy) = project.make_unique(audio).unwrap() else { panic!("audio") };
+        project.channel_mut(copy).unwrap().volume = 0.25;
+        assert_ne!(project.channel(channel).unwrap().volume, 0.25);
+        assert_eq!(project.channel(copy).unwrap().source, project.channel(channel).unwrap().source);
+        assert_eq!(project.playlist.clips[0].audio.stretch, 2.0);
+        assert_eq!(project.playlist.clips[1].source, ClipSource::Audio(channel));
+
+        let envelope = project.add_automation("gain", Target::ChannelVolume(channel), 0.5);
+        let first = project.add_clip(2, 0, ClipSource::Automation(envelope));
+        project.add_clip(3, 960, ClipSource::Automation(envelope));
+        let ClipSource::Automation(copy) = project.make_unique(first).unwrap() else { panic!("automation") };
+        project.automation_clip_mut(copy).unwrap().envelope.points[0].value = 0.9;
+        assert_eq!(project.automation_clip(envelope).unwrap().envelope.points[0].value, 0.5);
+        assert_eq!(project.playlist.clips[3].source, ClipSource::Automation(envelope));
+    }
+
+    #[test]
+    fn projects_without_audio_edits_or_sends_keep_original_defaults() {
+        let mut project = Project::new();
+        project.add_clip(0, 0, ClipSource::Pattern(project.patterns[0].id));
+        let text = project.to_ron().unwrap();
+        let mut skipping_audio = false;
+        let legacy: String = text.lines().filter(|line| {
+            if line.trim() == "audio: (" { skipping_audio = true; return false; }
+            if skipping_audio {
+                if line.trim() == ")," { skipping_audio = false; }
+                return false;
+            }
+            !line.trim_start().starts_with("muted:") && !line.trim_start().starts_with("sends:")
+        }).map(|line| format!("{line}\n")).collect();
+        assert_eq!(Project::from_ron(&legacy).unwrap(), project);
     }
 }

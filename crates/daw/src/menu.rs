@@ -126,7 +126,8 @@ fn entries(item: Item) -> Vec<(&'static str, AppMessage)> {
         ],
         Item::Track(_) => vec![("delete", playlist::Message::DeleteTrack.into())],
         Item::Insert(id) if id != daw_model::MASTER => vec![("delete", mixer::Message::DeleteInsert.into())],
-        Item::Insert(_) | Item::Pattern(_) | Item::Automation(_) => Vec::new(),
+        Item::Pattern(id) => vec![("clone pattern", AppMessage::ClonePattern(id))],
+        Item::Insert(_) | Item::Automation(_) => Vec::new(),
     }
 }
 

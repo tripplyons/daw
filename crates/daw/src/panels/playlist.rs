@@ -12,11 +12,11 @@ use daw_model::time::{Grid, TICKS_PER_BEAT, Ticks, seconds_to_ticks};
 use daw_model::{Clip, ClipId, ClipSource, Source};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
-use iced::widget::row;
+use iced::widget::{column, row, slider};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use super::timeline::{self, Clicks, RULER_HEIGHT, TimeView, Wheel};
-use super::{label, pick};
+use super::{label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage};
 use crate::keys::Action;
 use crate::menu;
@@ -43,6 +43,7 @@ pub struct State {
     /// The edge being dragged, or `None` when moving clips.
     resizing: Option<Edge>,
     clipboard: Vec<Clip>,
+    pub stretch_mode: bool,
 }
 
 /// A clip edge. Dragging the start trims the clip's beginning and keeps its
@@ -65,12 +66,20 @@ impl Default for State {
             originals: Vec::new(),
             resizing: None,
             clipboard: Vec::new(),
+            stretch_mode: false,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    MakeUnique,
+    Consolidate,
+    Reverse,
+    AudioPitch(f32),
+    AudioStretch(f64),
+    StretchMode,
+    MuteSelection,
     View(TimeView),
     ScrollTracks(i32),
     /// Alt+scroll: track height, keeping the track under `y` in place.
@@ -145,6 +154,54 @@ fn grow_tracks(app: &mut App, needed: usize) {
 
 pub fn update(app: &mut App, message: Message) {
     match message {
+        Message::MakeUnique => {
+            let selected = app.playlist.selected.clone();
+            if selected.is_empty() { app.set_status("select clips to make unique"); return; }
+            app.checkpoint();
+            for id in selected {
+                if let Some(source) = app.project.make_unique(id) {
+                    app.playlist.brush = Some(source);
+                    if let ClipSource::Pattern(id) = source { app.selected_pattern = id; }
+                }
+            }
+            app.edited();
+            app.set_status("selected clips now have independent sources");
+        }
+        Message::Consolidate => {
+            if let Err(error) = app.consolidate_selection() { app.set_status(format!("consolidation failed: {error}")); }
+        }
+        Message::StretchMode => app.playlist.stretch_mode = !app.playlist.stretch_mode,
+        Message::MuteSelection => {
+            if app.playlist.selected.is_empty() { return; }
+            app.checkpoint();
+            for clip in &mut app.project.playlist.clips {
+                if app.playlist.selected.contains(&clip.id) { clip.muted = !clip.muted; }
+            }
+            app.edited();
+        }
+        Message::Reverse | Message::AudioPitch(_) | Message::AudioStretch(_) => {
+            if let Message::AudioPitch(value) = message
+                && (!value.is_finite() || !(-48.0..=48.0).contains(&value)) { return; }
+            if let Message::AudioStretch(value) = message
+                && (!value.is_finite() || !(0.125..=8.0).contains(&value)) { return; }
+            app.begin_edit();
+            for clip in &mut app.project.playlist.clips {
+                if !app.playlist.selected.contains(&clip.id) || !matches!(clip.source, ClipSource::Audio(_)) { continue; }
+                match message {
+                    Message::Reverse => clip.audio.reverse = !clip.audio.reverse,
+                    Message::AudioPitch(value) => clip.audio.semitones = value,
+                    Message::AudioStretch(value) => {
+                        let ratio = value / clip.audio.stretch;
+                        clip.length = (clip.length as f64 * ratio).round().max(1.0) as Ticks;
+                        clip.offset = (clip.offset as f64 * ratio).round() as Ticks;
+                        clip.audio.stretch = value;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            app.edited();
+            if !matches!(message, Message::AudioPitch(_)) { let _ = app.update(AppMessage::EndEdit); }
+        }
         Message::View(view) => app.playlist.time = view,
         Message::ZoomTracks { steps, y } => {
             let count = app.project.playlist.tracks.len().max(1);
@@ -203,10 +260,25 @@ pub fn update(app: &mut App, message: Message) {
             for original in originals {
                 // Audio clips end where their file does.
                 let file_end = match original.source {
-                    ClipSource::Audio(channel) => app.audio_length(channel),
+                    ClipSource::Audio(channel) => app.audio_length(channel).map(|end| (end as f64 * original.audio.stretch).round() as Ticks),
                     _ => None,
                 };
                 let Some(clip) = app.project.playlist.clips.iter_mut().find(|c| c.id == original.id) else { continue };
+                if app.playlist.stretch_mode && matches!(original.source, ClipSource::Audio(_)) && resizing.is_some() {
+                    let length = match resizing {
+                        Some(Edge::End) => (original.length as i64 + delta).max(min_length as i64) as Ticks,
+                        _ => (original.length as i64 - delta.clamp(-(original.start as i64), original.length as i64 - 1)).max(min_length as i64) as Ticks,
+                    };
+                    let ratio = length as f64 / original.length.max(1) as f64;
+                    let stretch = original.audio.stretch * ratio;
+                    if (0.125..=8.0).contains(&stretch) {
+                        clip.audio.stretch = stretch;
+                        clip.offset = (original.offset as f64 * ratio).round() as Ticks;
+                        clip.length = length;
+                        if resizing == Some(Edge::Start) { clip.start = original.end().saturating_sub(length); }
+                    }
+                    continue;
+                }
                 match resizing {
                     Some(Edge::End) => {
                         let length = (original.length as i64 + delta).max(min_length as i64) as Ticks;
@@ -253,6 +325,8 @@ pub fn update(app: &mut App, message: Message) {
             if let Some(right) = app.project.playlist.clips.iter_mut().find(|c| c.id == new) {
                 right.length = clip.end() - at;
                 right.offset = clip.offset + (at - clip.start);
+                right.audio = clip.audio;
+                right.muted = clip.muted;
             }
             app.playlist.selected = vec![new];
             app.edited();
@@ -371,6 +445,9 @@ pub fn delete_selected(app: &mut App) -> bool {
 
 pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
     match key {
+        Key::Character(c) if modifiers.command() && c.as_str() == "u" => update(app, Message::MakeUnique),
+        Key::Character(c) if modifiers.command() && modifiers.alt() && c.as_str() == "c" => update(app, Message::Consolidate),
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "m" => update(app, Message::MuteSelection),
         Key::Character(c) if modifiers.command() && c.as_str() == "a" => {
             app.playlist.selected = app.project.playlist.clips.iter().map(|c| c.id).collect();
         }
@@ -400,6 +477,8 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
                 if let Some(new) = app.project.playlist.clips.iter_mut().find(|c| c.id == id) {
                     new.length = clip.length;
                     new.offset = clip.offset;
+                    new.audio = clip.audio;
+                    new.muted = clip.muted;
                 }
                 added.push(id);
             }
@@ -432,6 +511,9 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
         None => label(""),
     };
     row![
+        tool("unique", Message::MakeUnique.into()),
+        tool("consolidate", Message::Consolidate.into()),
+        toggle("stretch", app.playlist.stretch_mode, Message::StretchMode.into()),
         super::tool("+ track", Message::AddTrack.into()),
         delete,
         super::tool("+ audio", AppMessage::Action(Action::ImportAudio)),
@@ -446,7 +528,21 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 }
 
 pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
-    Canvas::new(Arrangement { app }).width(Length::Fill).height(Length::Fill).into()
+    let canvas = Canvas::new(Arrangement { app }).width(Length::Fill).height(Length::Fill);
+    let selected = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_)));
+    let Some(clip) = selected else { return canvas.into() };
+    let pitch = row![
+        label("audio pitch"), slider(-48.0..=48.0, clip.audio.semitones, |p| Message::AudioPitch(p).into())
+            .step(1.0_f32).on_release(AppMessage::EndEdit).width(120).style(theme::fader),
+        label(format!("{} st", clip.audio.semitones)),
+    ].spacing(6).align_y(iced::Alignment::Center);
+    let options = row![
+        label("duration"), pick(vec![0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0], Some(clip.audio.stretch), |s| Message::AudioStretch(s).into()),
+        toggle("reverse", clip.audio.reverse, Message::Reverse.into()),
+        tool("mute clips", Message::MuteSelection.into()),
+    ].spacing(6).align_y(iced::Alignment::Center);
+    let controls = column![pitch, options].spacing(4).padding(4);
+    column![canvas, super::scroll(controls, false, true).width(Length::Fill).height(58)].into()
 }
 
 struct Arrangement<'a> {
@@ -514,7 +610,9 @@ impl Arrangement<'_> {
     fn draw_clip(&self, frame: &mut Frame<Renderer>, clip: &Clip, selected: bool) {
         let app = self.app;
         let r = self.clip_rect(clip);
-        let (background, content, text) = if selected {
+        let (background, content, text) = if clip.muted {
+            (if selected { theme::CONTROL_HOVER } else { theme::BG }, theme::FILL_DIM, theme::TEXT_DIM)
+        } else if selected {
             (theme::SELECTED, theme::FILL_DIM, theme::BG)
         } else {
             (theme::CONTROL_ACTIVE, theme::FILL, theme::TEXT)
@@ -584,7 +682,7 @@ impl Arrangement<'_> {
             }
             ClipSource::Audio(channel) => {
                 let Some(Source::Audio { path }) = app.project.channel(channel).map(|c| &c.source) else { return };
-                let Some((sample, peaks)) = app.session.waveform(path) else { return };
+                let Some((sample, peaks)) = app.session.waveform(&daw_engine::audio::cache_key(path, clip.audio)) else { return };
                 let frames_per_tick = sample.sample_rate * 60.0 / (app.project.bpm * f64::from(TICKS_PER_BEAT));
                 let frame_at = |x: f32| (view.tick(x - HEADER_WIDTH) - clip.start as f64 + clip.offset as f64) * frames_per_tick;
                 let level = |from: usize, to: usize| {
@@ -595,6 +693,7 @@ impl Arrangement<'_> {
             }
         }
         let name = source_name(app, clip.source);
+        let name = if clip.muted { format!("[muted] {name}") } else { name };
         let visible_x = body.x.max(HEADER_WIDTH);
         let name = timeline::fit(&name, body.x + body.width - visible_x - 4.0);
         timeline::label(frame, name, Point::new(visible_x + 3.0, body.y), text);

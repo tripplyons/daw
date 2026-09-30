@@ -11,7 +11,7 @@ It runs on macOS and Linux. Audio Units are macOS only. On Linux, plugin editor 
 - Linux: the ALSA, X11, xkbcommon, and Wayland development packages. On Debian or Ubuntu:
 
 ```sh
-sudo apt-get install build-essential pkg-config libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev
+sudo apt-get install build-essential pkg-config libclang-dev libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev
 ```
 
 On Linux, audio goes through ALSA, which PipeWire and PulseAudio also accept. File dialogs use the XDG desktop portal, or `zenity` when no portal is running. Without an output device the app still edits projects and exports WAV files.
@@ -55,10 +55,30 @@ Click a plugin in the browser panel to use it: an instrument gets a new channel 
 Audio clips play part of a WAV file at its own speed, without following tempo changes. Each file gets an audio channel in the channel rack, which sets its volume, pan, and mixer insert; double-click an audio clip to select its channel.
 
 - Import: press Cmd+I, click "+ audio" in the playlist toolbar, or drop WAV files on the window. The clip starts at the song start marker on the first free track.
-- Record: press Alt+Shift+R or click "rec audio" to arm the default input device, then play in song mode. Each stretch of playback becomes a take, saved as `recordings/take N.wav` next to the project, or in the app's data folder for an unsaved project, and placed on the first free track. Input latency is compensated. Click "rec audio" again to disarm. The app asks for microphone access the first time.
+- Record: press Alt+Shift+R or click "rec audio" to arm the default input device, then play in song mode. Each stretch of playback becomes a take, written to the recordings folder and placed on the first free track. Saving the project embeds the take in the project file. Input latency is compensated. Click "rec audio" again to disarm. The app asks for microphone access the first time.
 - Edit: drag a clip's left or right edge to trim it, Alt-click to split it, and Cmd+C, Cmd+V, and Cmd+D to copy, paste, and duplicate it. After an import or a take, the playlist brush is that file, so a click places the whole file again.
 
 A take recorded over a loop keeps going past the loop end as one clip.
+
+Select audio clips to show their pitch, duration, and reverse controls below the playlist. Pitch shifts keep the duration; duration changes keep the pitch. Turn on "stretch" in the playlist toolbar to stretch an audio clip by dragging its edge. With stretch off, edge drags trim the file. These edits stay in the project and leave the source WAV unchanged.
+
+Select pattern or audio clips and click "consolidate", or press Cmd+Alt+C in the playlist, to render the selection to a stereo WAV on a free track. The originals are muted and retained for undo. Insert effects and routing are rendered into the file; master effects and master gain remain live. The render ends at the selection's end, without an effect tail.
+
+## Patterns and unique clips
+
+Right-click the pattern picker and choose "clone pattern" to copy its notes into a new pattern. Select playlist clips and click "unique", or press Cmd+U in the playlist, to give each clip an independent source. Other instances keep their original pattern or automation envelope. Audio clips get independent channel settings and continue sharing the same WAV file. Placement and trims stay intact.
+
+## Mixer sends and sidechains
+
+Select a mixer insert. Its effects panel has an output route, a "send" picker for parallel audio, and a "sidechain" picker for detector-only audio. Each send has a level slider and a remove button. Sends use the source insert's signal after its effects, fader, and pan. Routes that would create feedback are refused.
+
+A sidechain feeds the destination plugin's first auxiliary audio input. Use an effect that supports an external sidechain and enable that input in the plugin if needed. The detector signal is separate from the destination's audible input. The source keeps its normal output route.
+
+## Live MIDI
+
+Open settings (Cmd+comma), choose a MIDI input, and select an instrument channel. "Rescan inputs" updates the device list. The choice is saved in the config. MIDI note input plays the selected instrument even while stopped; a note-off returns to the instrument that received its note-on.
+
+Click "rec midi" or press Cmd+Shift+R to arm recording, then play. Pattern mode records into the current pattern. Song mode creates a "MIDI take" pattern and playlist clip at the start marker or loop start, growing the take as needed. Pitch, velocity, start, and duration are recorded. Notes crossing a loop boundary are split; holding a key across several passes fills one loop. Stop or disarm to finish held notes.
 
 ## Renaming
 
@@ -67,6 +87,10 @@ Right-click a channel name, a mixer strip, or a playlist track name to open a me
 ## Files
 
 - Projects are saved as `.dawproj` files. Closing, starting a new project, or opening another one asks to save unsaved changes first.
+- Every save embeds the project data, plugin states, and all referenced audio and sampler WAVs in one `.dawproj` file. Imported audio, recorded takes, and consolidated audio travel with that file. Saves replace the project atomically; a missing audio file fails the save and leaves the previous file intact.
+- Autosave defaults to every two minutes when the project has changed, including during playback. Each snapshot also embeds the referenced WAVs. Settings can change the interval or turn it off. Ten snapshots per project are kept under `~/Library/Application Support/daw/backups` on macOS or `~/.local/share/daw/backups` on Linux. "Recover backup" opens a snapshot as an unsaved project, so Save As keeps the recovery without overwriting the backup. During playback, snapshots use the plugin state from the last saved or stopped snapshot.
+- Project files are ZIP archives with a text project document and an `assets` folder. Opening extracts working copies to the app's cache for playback; the saved file contains the originals. Older text-only `.dawproj` files still open and become self-contained on the next save.
+- "Package project" in settings writes the same contents with a `.dawzip` extension. Both extensions open in the app and work with the CLI. Plugins must still be installed; files managed internally by a third-party plugin are not included.
 - Key bindings are saved to `~/.config/daw/config.json`, or to `$XDG_CONFIG_HOME/daw/config.json` when that variable is an absolute path. Edit them on the settings page (Cmd+comma).
 
 ## Command line
@@ -83,6 +107,8 @@ daw plugins                                # installed plugins from the scan cac
 daw params song.dawproj 42 Cutoff=0.3      # set plugin parameters
 daw export song.dawproj song.wav --range 16bar..24bar --stems stems
 daw analyze song.wav stems/*.wav           # levels and octave bands
+daw pack song.dawproj song.dawzip          # project and referenced audio
+daw unpack song.dawzip relocated-song      # destination must be a new folder
 ```
 
 `daw --help` lists every command.
@@ -120,6 +146,10 @@ Alt is the tiling modifier. Keys match by physical position, so they work on any
 | Alt+A | Bind mode: the next control you touch gets an automation clip |
 | Alt+R | Record automation |
 | Alt+Shift+R | Arm audio recording from the microphone |
+| Cmd+Shift+R | Arm MIDI note recording |
+| Cmd+U in playlist | Make selected clips unique |
+| Cmd+Alt+C in playlist | Consolidate selection to audio |
+| M in playlist | Mute or unmute selected clips |
 | Delete | Delete the selection in the focused panel |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo |
 | Cmd+N / Cmd+O / Cmd+S / Cmd+Shift+S | New / open / save / save as |
@@ -148,6 +178,12 @@ The mixer strips scroll sideways with a plain scroll wheel.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
+```
+
+On macOS, the native sidechain tests use the free kHs Compressor VST3 and Audio Unit plugins. With both installed:
+
+```sh
+cargo test -p daw-plugins --test khs_sidechain -- --ignored --test-threads=1
 ```
 
 The workspace has four crates:

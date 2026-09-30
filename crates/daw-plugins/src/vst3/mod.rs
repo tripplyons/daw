@@ -434,7 +434,7 @@ impl Vst3Processor {
         let output_buses = bus_channels(component, kOutput as i32);
         unsafe {
             for (index, (_, main)) in input_buses.iter().enumerate() {
-                component.activateBus(kAudio as i32, kInput as i32, index as i32, u8::from(*main));
+                component.activateBus(kAudio as i32, kInput as i32, index as i32, u8::from(*main || index == 1));
             }
             for (index, (_, main)) in output_buses.iter().enumerate() {
                 component.activateBus(kAudio as i32, kOutput as i32, index as i32, u8::from(*main));
@@ -498,6 +498,10 @@ impl Vst3Processor {
 
 impl Processor for Vst3Processor {
     fn process(&mut self, transport: &TransportInfo, events: &[EngineEvent], left: &mut [f32], right: &mut [f32]) {
+        self.process_sidechain(transport, events, left, right, (&[], &[]));
+    }
+
+    fn process_sidechain(&mut self, transport: &TransportInfo, events: &[EngineEvent], left: &mut [f32], right: &mut [f32], side: (&[f32], &[f32])) {
         let frames = left.len().min(self.max_block);
         self.fill_context(transport);
         unsafe { self.events.clear() };
@@ -551,8 +555,12 @@ impl Processor for Vst3Processor {
                 buffer[..frames].copy_from_slice(&source[..frames]);
             }
         }
-        for bus in self.inputs.iter_mut().skip(1) {
-            bus.buffers.iter_mut().for_each(|b| b[..frames].fill(0.0));
+        for (index, bus) in self.inputs.iter_mut().enumerate().skip(1) {
+            for (channel, buffer) in bus.buffers.iter_mut().enumerate() {
+                let source = if channel % 2 == 0 { side.0 } else { side.1 };
+                if index == 1 && source.len() >= frames { buffer[..frames].copy_from_slice(&source[..frames]); }
+                else { buffer[..frames].fill(0.0); }
+            }
         }
         for bus in &mut self.outputs {
             bus.buffers.iter_mut().for_each(|b| b[..frames].fill(0.0));

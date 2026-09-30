@@ -85,6 +85,57 @@ impl App {
         Ok(Some(path))
     }
 
+    /// Render only the selected pattern/audio clips through their mixer
+    /// paths. Master processing remains live on the consolidated audio.
+    pub fn consolidate_selection(&mut self) -> Result<(), String> {
+        let selected = self.playlist.selected.clone();
+        let clips: Vec<_> = self.project.playlist.clips.iter()
+            .filter(|c| selected.contains(&c.id) && !c.muted && !matches!(c.source, daw_model::ClipSource::Automation(_))).cloned().collect();
+        let start = clips.iter().map(|c| c.start).min().ok_or("select pattern or audio clips first")?;
+        let end = clips.iter().map(|c| c.end()).max().ok_or("selection has no end")?;
+        self.poll_midi();
+        self.finish_midi();
+        self.stop_audio_recording();
+        self.session.store_states(&mut self.project);
+        let mut render = self.project.clone();
+        render.playlist.loop_range = None;
+        let master_automation: Vec<_> = render.automation.iter().filter(|a| matches!(a.target,
+            daw_model::Target::InsertVolume(daw_model::MASTER) | daw_model::Target::InsertPan(daw_model::MASTER)))
+            .map(|a| a.id).collect();
+        render.playlist.clips.retain(|c| match c.source {
+            daw_model::ClipSource::Automation(id) => !master_automation.contains(&id),
+            _ => selected.contains(&c.id),
+        });
+        let master = render.mixer.insert_mut(daw_model::MASTER).ok_or("missing master insert")?;
+        master.effects.clear();
+        master.volume = 1.0;
+        master.pan = 0.0;
+        master.mute = false;
+        let folder = recordings_dir(self.path.as_deref());
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let path = folder.join(format!("consolidated-{}.wav", crate::project_files::stamp()));
+        if let Err(error) = self.session.export(&render, &path, daw_engine::output::BitDepth::Float32, self.mode, Some((start, end)), &[]) {
+            let _ = std::fs::remove_file(&path);
+            self.refresh();
+            return Err(error);
+        }
+        self.checkpoint();
+        for clip in &mut self.project.playlist.clips {
+            if clips.iter().any(|c| c.id == clip.id) { clip.muted = true; }
+        }
+        let channel = self.add_audio(&path, start, end - start);
+        let audio = self.project.channel_mut(channel).expect("new channel");
+        audio.volume = 1.0;
+        audio.pan = 0.0;
+        audio.insert = daw_model::MASTER;
+        self.playlist.selected = self.project.playlist.clips.iter().filter(|c| c.source == daw_model::ClipSource::Audio(channel)).map(|c| c.id).collect();
+        self.playing = false;
+        self.edited();
+        self.return_to_start();
+        self.set_status(format!("consolidated {} clips", clips.len()));
+        Ok(())
+    }
+
     /// Add a WAV file as an audio channel with one clip of the whole file at `start`.
     pub fn import_audio(&mut self, path: &Path, start: Ticks) -> Result<ChannelId, String> {
         let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -124,7 +175,7 @@ pub fn file_length(path: &str, bpm: f64) -> Result<Ticks, String> {
 
 /// `recordings` next to the project file, or in the app's data folder for
 /// a project that has not been saved.
-fn recordings_dir(project: Option<&Path>) -> PathBuf {
+pub(super) fn recordings_dir(project: Option<&Path>) -> PathBuf {
     match project.and_then(Path::parent) {
         Some(folder) => folder.join("recordings"),
         None => dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("daw").join("recordings"),
