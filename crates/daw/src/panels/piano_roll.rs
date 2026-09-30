@@ -35,6 +35,7 @@ pub struct State {
     /// Length for new notes; follows the last resized note.
     pub length: Ticks,
     originals: Vec<(usize, Note)>,
+    drag_changed: bool,
     resizing: bool,
     clipboard: Vec<Note>,
 }
@@ -48,9 +49,17 @@ impl Default for State {
             selected: Vec::new(),
             length: daw_model::STEP_TICKS,
             originals: Vec::new(),
+            drag_changed: false,
             resizing: false,
             clipboard: Vec::new(),
         }
+    }
+}
+
+impl State {
+    pub fn cancel_drag(&mut self) {
+        self.originals.clear();
+        self.drag_changed = false;
     }
 }
 
@@ -120,6 +129,7 @@ fn sort(app: &mut App) {
 }
 
 fn begin_drag(app: &mut App) {
+    app.piano_roll.cancel_drag();
     let notes = notes(app).to_vec();
     app.piano_roll.originals = app.piano_roll.selected.iter().filter_map(|&i| notes.get(i).map(|n| (i, *n))).collect();
 }
@@ -171,11 +181,11 @@ pub fn update(app: &mut App, message: Message) {
             app.piano_roll.selected = vec![index];
             app.piano_roll.resizing = false;
             begin_drag(app);
+            app.piano_roll.drag_changed = true;
             preview(app, key);
             app.edited();
         }
         Message::Begin { index, resize, additive } => {
-            app.checkpoint();
             let selected = &mut app.piano_roll.selected;
             if additive {
                 if let Some(position) = selected.iter().position(|&i| i == index) {
@@ -200,27 +210,29 @@ pub fn update(app: &mut App, message: Message) {
             let min_length = grid.step(signature).filter(|_| !bypass).unwrap_or(10);
             let originals = app.piano_roll.originals.clone();
             let resizing = app.piano_roll.resizing;
-            let mut new_length = None;
-            let Some(notes) = notes_mut(app) else { return };
+            let mut changed = Vec::new();
             for (index, original) in originals {
-                let Some(note) = notes.get_mut(index) else { continue };
+                let mut note = original;
                 if resizing {
                     note.length = (original.length as i64 + delta).max(min_length as i64) as Ticks;
-                    new_length = Some(note.length);
                 } else {
                     note.start = (original.start as i64 + delta).max(0) as Ticks;
                     note.key = (i32::from(original.key) + keys).clamp(0, 127) as u8;
                 }
+                if notes(app).get(index).is_some_and(|old| *old != note) { changed.push((index, note)); }
             }
-            if let Some(length) = new_length {
-                app.piano_roll.length = length;
+            if changed.is_empty() { return; }
+            if !app.piano_roll.drag_changed { app.checkpoint(); }
+            app.piano_roll.drag_changed = true;
+            if resizing { app.piano_roll.length = changed.last().unwrap().1.length; }
+            if let Some(notes) = notes_mut(app) {
+                for (index, note) in changed { notes[index] = note; }
             }
             app.edited();
         }
         Message::End => {
-            app.piano_roll.originals.clear();
-            sort(app);
-            app.edited();
+            if app.piano_roll.drag_changed { sort(app); app.edited(); }
+            app.piano_roll.cancel_drag();
         }
         Message::Delete(index) => {
             app.checkpoint();
@@ -349,7 +361,6 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
                 Named::ArrowUp => (0.0, octave),
                 _ => (0.0, -octave),
             };
-            app.checkpoint();
             app.piano_roll.resizing = false;
             begin_drag(app);
             update(app, Message::Drag { ticks, keys, bypass: false });

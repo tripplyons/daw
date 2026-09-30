@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use daw_engine::input::{Recorder, Take};
 use daw_engine::output::{self, BitDepth, Stem};
-use daw_engine::song::{PlayMode, channel_node, compile};
+use daw_engine::song::{EngineTarget, PlayMode, channel_node, compile};
 use daw_engine::synth::{PARAM_ATTACK, PARAM_CUTOFF, PARAM_RELEASE, PARAM_WAVEFORM, Sample, Sampler, Synth};
 use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
 use daw_model::time::{Ticks, ticks_to_seconds};
-use daw_model::{InstanceId, Project, Source, SynthParams, Waveform};
+use daw_model::{ChannelId, InsertId, InstanceId, Project, Source, SynthParams, Target, Waveform};
 use daw_plugins::{Controller, ParamInfo, Touch};
 
 /// Frames summarized by each waveform peak.
@@ -39,6 +39,8 @@ pub struct Session {
     peaks: HashMap<String, Vec<f32>>,
     /// Microphone input, while audio recording is armed.
     recorder: Option<Recorder>,
+    #[cfg(test)]
+    pub song_updates: usize,
 }
 
 impl Session {
@@ -72,6 +74,8 @@ impl Session {
             samples: HashMap::new(),
             peaks: HashMap::new(),
             recorder: None,
+            #[cfg(test)]
+            song_updates: 0,
         }
     }
 
@@ -180,9 +184,41 @@ impl Session {
         ];
         for (id, changed, value) in changes {
             if changed {
-                self.send(Command::Param { node: key, id, value });
+                if id == PARAM_CUTOFF {
+                    self.send(Command::Mix { target: EngineTarget::Node { node: key, param: id }, value });
+                } else {
+                    self.send(Command::Param { node: key, id, value });
+                }
             }
         }
+    }
+
+    pub fn set_synth(&mut self, channel: ChannelId, params: SynthParams) {
+        if let Some(BuiltIn::Synth(old)) = self.built_in.get(&channel.0) {
+            self.update_synth(channel.0, *old, params);
+            self.built_in.insert(channel.0, BuiltIn::Synth(params));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_controller(&mut self, instance: InstanceId, controller: Box<dyn Controller>) {
+        self.controllers.insert(instance, controller);
+    }
+
+    pub fn set_mix(&mut self, project: &Project, target: Target, value: f32) {
+        let target = match target {
+            Target::ChannelVolume(id) => project.channels.iter().position(|c| c.id == id).map(EngineTarget::ChannelVolume),
+            Target::InsertVolume(id) => project.mixer.inserts.iter().position(|i| i.id == id).map(EngineTarget::InsertVolume),
+            Target::InsertPan(id) => project.mixer.inserts.iter().position(|i| i.id == id).map(EngineTarget::InsertPan),
+            _ => None,
+        };
+        if let Some(target) = target { self.send(Command::Mix { target, value }); }
+    }
+
+    pub fn set_send_level(&mut self, project: &Project, from: InsertId, to: InsertId, value: f32) {
+        let from = project.mixer.inserts.iter().position(|i| i.id == from);
+        let to = project.mixer.inserts.iter().position(|i| i.id == to);
+        if let (Some(from), Some(to)) = (from, to) { self.send(Command::SendLevel { from, to, value }); }
     }
 
     /// Load a WAV file, or take it from the cache.
@@ -208,6 +244,8 @@ impl Session {
     }
 
     pub fn update_song(&mut self, project: &Project, mode: PlayMode) -> Result<(), String> {
+        #[cfg(test)]
+        { self.song_updates += 1; }
         let prepared = daw_engine::audio::prepare(project, &mut self.samples);
         self.preparation_error = prepared.as_ref().err().cloned();
         self.peaks.retain(|key, _| self.samples.contains_key(key));

@@ -89,11 +89,13 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.edited();
         }
         Message::Volume(id, volume) => {
+            if app.project.channel(id).is_none_or(|c| c.volume == volume) { return Task::none(); }
             app.begin_edit();
             if let Some(channel) = app.project.channel_mut(id) {
                 channel.volume = volume;
             }
-            app.edited();
+            app.session.set_mix(&app.project, Target::ChannelVolume(id), volume);
+            app.mark_edited();
             app.touched(Target::ChannelVolume(id), volume);
         }
         Message::Route(id, insert) => {

@@ -67,9 +67,11 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
         Message::SendLevel(from, to, level) => {
             if !level.is_finite() || !(0.0..=2.0).contains(&level) { return Task::none(); }
+            if app.project.mixer.insert(from).and_then(|i| i.sends.iter().find(|s| s.to == to)).is_none_or(|s| s.level == level) { return Task::none(); }
             app.begin_edit();
             if let Some(send) = app.project.mixer.insert_mut(from).and_then(|i| i.sends.iter_mut().find(|s| s.to == to)) { send.level = level; }
-            app.edited();
+            app.session.set_send_level(&app.project, from, to, level);
+            app.mark_edited();
         }
         Message::RemoveSend(from, to) => {
             app.checkpoint();
@@ -78,19 +80,23 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
         Message::Select(id) => app.selected_insert = id,
         Message::Volume(id, volume) => {
+            if app.project.mixer.insert(id).is_none_or(|i| i.volume == volume) { return Task::none(); }
             app.begin_edit();
             if let Some(insert) = app.project.mixer.insert_mut(id) {
                 insert.volume = volume;
             }
-            app.edited();
+            app.session.set_mix(&app.project, Target::InsertVolume(id), volume / 2.0);
+            app.mark_edited();
             app.touched(Target::InsertVolume(id), volume / 2.0);
         }
         Message::Pan(id, pan) => {
+            if app.project.mixer.insert(id).is_none_or(|i| i.pan == pan) { return Task::none(); }
             app.begin_edit();
             if let Some(insert) = app.project.mixer.insert_mut(id) {
                 insert.pan = pan;
             }
-            app.edited();
+            app.session.set_mix(&app.project, Target::InsertPan(id), (pan + 1.0) / 2.0);
+            app.mark_edited();
             app.touched(Target::InsertPan(id), (pan + 1.0) / 2.0);
         }
         Message::Mute(id) => {

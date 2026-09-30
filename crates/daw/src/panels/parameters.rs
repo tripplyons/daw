@@ -38,6 +38,7 @@ pub fn update(app: &mut App, message: Message) {
             app.touched(Target::Plugin { instance, param }, value);
         }
         Message::Synth(id, params) => {
+            if app.project.channel(id).is_none_or(|c| c.source == Source::Synth(params)) { return; }
             app.begin_edit();
             let mut cutoff = None;
             if let Some(channel) = app.project.channel_mut(id)
@@ -48,7 +49,8 @@ pub fn update(app: &mut App, message: Message) {
                 }
                 *current = params;
             }
-            app.edited();
+            app.session.set_synth(id, params);
+            app.mark_edited();
             if let Some(cutoff) = cutoff {
                 app.touched(Target::SynthCutoff(id), cutoff);
             }

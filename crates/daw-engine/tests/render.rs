@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use daw_engine::song::{PlayMode, compile};
+use daw_engine::song::{EngineTarget, PlayMode, compile};
 use daw_engine::{Command, Engine, EngineHandle, Event, EventKind, Node, Processor, TransportInfo, create};
 use daw_model::automation::{Envelope, Point};
 use daw_model::time::TICKS_PER_BEAT;
@@ -104,6 +104,53 @@ fn onsets(signal: &[f32]) -> Vec<usize> {
 }
 
 const FRAMES_PER_BEAT: usize = 24_000;
+
+#[test]
+fn live_gains_pan_and_sends_change_audio_without_allocating() {
+    let mut project = unity_project();
+    let insert = project.mixer.inserts[1].id;
+    project.channels[0].insert = insert;
+    project.mixer.set_send(insert, daw_model::Send { to: daw_model::MASTER, level: 1.0, sidechain: false });
+    let (mut engine, mut handle, _) = engine_with_probe(&project, PlayMode::Song, true);
+    assert!(handle.send(Command::Param { node: project.channels[0].id.0, id: 0, value: 1.0 }).is_ok());
+    engine.render_offline(128, |l, r| assert!(l.iter().chain(r).all(|s| (*s - 2.0).abs() < 1e-6)));
+    let commands = [
+        Command::SendLevel { from: 1, to: 0, value: 0.0 },
+        Command::Mix { target: EngineTarget::ChannelVolume(0), value: 0.5 },
+        Command::Mix { target: EngineTarget::InsertVolume(1), value: 0.25 },
+        Command::Mix { target: EngineTarget::InsertVolume(0), value: 0.25 },
+        Command::Mix { target: EngineTarget::InsertPan(1), value: 1.0 },
+    ];
+    for command in commands { assert!(handle.send(command).is_ok()); }
+    let (mut left, mut right) = ([0.0; 128], [0.0; 128]);
+    COUNT.with(|c| c.set(0));
+    COUNTING.with(|c| c.set(true));
+    engine.render(&mut left, &mut right);
+    COUNTING.with(|c| c.set(false));
+    assert_eq!(COUNT.with(Cell::get), 0);
+    assert!(left.iter().all(|s| *s == 0.0));
+    assert!(right.iter().all(|s| (*s - 0.125).abs() < 1e-6));
+}
+
+#[test]
+fn live_mix_updates_resume_flat_automation() {
+    for synth in [false, true] {
+        let mut project = unity_project();
+        let node = project.channels[0].id.0;
+        let (target, live, expected) = if synth {
+            (Target::SynthCutoff(project.channels[0].id), EngineTarget::Node { node, param: 0 }, 0.5)
+        } else {
+            (Target::InsertVolume(daw_model::MASTER), EngineTarget::InsertVolume(0), 1.0)
+        };
+        let automation = project.add_automation("flat", target, 0.5);
+        project.add_clip(0, 0, ClipSource::Automation(automation));
+        let (mut engine, mut handle, _) = engine_with_probe(&project, PlayMode::Song, true);
+        assert!(handle.send(Command::Param { node, id: 0, value: 1.0 }).is_ok());
+        engine.render_offline(128, |l, _| assert!(l.iter().all(|s| (*s - expected).abs() < 1e-6)));
+        assert!(handle.send(Command::Mix { target: live, value: 0.0 }).is_ok());
+        engine.render_offline(128, |l, _| assert!(l.iter().all(|s| (*s - expected).abs() < 1e-6)));
+    }
+}
 
 #[test]
 fn notes_land_on_expected_frames() {

@@ -24,6 +24,7 @@ use crate::session::Session;
 use crate::theme;
 
 pub mod audio;
+mod saving;
 
 /// Project given on the command line, set by `main` before the app starts.
 pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
@@ -45,8 +46,9 @@ pub enum Message {
     SetPanel(TileId, Panel),
     Action(Action),
     SetBpm(String),
-    /// Enter in the bpm field, or a click elsewhere: drop unfinished text.
+    /// Enter in the bpm field, or leaving it: apply the finished tempo.
     BpmDone,
+    BpmFocused(bool),
     SelectPattern(PatternId),
     NewPattern,
     ClonePattern(PatternId),
@@ -168,13 +170,13 @@ pub struct App {
     /// Problem reading the config file, shown in settings.
     pub config_error: Option<String>,
     screenshot: Option<PathBuf>,
-    /// Text in the bpm field while it is being typed; valid values apply as
-    /// they are typed.
+    /// Text in the bpm field until the user commits it.
     bpm_text: Option<String>,
     /// Cmd+Q has been pointed at the window's close request.
     quit_routed: bool,
     /// The unsaved changes prompt is showing, for this next step.
     pending: Option<Pending>,
+    saving: saving::State,
 }
 
 impl App {
@@ -231,6 +233,7 @@ impl App {
             bpm_text: None,
             quit_routed: false,
             pending: None,
+            saving: saving::State::default(),
         };
         app.load_config();
         if let Some(error) = &app.session.audio_error {
@@ -368,7 +371,11 @@ impl App {
             self.mode = PlayMode::Pattern(self.selected_pattern);
         }
         self.piano_roll.selected.clear();
+        self.piano_roll.cancel_drag();
+        self.playlist.cancel_drag();
         self.playlist.pitch_edit = None;
+        self.bpm_text = None;
+        self.editing = false;
         self.playlist.selected.retain(|id| self.project.playlist.clips.iter().any(|c| c.id == *id));
     }
 
@@ -383,9 +390,13 @@ impl App {
 
     /// Mark an edit that already has a checkpoint.
     pub fn edited(&mut self) {
+        self.mark_edited();
+        self.refresh();
+    }
+
+    pub fn mark_edited(&mut self) {
         self.revision += 1;
         self.dirty = true;
-        self.refresh();
     }
 
     pub fn set_status(&mut self, status: impl Into<String>) {
@@ -441,6 +452,7 @@ impl App {
     pub fn touched(&mut self, target: Target, value: f32) {
         // Plugin parameters live in plugin state, which is saved with the project.
         self.dirty = true;
+        if matches!(target, Target::Plugin { .. }) { self.revision += 1; }
         self.last_touched.retain(|(t, _)| *t != target);
         self.last_touched.push_front((target, value));
         self.last_touched.truncate(LAST_TOUCHED);
@@ -507,10 +519,18 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => self.tick(),
+            Message::Tick => {
+                self.tick();
+                let saves = self.poll_saves();
+                if self.bpm_text.is_some() {
+                    return Task::batch([saves, iced::widget::operation::is_focused("tempo").map(Message::BpmFocused)]);
+                }
+                return saves;
+            }
             Message::Key(event, typing) => {
                 if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
                     playlist::update(self, playlist::Message::AudioPitchDone);
+                    self.editing = false;
                 }
                 if self.settings.capturing.is_some() {
                     settings::key(self, &event);
@@ -539,9 +559,6 @@ impl App {
                 }
             }
             Message::MousePressed => {
-                if self.bpm_text.is_some() {
-                    let _ = self.update(Message::BpmDone);
-                }
                 let point = self.cursor;
                 let area = self.tile_area();
                 let hit = self.layout().rects(area).into_iter().find(|(_, r)| {
@@ -563,20 +580,17 @@ impl App {
                 self.layout_mut().focused = tile;
             }
             Message::Action(action) => return self.action(action),
-            Message::SetBpm(value) => {
-                if let Ok(bpm) = value.trim().parse::<f64>()
-                    && (20.0..=400.0).contains(&bpm)
-                    && bpm != self.project.bpm
-                {
-                    self.begin_edit();
+            Message::SetBpm(value) => self.bpm_text = Some(value),
+            Message::BpmFocused(false) => return self.update(Message::BpmDone),
+            Message::BpmFocused(true) => {}
+            Message::BpmDone => {
+                if let Some(value) = self.bpm_text.take()
+                    && let Ok(bpm) = value.trim().parse::<f64>()
+                    && bpm.is_finite() && (20.0..=400.0).contains(&bpm) && bpm != self.project.bpm {
+                    self.checkpoint();
                     self.project.bpm = bpm;
                     self.edited();
                 }
-                self.bpm_text = Some(value);
-            }
-            Message::BpmDone => {
-                self.bpm_text = None;
-                self.editing = false;
             }
             Message::SelectPattern(id) => {
                 if id != self.selected_pattern {
@@ -604,12 +618,8 @@ impl App {
                 return self.update(Message::SelectPattern(id));
             }
             Message::PackPicked(Some(path)) => {
-                self.session.store_states(&mut self.project);
                 let path = if path.extension().is_none() { path.with_extension("dawzip") } else { path };
-                match crate::project_files::pack(&path, &self.project) {
-                    Ok(()) => self.set_status(format!("packaged {}", path.display())),
-                    Err(error) => self.set_status(format!("package failed: {error}")),
-                }
+                self.pack(path);
             }
             Message::PackPicked(None) => {}
             Message::NewPattern => {
@@ -631,7 +641,10 @@ impl App {
                     return scan_task();
                 }
             }
-            Message::EndEdit => self.editing = false,
+            Message::EndEdit => {
+                playlist::update(self, playlist::Message::AudioPitchDone);
+                self.editing = false;
+            }
             Message::Browser(message) => return browser::update(self, message),
             Message::Rack(message) => return channel_rack::update(self, message),
             Message::PianoRoll(message) => piano_roll::update(self, message),
@@ -726,11 +739,15 @@ impl App {
                 return self.save_and_continue();
             }
             Message::SaveChoice(SaveChoice::Discard) => {
+                self.saving.cancel_wait();
                 if let Some(next) = self.pending.take() {
                     return self.proceed(next);
                 }
             }
-            Message::SaveChoice(SaveChoice::Cancel) | Message::SavedAsThenContinue(None) => self.pending = None,
+            Message::SaveChoice(SaveChoice::Cancel) | Message::SavedAsThenContinue(None) => {
+                self.pending = None;
+                self.saving.cancel_wait();
+            }
             Message::SavedAsThenContinue(Some(path)) => {
                 self.path = Some(path);
                 return self.save_and_continue();
@@ -788,16 +805,6 @@ impl App {
         if minutes > 0 && self.dirty && self.revision != self.autosaved_revision
             && self.last_autosave.elapsed() >= Duration::from_secs(minutes.saturating_mul(60)) {
             self.autosave();
-        }
-    }
-
-    pub fn autosave(&mut self) {
-        self.last_autosave = Instant::now();
-        if !self.playing { self.session.store_states(&mut self.project); }
-        let folder = crate::project_files::backups_dir().join(&self.backup_key);
-        match crate::project_files::snapshot(&folder, &self.project) {
-            Ok(_) => self.autosaved_revision = self.revision,
-            Err(error) => self.set_status(format!("autosave failed: {error}")),
         }
     }
 
@@ -1010,9 +1017,14 @@ impl App {
     /// Run `next` now, or first ask to save unsaved changes. Ignored while
     /// the prompt is already showing.
     fn guard(&mut self, next: Pending) -> Task<Message> {
+        let _ = self.update(Message::BpmDone);
         self.poll_midi();
         self.finish_midi();
         if self.pending.is_some() {
+            return Task::none();
+        }
+        if self.saving.wait_for(self.path.as_ref(), self.revision) {
+            self.pending = Some(next);
             return Task::none();
         }
         if !self.dirty {
@@ -1042,6 +1054,7 @@ impl App {
     }
 
     fn new_project(&mut self) {
+        self.saving.new_project();
         self.suspend_midi_input();
         if self.midi.recording { self.toggle_midi_recording(); }
         self.backup_key = crate::project_files::stamp();
@@ -1091,34 +1104,14 @@ impl App {
     /// keep the project open with the error.
     fn save_and_continue(&mut self) -> Task<Message> {
         self.save();
-        let next = self.pending.take();
-        match next {
-            Some(next) if !self.dirty => self.proceed(next),
-            _ => Task::none(),
-        }
-    }
-
-    fn save(&mut self) {
-        let Some(path) = self.path.clone() else { return };
-        self.session.store_states(&mut self.project);
-        if let Some(name) = path.file_stem() {
-            self.project.name = name.to_string_lossy().into_owned();
-        }
-        let result = crate::project_files::save(&path, &self.project);
-        match result {
-            Ok(()) => {
-                self.dirty = false;
-                self.backup_key = crate::project_files::backup_key(&self.project.name, &path);
-                self.set_status(format!("saved {}", path.display()));
-            }
-            Err(error) => self.set_status(format!("save failed: {error}")),
-        }
+        Task::none()
     }
 
     pub fn open(&mut self, path: PathBuf) {
         let loaded = crate::project_files::load(&path);
         match loaded {
             Ok(project) => {
+                self.saving.new_project();
                 self.suspend_midi_input();
                 if self.midi.recording { self.toggle_midi_recording(); }
                 self.backup_key = crate::project_files::backup_key(&project.name, &path);
@@ -1158,7 +1151,7 @@ impl App {
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::MouseMoved(position)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
             // Wheel steps do not emit the slider's release message.
-            iced::Event::Mouse(mouse::Event::WheelScrolled { .. }) => Some(playlist::Message::AudioPitchDone.into()),
+            iced::Event::Mouse(mouse::Event::WheelScrolled { .. }) => Some(Message::EndEdit),
             _ => None,
         });
         // Presses are listened to raw so a click focuses its tile even when a
@@ -1339,6 +1332,7 @@ impl App {
             button(small(mode_label)).on_press(Message::Action(Action::ToggleMode)).style(theme::control).padding([3, 8]),
             text(position).size(theme::TEXT_SIZE).font(iced::Font::MONOSPACE).width(70),
             text_input("bpm", &self.bpm_text.clone().unwrap_or_else(|| format!("{}", self.project.bpm)))
+                .id("tempo")
                 .on_submit(Message::BpmDone)
                 .on_input(Message::SetBpm)
                 .size(theme::SMALL)

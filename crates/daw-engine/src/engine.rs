@@ -73,6 +73,9 @@ pub enum Command {
     Stop,
     Seek(f64),
     Param { node: u64, id: u32, value: f32 },
+    /// A normalized mixer or synth change in the existing playback plan.
+    Mix { target: EngineTarget, value: f32 },
+    SendLevel { from: usize, to: usize, value: f32 },
     /// Live note for previews; velocity 0 is note-off.
     Note { node: u64, key: u8, velocity: f32 },
 }
@@ -357,6 +360,19 @@ impl Engine {
                         self.discard(Garbage::Song(old));
                     }
                 }
+                Command::Mix { target, value } => {
+                    if let Some(mut song) = self.song.take() {
+                        self.apply_target(&mut song, target, value);
+                        for plan in &mut song.automation {
+                            if plan.target == target { plan.last = f32::NAN; }
+                        }
+                        self.song = Some(song);
+                    }
+                }
+                Command::SendLevel { from, to, value } => {
+                    if let Some(send) = self.song.as_mut().and_then(|s| s.inserts.get_mut(from))
+                        .and_then(|i| i.sends.iter_mut().find(|s| s.to == to)) { send.level = value; }
+                }
                 Command::AddNode(node) => {
                     if let Some(index) = self.nodes.iter().position(|n| n.key == node.key) {
                         let old = std::mem::replace(&mut self.nodes[index], node);
@@ -614,42 +630,48 @@ impl Engine {
     fn apply_automation(&mut self) {
         let Some(mut song) = self.song.take() else { return };
         let position = self.position;
-        for plan in &mut song.automation {
+        for index in 0..song.automation.len() {
+            let plan = &mut song.automation[index];
             let Some(value) = plan.value_at(position) else { continue };
             if value == plan.last {
                 continue;
             }
             plan.last = value;
-            match plan.target {
-                EngineTarget::Node { node, param } => {
-                    if let Some(node) = self.node_mut(node) {
-                        node.push(Event { offset: 0, kind: EventKind::Param { id: param, value } });
-                    }
-                }
-                EngineTarget::InsertVolume(i) => {
-                    if let Some(insert) = song.inserts.get_mut(i) {
-                        insert.volume = value * 2.0;
-                    }
-                }
-                EngineTarget::InsertPan(i) => {
-                    if let Some(insert) = song.inserts.get_mut(i) {
-                        insert.pan = value * 2.0 - 1.0;
-                    }
-                }
-                EngineTarget::ChannelVolume(i) => {
-                    if let Some(channel) = song.channels.get_mut(i) {
-                        channel.volume = value;
-                    }
-                }
-                EngineTarget::ChannelPan(i) => {
-                    if let Some(channel) = song.channels.get_mut(i) {
-                        channel.pan = value * 2.0 - 1.0;
-                    }
-                }
-                EngineTarget::Tempo => song.bpm = tempo_from_normalized(value),
-            }
+            let target = plan.target;
+            self.apply_target(&mut song, target, value);
         }
         self.song = Some(song);
+    }
+
+    fn apply_target(&mut self, song: &mut Song, target: EngineTarget, value: f32) {
+        match target {
+            EngineTarget::Node { node, param } => {
+                if let Some(node) = self.node_mut(node) {
+                    node.push(Event { offset: 0, kind: EventKind::Param { id: param, value } });
+                }
+            }
+            EngineTarget::InsertVolume(i) => {
+                if let Some(insert) = song.inserts.get_mut(i) {
+                    insert.volume = value * 2.0;
+                }
+            }
+            EngineTarget::InsertPan(i) => {
+                if let Some(insert) = song.inserts.get_mut(i) {
+                    insert.pan = value * 2.0 - 1.0;
+                }
+            }
+            EngineTarget::ChannelVolume(i) => {
+                if let Some(channel) = song.channels.get_mut(i) {
+                    channel.volume = value;
+                }
+            }
+            EngineTarget::ChannelPan(i) => {
+                if let Some(channel) = song.channels.get_mut(i) {
+                    channel.pan = value * 2.0 - 1.0;
+                }
+            }
+            EngineTarget::Tempo => song.bpm = tempo_from_normalized(value),
+        }
     }
 
     /// Queue note events that start in this block, wrapping at the loop end.

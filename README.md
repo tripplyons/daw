@@ -26,6 +26,8 @@ cargo run --release
 
 The first build takes a few minutes. Debug builds also work (`cargo run`); the workspace compiles dependencies with optimizations so audio keeps up in either mode.
 
+Tempo edits apply when you press Enter or leave the BPM field.
+
 ## Build a .app (macOS)
 
 ```sh
@@ -60,7 +62,7 @@ Audio clips play part of a WAV file at its own speed, without following tempo ch
 
 A take recorded over a loop keeps going past the loop end as one clip.
 
-Select audio clips to show their pitch, duration, and reverse controls below the playlist. Pitch shifts keep the duration; duration changes keep the pitch. Turn on "stretch" in the playlist toolbar to stretch an audio clip by dragging its edge. With stretch off, edge drags trim the file. These edits stay in the project and leave the source WAV unchanged.
+Select audio clips to show their pitch, duration, and reverse controls below the playlist. Pitch shifts keep the duration; duration changes keep the pitch. Turn on "stretch" in the playlist toolbar to stretch an audio clip by dragging its edge. Pitch and stretch drags show a preview and process audio on release. With stretch off, edge drags trim the file. These edits stay in the project and leave the source WAV unchanged.
 
 Select pattern or audio clips and click "consolidate", or press Cmd+Alt+C in the playlist, to render the selection to a stereo WAV on a free track. The originals are muted and retained for undo. Insert effects and routing are rendered into the file; master effects and master gain remain live. The render ends at the selection's end, without an effect tail.
 
@@ -70,7 +72,7 @@ Right-click the pattern picker and choose "clone pattern" to copy its notes into
 
 ## Mixer sends and sidechains
 
-Select a mixer insert. Its effects panel has an output route, a "send" picker for parallel audio, and a "sidechain" picker for detector-only audio. Each send has a level slider and a remove button. Sends use the source insert's signal after its effects, fader, and pan. Routes that would create feedback are refused.
+Select a mixer insert. Its effects panel has an output route, a "send" picker for parallel audio, and a "sidechain" picker for detector-only audio. Each send has a level slider and a remove button. Gain, pan, and send level changes update playback as you drag. Sends use the source insert's signal after its effects, fader, and pan. Routes that would create feedback are refused.
 
 A sidechain feeds the destination plugin's first auxiliary audio input. Use an effect that supports an external sidechain and enable that input in the plugin if needed. The detector signal is separate from the destination's audible input. The source keeps its normal output route.
 
@@ -88,7 +90,8 @@ Right-click a channel name, a mixer strip, or a playlist track name to open a me
 
 - Projects are saved as `.dawproj` files. Closing, starting a new project, or opening another one asks to save unsaved changes first.
 - Every save embeds the project data, plugin states, and all referenced audio and sampler WAVs in one `.dawproj` file. Imported audio, recorded takes, and consolidated audio travel with that file. Saves replace the project atomically; a missing audio file fails the save and leaves the previous file intact.
-- Autosave defaults to every two minutes when the project has changed, including during playback. Each snapshot also embeds the referenced WAVs. Settings can change the interval or turn it off. Ten snapshots per project are kept under `~/Library/Application Support/daw/backups` on macOS or `~/.local/share/daw/backups` on Linux. "Recover backup" opens a snapshot as an unsaved project, so Save As keeps the recovery without overwriting the backup. During playback, snapshots use the plugin state from the last saved or stopped snapshot.
+- Saves, autosaves, and packaging write on a background worker. Closing waits for a requested save to finish. Edits made during a save remain unsaved after it finishes.
+- Autosave defaults to every two minutes when the project has changed, including plugin parameter edits and changes during playback. Each snapshot embeds the referenced WAVs and captures current plugin settings. Settings can change the interval or turn it off. Ten snapshots per project are kept under `~/Library/Application Support/daw/backups` on macOS or `~/.local/share/daw/backups` on Linux. "Recover backup" opens a snapshot as an unsaved project, so Save As keeps the recovery without overwriting the backup.
 - Project files are ZIP archives with a text project document and an `assets` folder. Opening extracts working copies to the app's cache for playback; the saved file contains the originals. Older text-only `.dawproj` files still open and become self-contained on the next save.
 - "Package project" in settings writes the same contents with a `.dawzip` extension. Both extensions open in the app and work with the CLI. Plugins must still be installed; files managed internally by a third-party plugin are not included.
 - Key bindings are saved to `~/.config/daw/config.json`, or to `$XDG_CONFIG_HOME/daw/config.json` when that variable is an absolute path. Edit them on the settings page (Cmd+comma).

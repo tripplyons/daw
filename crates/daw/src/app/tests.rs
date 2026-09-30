@@ -21,6 +21,27 @@ fn app() -> App {
     app
 }
 
+fn wait_saves(app: &mut App) -> usize {
+    let mut count = 0;
+    while let Some(finished) = app.saving.wait() { let _ = app.save_finished(finished); count += 1; }
+    count
+}
+
+struct TestPlugin(f32);
+
+impl daw_plugins::Controller for TestPlugin {
+    fn params(&self) -> Vec<daw_plugins::ParamInfo> { Vec::new() }
+    fn param_value(&self, _: u32) -> f32 { self.0 }
+    fn set_param(&mut self, _: u32, value: f32) { self.0 = value; }
+    fn param_text(&self, _: u32, value: f32) -> String { value.to_string() }
+    fn save_state(&self) -> Result<Vec<u8>, daw_plugins::PluginError> { Ok(self.0.to_le_bytes().to_vec()) }
+    fn has_editor(&self) -> bool { false }
+    fn open_editor(&mut self, _: &str) -> Result<(), daw_plugins::PluginError> { Err(daw_plugins::PluginError::Load("no editor".into())) }
+    fn hide_editor(&mut self) {}
+    fn editor_open(&self) -> bool { false }
+    fn take_touches(&mut self) -> Vec<daw_plugins::Touch> { Vec::new() }
+}
+
 fn press(code: Code, key: Key, modifiers: Modifiers) -> Message {
     Message::Key(
         keyboard::Event::KeyPressed {
@@ -259,19 +280,35 @@ fn piano_roll_command_selects_and_duplicates_notes() {
 }
 
 #[test]
-fn bpm_field_keeps_partial_text_and_applies_valid_tempos() {
+fn bpm_field_applies_only_on_submit_or_focus_loss() {
     let mut app = app();
     let before = app.project.bpm;
-    for text in ["", "9", "95", "95."] {
+    let (revision, undo) = (app.revision, app.undo.len());
+    for text in ["", "2", "25", "250"] {
         let _ = app.update(Message::SetBpm(text.into()));
         assert_eq!(app.bpm_text.as_deref(), Some(text));
+        assert_eq!(app.project.bpm, before);
+        assert_eq!((app.revision, app.undo.len(), app.dirty), (revision, undo, false));
     }
-    assert_eq!(app.project.bpm, 95.0);
+    let _ = app.update(Message::MousePressed);
+    let _ = app.update(Message::BpmFocused(true));
+    assert_eq!(app.project.bpm, before);
+    let _ = app.update(Message::BpmFocused(false));
+    assert_eq!(app.project.bpm, 250.0);
+    assert_eq!(app.undo.len(), undo + 1);
+    let _ = app.update(Message::Action(Action::Undo));
     let _ = app.update(Message::SetBpm("95.5".into()));
     let _ = app.update(Message::BpmDone);
     assert_eq!((app.project.bpm, app.bpm_text.clone()), (95.5, None));
     let _ = app.update(Message::Action(Action::Undo));
     assert_eq!(app.project.bpm, before);
+    let (revision, undo) = (app.revision, app.undo.len());
+    for text in ["", "NaN", "401", "19"] {
+        let _ = app.update(Message::SetBpm(text.into()));
+        let _ = app.update(Message::BpmDone);
+        assert_eq!(app.project.bpm, before);
+        assert_eq!((app.revision, app.undo.len()), (revision, undo));
+    }
 }
 
 #[test]
@@ -386,6 +423,7 @@ fn save_open_and_export() {
 
     let path = dir.join("song.dawproj");
     let _ = app.update(Message::SavedAs(Some(path.clone())));
+    wait_saves(&mut app);
     assert!(!app.dirty);
     let saved = app.project.clone();
 
@@ -576,6 +614,7 @@ fn new_and_open_ask_to_save_unsaved_changes_first() {
     let _ = app.update(Message::NewPattern);
     let _ = app.update(Message::Opened(Some(other.clone())));
     let _ = app.update(Message::SaveChoice(SaveChoice::Save));
+    wait_saves(&mut app);
     assert_eq!(crate::project_files::load(&saved).unwrap().patterns.len(), 2);
     assert_eq!(app.path.as_deref(), Some(other.as_path()));
     assert!(!app.dirty && app.pending.is_none());
@@ -604,6 +643,7 @@ fn closing_prompts_only_with_unsaved_changes_and_saves_before_quitting() {
     app.path = Some(path.clone());
     let _ = app.update(Message::CloseRequested);
     let _ = app.update(Message::SaveChoice(SaveChoice::Save));
+    wait_saves(&mut app);
     assert!(!app.dirty);
     assert_eq!(crate::project_files::load(&path).unwrap().patterns.len(), 2);
 
@@ -612,6 +652,7 @@ fn closing_prompts_only_with_unsaved_changes_and_saves_before_quitting() {
     app.path = Some(dir.join("missing-dir").join("x.dawproj"));
     let _ = app.update(Message::CloseRequested);
     let _ = app.update(Message::SaveChoice(SaveChoice::Save));
+    wait_saves(&mut app);
     assert!(app.dirty && app.pending.is_none());
     assert!(app.status.contains("save failed"), "{}", app.status);
 
@@ -868,6 +909,133 @@ fn audio_pitch_prepares_only_the_released_value_and_undoes_once() {
 }
 
 #[test]
+fn selecting_notes_and_clips_preserves_dirty_state_undo_and_redo() {
+    let mut app = app();
+    let _ = app.update(roll::Message::Add { start: 0, key: 60 }.into());
+    let _ = app.update(roll::Message::End.into());
+    let clip = app.project.add_clip(0, 0, ClipSource::Pattern(app.selected_pattern));
+    let _ = app.update(Message::NewPattern);
+    let _ = app.update(Message::Action(Action::Undo));
+    app.dirty = false;
+    let before = app.project.clone();
+    let (revision, undo, redo, updates) = (app.revision, app.undo.len(), app.redo.len(), app.session.song_updates);
+    for additive in [false, true, true] {
+        let _ = app.update(roll::Message::Begin { index: 0, resize: false, additive }.into());
+        let _ = app.update(roll::Message::Drag { ticks: 1.0, keys: 0, bypass: false }.into());
+        let _ = app.update(roll::Message::End.into());
+        let _ = app.update(list::Message::Begin { id: clip, edge: None, additive }.into());
+        let _ = app.update(list::Message::Drag { ticks: 1.0, tracks: 0, bypass: false }.into());
+        let _ = app.update(list::Message::End.into());
+    }
+    assert_eq!(app.project, before);
+    assert!(!app.dirty);
+    assert_eq!((app.revision, app.undo.len(), app.redo.len(), app.session.song_updates), (revision, undo, redo, updates));
+    let _ = app.update(list::Message::Begin { id: clip, edge: None, additive: false }.into());
+    let _ = app.update(list::Message::Drag { ticks: 960.0, tracks: 0, bypass: false }.into());
+    let _ = app.update(list::Message::Drag { ticks: 0.0, tracks: 0, bypass: false }.into());
+    let _ = app.update(list::Message::End.into());
+    assert_eq!((app.revision, app.undo.len(), app.redo.len()), (revision, undo, redo));
+
+    let _ = app.update(roll::Message::Begin { index: 0, resize: false, additive: false }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 240.0, keys: 1, bypass: true }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 480.0, keys: 2, bypass: true }.into());
+    let _ = app.update(roll::Message::End.into());
+    assert_eq!(app.undo.len(), undo + 1);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.patterns, before.patterns);
+}
+
+#[test]
+fn keyboard_note_nudges_create_one_undo_step_and_skip_clamped_moves() {
+    let mut app = app();
+    focus(&mut app, Panel::PianoRoll);
+    let _ = app.update(roll::Message::Add { start: 0, key: 60 }.into());
+    let _ = app.update(roll::Message::End.into());
+    app.dirty = false;
+    let (undo, revision, updates) = (app.undo.len(), app.revision, app.session.song_updates);
+    let _ = app.update(press(Code::ArrowLeft, Key::Named(keyboard::key::Named::ArrowLeft), Modifiers::empty()));
+    assert!(!app.dirty);
+    assert_eq!((app.undo.len(), app.revision, app.session.song_updates), (undo, revision, updates));
+    let _ = app.update(press(Code::ArrowRight, Key::Named(keyboard::key::Named::ArrowRight), Modifiers::empty()));
+    assert_eq!(app.undo.len(), undo + 1);
+    let _ = app.update(Message::Action(Action::Undo));
+    let channel = app.selected_channel.unwrap();
+    assert_eq!(app.project.pattern(app.selected_pattern).unwrap().notes(channel)[0].start, 0);
+}
+
+#[test]
+fn live_controls_keep_one_undo_step_without_recompiling_the_song() {
+    use crate::panels::{channel_rack as rack, mixer, parameters};
+    let mut app = app();
+    let channel = app.project.channels[0].id;
+    let [from, to] = [1, 2].map(|i| app.project.mixer.inserts[i].id);
+    let _ = app.update(mixer::Message::Send(from, to, false).into());
+    let updates = app.session.song_updates;
+    let undo = app.undo.len();
+    for value in [0.2, 0.4, 0.7] { let _ = app.update(mixer::Message::Volume(from, value).into()); }
+    let _ = app.update(Message::EndEdit);
+    for value in [-0.5, 0.0, 0.5] { let _ = app.update(mixer::Message::Pan(from, value).into()); }
+    let _ = app.update(Message::EndEdit);
+    for value in [0.2, 0.4, 0.7] { let _ = app.update(mixer::Message::SendLevel(from, to, value).into()); }
+    let _ = app.update(Message::EndEdit);
+    for value in [0.2, 0.4, 0.7] { let _ = app.update(rack::Message::Volume(channel, value).into()); }
+    let _ = app.update(Message::EndEdit);
+    let daw_model::Source::Synth(mut synth) = app.project.channel(channel).unwrap().source else { panic!("synth") };
+    for cutoff in [0.2, 0.4, 0.6] {
+        synth.cutoff = cutoff;
+        let _ = app.update(parameters::Message::Synth(channel, synth).into());
+    }
+    let _ = app.update(Message::EndEdit);
+    assert_eq!(app.session.song_updates, updates);
+    assert_eq!(app.undo.len(), undo + 5);
+    assert_eq!(app.project.mixer.insert(from).unwrap().sends[0].level, 0.7);
+    assert_eq!(app.project.channel(channel).unwrap().volume, 0.7);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_ne!(app.project.channel(channel).unwrap().source, daw_model::Source::Synth(synth));
+    assert_eq!(app.project.channel(channel).unwrap().volume, 0.7);
+}
+
+#[test]
+fn audio_stretch_drag_prepares_only_on_release_and_cancels_on_undo() {
+    let dir = std::env::temp_dir().join(format!("daw-stretch-preview-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let wav = dir.join("clip.wav");
+    write_wav(&wav, 48_000);
+    let mut app = app();
+    app.project.bpm = 120.0;
+    app.import_audio(&wav, 0).unwrap();
+    let clip = app.project.playlist.clips[0].clone();
+    let daw_model::Source::Audio { path } = &app.project.channels.last().unwrap().source else { panic!("audio") };
+    let path = path.clone();
+    app.playlist.stretch_mode = true;
+    app.dirty = false;
+    let (revision, undo, updates) = (app.revision, app.undo.len(), app.session.song_updates);
+    let _ = app.update(list::Message::Begin { id: clip.id, edge: Some(list::Edge::End), additive: false }.into());
+    for ticks in [480.0, 960.0, 1920.0] {
+        let _ = app.update(list::Message::Drag { ticks, tracks: 0, bypass: true }.into());
+        assert_eq!(app.project.playlist.clips[0], clip);
+        let preview = &app.playlist.drag_preview[0];
+        assert_eq!(preview.length, clip.length + ticks as u64);
+        assert!(app.session.waveform(&daw_engine::audio::cache_key(&path, preview.audio)).is_none());
+        assert_eq!((app.revision, app.undo.len(), app.session.song_updates), (revision, undo, updates));
+        assert!(!app.dirty);
+    }
+    app.refresh();
+    let _ = app.update(list::Message::End.into());
+    let stretched = &app.project.playlist.clips[0];
+    assert_eq!((stretched.length, stretched.audio.stretch), (3840, 2.0));
+    assert!(app.session.waveform(&daw_engine::audio::cache_key(&path, stretched.audio)).is_some());
+    assert_eq!((app.revision, app.undo.len(), app.session.song_updates), (revision + 1, undo + 1, updates + 2));
+    let _ = app.update(list::Message::Begin { id: clip.id, edge: Some(list::Edge::Start), additive: false }.into());
+    let _ = app.update(list::Message::Drag { ticks: 960.0, tracks: 0, bypass: true }.into());
+    let _ = app.update(Message::Action(Action::Undo));
+    let _ = app.update(list::Message::End.into());
+    assert_eq!(app.project.playlist.clips[0], clip);
+    assert!(app.playlist.drag_preview.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn audio_edits_scale_trim_offsets_and_undo_together() {
     let dir = std::env::temp_dir().join(format!("daw-edits-{}", crate::project_files::stamp()));
     std::fs::create_dir(&dir).unwrap();
@@ -986,6 +1154,177 @@ fn consolidation_bakes_insert_gain_and_leaves_master_processing_live() {
 }
 
 #[test]
+fn plugin_only_edits_trigger_autosave_with_current_state_during_playback() {
+    let mut app = app();
+    app.backup_key = format!("plugin-test-{}", crate::project_files::stamp());
+    let folder = crate::project_files::backups_dir().join(&app.backup_key);
+    let instance = app.project.add_plugin(daw_model::PluginRef {
+        format: daw_model::PluginFormat::Vst3, id: "test".into(), path: String::new(), name: "test".into(), vendor: String::new(),
+    });
+    app.session.test_controller(instance, Box::new(TestPlugin(0.0)));
+    app.playing = true;
+    let revision = app.revision;
+    let _ = app.update(crate::panels::parameters::Message::Set(instance, 0, 0.25).into());
+    assert_eq!(app.revision, revision + 1);
+    app.autosave();
+    assert!(app.saving.autosaving());
+    wait_saves(&mut app);
+    assert_eq!(app.autosaved_revision, revision + 1);
+    assert!(app.dirty);
+    let backup = std::fs::read_dir(&folder).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(crate::project_files::load(&backup).unwrap().plugin(instance).unwrap().state, 0.25_f32.to_le_bytes());
+
+    let _ = app.update(crate::panels::parameters::Message::Set(instance, 0, 0.75).into());
+    app.config.autosave_minutes = 1;
+    app.last_autosave = Instant::now() - Duration::from_secs(61);
+    app.tick();
+    assert!(app.saving.autosaving());
+    assert_eq!(app.autosaved_revision, revision + 1);
+    wait_saves(&mut app);
+    assert_eq!(app.autosaved_revision, revision + 2);
+    let mut backups: Vec<_> = std::fs::read_dir(&folder).unwrap().map(|p| p.unwrap().path()).collect();
+    backups.sort();
+    assert_eq!(backups.len(), 2);
+    assert_eq!(crate::project_files::load(backups.last().unwrap()).unwrap().plugin(instance).unwrap().state, 0.75_f32.to_le_bytes());
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[test]
+fn background_saves_keep_newer_edits_dirty_and_ignore_results_for_replaced_projects() {
+    let dir = std::env::temp_dir().join(format!("daw-save-races-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("song.dawproj");
+    let mut app = app();
+    let _ = app.update(Message::NewPattern);
+    let _ = app.update(Message::SavedAs(Some(path.clone())));
+    assert!(app.dirty);
+    let _ = app.update(Message::NewPattern);
+    wait_saves(&mut app);
+    assert!(app.dirty);
+    assert_eq!(app.project.patterns.len(), 3);
+    assert_eq!(crate::project_files::load(&path).unwrap().patterns.len(), 2);
+    app.save();
+    let _ = app.update(Message::NewPattern);
+    app.save();
+    app.save();
+    assert_eq!(wait_saves(&mut app), 2);
+    assert!(!app.dirty);
+    assert_eq!(crate::project_files::load(&path).unwrap().patterns.len(), 4);
+
+    let _ = app.update(Message::NewPattern);
+    app.save();
+    app.new_project();
+    let current = app.project.clone();
+    wait_saves(&mut app);
+    assert_eq!(app.project, current);
+    assert!(app.path.is_none() && !app.dirty);
+    assert_eq!(crate::project_files::load(&path).unwrap().patterns.len(), 5);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn closing_a_clean_project_waits_for_an_in_progress_save_as() {
+    let dir = std::env::temp_dir().join(format!("daw-clean-save-close-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("clean.dawproj");
+    let mut app = app();
+    let _ = app.update(Message::SavedAs(Some(path.clone())));
+    assert!(!app.dirty);
+    let _ = app.update(Message::CloseRequested);
+    assert_eq!(app.pending, Some(Pending::Close));
+    wait_saves(&mut app);
+    assert!(app.pending.is_none() && !app.dirty);
+    assert_eq!(crate::project_files::load(&path).unwrap().name, "clean");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn older_save_results_do_not_interrupt_a_newer_save_before_close() {
+    for missing_audio in [false, true] {
+        let dir = std::env::temp_dir().join(format!("daw-save-order-{}", crate::project_files::stamp()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("song.dawproj");
+        let mut app = app();
+        app.path = Some(path.clone());
+        let _ = app.update(Message::NewPattern);
+        if missing_audio {
+            app.project.add_channel("missing", daw_model::Source::Audio { path: dir.join("missing.wav").to_string_lossy().into_owned() });
+            app.mark_edited();
+        }
+        app.save();
+        if missing_audio { app.project.channels.pop(); }
+        let _ = app.update(Message::NewPattern);
+        app.save();
+        let _ = app.update(Message::CloseRequested);
+        let first = app.saving.wait().unwrap();
+        let _ = app.save_finished(first);
+        assert_eq!(app.pending, Some(Pending::Close));
+        assert!(app.dirty);
+        assert_eq!(wait_saves(&mut app), 1);
+        assert!(app.pending.is_none() && !app.dirty);
+        assert_eq!(crate::project_files::load(&path).unwrap().patterns.len(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn an_older_save_does_not_dismiss_the_unsaved_changes_prompt() {
+    let dir = std::env::temp_dir().join(format!("daw-save-prompt-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let mut app = app();
+    app.path = Some(dir.join("song.dawproj"));
+    let _ = app.update(Message::NewPattern);
+    app.save();
+    let _ = app.update(Message::NewPattern);
+    let _ = app.update(Message::CloseRequested);
+    wait_saves(&mut app);
+    assert_eq!(app.pending, Some(Pending::Close));
+    assert!(app.dirty);
+    let _ = app.update(Message::SaveChoice(SaveChoice::Cancel));
+    assert!(app.pending.is_none());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn background_packaging_embeds_audio_and_keeps_unsaved_changes() {
+    let dir = std::env::temp_dir().join(format!("daw-background-pack-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let wav = dir.join("clip.wav");
+    write_wav(&wav, 4800);
+    let mut app = app();
+    app.import_audio(&wav, 0).unwrap();
+    let _ = app.update(Message::PackPicked(Some(dir.join("package"))));
+    wait_saves(&mut app);
+    assert!(app.dirty && app.path.is_none());
+    assert!(app.status.contains("packaged"));
+    std::fs::remove_file(&wav).unwrap();
+    let project = crate::project_files::load(&dir.join("package.dawzip")).unwrap();
+    let daw_model::Source::Audio { path } = &project.channels.last().unwrap().source else { panic!("audio") };
+    assert_eq!(daw_engine::synth::Sample::load(path).unwrap().left.len(), 4800);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn newer_edits_while_saving_before_close_keep_the_project_open() {
+    let dir = std::env::temp_dir().join(format!("daw-save-close-race-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("song.dawproj");
+    let mut app = app();
+    app.path = Some(path.clone());
+    let _ = app.update(Message::NewPattern);
+    app.pending = Some(Pending::Close);
+    let _ = app.update(Message::SaveChoice(SaveChoice::Save));
+    assert_eq!(app.pending, Some(Pending::Close));
+    let _ = app.update(Message::NewPattern);
+    wait_saves(&mut app);
+    assert!(app.pending.is_none() && app.dirty);
+    assert_eq!(app.project.patterns.len(), 3);
+    assert_eq!(crate::project_files::load(&path).unwrap().patterns.len(), 2);
+    assert!(app.status.contains("newer changes remain unsaved"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn autosave_preserves_dirty_state_and_recovery_requires_save_as() {
     let dir = std::env::temp_dir().join(format!("daw-backup-audio-{}", crate::project_files::stamp()));
     std::fs::create_dir(&dir).unwrap();
@@ -999,6 +1338,7 @@ fn autosave_preserves_dirty_state_and_recovery_requires_save_as() {
     app.dirty = true;
     app.playing = true;
     app.autosave();
+    wait_saves(&mut app);
     assert!(app.dirty);
     assert_eq!(app.autosaved_revision, app.revision);
     let backup = std::fs::read_dir(&folder).unwrap().next().unwrap().unwrap().path();
@@ -1010,6 +1350,7 @@ fn autosave_preserves_dirty_state_and_recovery_requires_save_as() {
     assert_eq!(app.project.name, "recovered song");
     assert!(app.session.preparation_error.is_none(), "{}", app.status);
     let _ = app.update(Message::SavedAs(Some(dir.join("recovered song.dawproj"))));
+    wait_saves(&mut app);
     assert!(!app.dirty, "{}", app.status);
     std::fs::remove_dir_all(folder).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
@@ -1067,6 +1408,7 @@ fn a_portable_project_renders_identically_after_removing_the_source_folder() {
     app.session.export(&app.project, &before, BitDepth::Float32, app.mode, Some((0, end)), &[]).unwrap();
     let saved = dir.join("song.dawproj");
     let _ = app.update(Message::SavedAs(Some(saved.clone())));
+    wait_saves(&mut app);
     assert!(!app.dirty, "{}", app.status);
     std::fs::remove_dir_all(&source).unwrap();
     let moved = dir.join("relocated");
@@ -1086,6 +1428,7 @@ fn a_portable_project_renders_identically_after_removing_the_source_folder() {
     // Editing and saving the moved project keeps it self-contained.
     let _ = app.update(Message::NewPattern);
     let _ = app.update(Message::Action(Action::Save));
+    wait_saves(&mut app);
     assert!(!app.dirty, "{}", app.status);
     let loaded = crate::project_files::load(&relocated).unwrap();
     assert_eq!(loaded.patterns.len(), 2);

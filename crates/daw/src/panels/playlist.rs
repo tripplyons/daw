@@ -40,6 +40,8 @@ pub struct State {
     /// What a click on empty space places.
     pub brush: Option<ClipSource>,
     originals: Vec<Clip>,
+    pub drag_preview: Vec<Clip>,
+    drag_added: bool,
     /// The edge being dragged, or `None` when moving clips.
     resizing: Option<Edge>,
     clipboard: Vec<Clip>,
@@ -66,11 +68,21 @@ impl Default for State {
             selected_track: None,
             brush: None,
             originals: Vec::new(),
+            drag_preview: Vec::new(),
+            drag_added: false,
             resizing: None,
             clipboard: Vec::new(),
             stretch_mode: false,
             pitch_edit: None,
         }
+    }
+}
+
+impl State {
+    pub fn cancel_drag(&mut self) {
+        self.originals.clear();
+        self.drag_preview.clear();
+        self.drag_added = false;
     }
 }
 
@@ -145,6 +157,7 @@ fn loop_tick(tick: f64, length: f64) -> f64 {
 }
 
 fn begin_drag(app: &mut App) {
+    app.playlist.cancel_drag();
     let selected = &app.playlist.selected;
     app.playlist.originals = app.project.playlist.clips.iter().filter(|c| selected.contains(&c.id)).cloned().collect();
 }
@@ -254,10 +267,10 @@ pub fn update(app: &mut App, message: Message) {
             app.playlist.selected = vec![id];
             app.playlist.resizing = None;
             begin_drag(app);
+            app.playlist.drag_added = true;
             app.edited();
         }
         Message::Begin { id, edge, additive } => {
-            app.checkpoint();
             let selected = &mut app.playlist.selected;
             if additive {
                 if let Some(position) = selected.iter().position(|&c| c == id) {
@@ -279,16 +292,15 @@ pub fn update(app: &mut App, message: Message) {
             let delta = timeline::snap_delta(ticks, grid, signature, bypass);
             let min_length = grid.step(signature).filter(|_| !bypass).unwrap_or(10);
             let originals = app.playlist.originals.clone();
+            let mut preview = Vec::with_capacity(originals.len());
             let resizing = app.playlist.resizing;
-            let max_track = originals.iter().map(|c| c.track as i32 + tracks).max().unwrap_or(0);
-            grow_tracks(app, (max_track + 1).max(0) as usize);
             for original in originals {
                 // Audio clips end where their file does.
                 let file_end = match original.source {
                     ClipSource::Audio(channel) => app.audio_length(channel).map(|end| (end as f64 * original.audio.stretch).round() as Ticks),
                     _ => None,
                 };
-                let Some(clip) = app.project.playlist.clips.iter_mut().find(|c| c.id == original.id) else { continue };
+                let mut clip = original.clone();
                 if app.playlist.stretch_mode && matches!(original.source, ClipSource::Audio(_)) && resizing.is_some() {
                     let length = match resizing {
                         Some(Edge::End) => (original.length as i64 + delta).max(min_length as i64) as Ticks,
@@ -302,6 +314,7 @@ pub fn update(app: &mut App, message: Message) {
                         clip.length = length;
                         if resizing == Some(Edge::Start) { clip.start = original.end().saturating_sub(length); }
                     }
+                    preview.push(clip);
                     continue;
                 }
                 match resizing {
@@ -323,12 +336,23 @@ pub fn update(app: &mut App, message: Message) {
                         clip.track = (original.track as i32 + tracks).max(0) as usize;
                     }
                 }
+                preview.push(clip);
             }
-            app.edited();
+            app.playlist.drag_preview = preview;
         }
         Message::End => {
-            app.playlist.originals.clear();
-            app.edited();
+            let preview = std::mem::take(&mut app.playlist.drag_preview);
+            let changed = preview.iter().any(|c| app.project.playlist.clips.iter().any(|old| old.id == c.id && old != c));
+            if changed {
+                if !app.playlist.drag_added { app.checkpoint(); }
+                let tracks = preview.iter().map(|c| c.track + 1).max().unwrap_or(0);
+                grow_tracks(app, tracks);
+                for clip in preview {
+                    if let Some(old) = app.project.playlist.clips.iter_mut().find(|c| c.id == clip.id) { *old = clip; }
+                }
+                app.edited();
+            }
+            app.playlist.cancel_drag();
         }
         Message::Delete(id) => {
             app.checkpoint();
@@ -709,8 +733,10 @@ impl Arrangement<'_> {
             }
             ClipSource::Audio(channel) => {
                 let Some(Source::Audio { path }) = app.project.channel(channel).map(|c| &c.source) else { return };
-                let Some((sample, peaks)) = app.session.waveform(&daw_engine::audio::cache_key(path, clip.audio)) else { return };
-                let frames_per_tick = sample.sample_rate * 60.0 / (app.project.bpm * f64::from(TICKS_PER_BEAT));
+                let prepared = app.project.playlist.clips.iter().find(|c| c.id == clip.id).map_or(clip.audio, |c| c.audio);
+                let Some((sample, peaks)) = app.session.waveform(&daw_engine::audio::cache_key(path, prepared)) else { return };
+                let ratio = clip.audio.stretch / prepared.stretch;
+                let frames_per_tick = sample.sample_rate * 60.0 / (app.project.bpm * f64::from(TICKS_PER_BEAT)) / ratio;
                 let frame_at = |x: f32| (view.tick(x - HEADER_WIDTH) - clip.start as f64 + clip.offset as f64) * frames_per_tick;
                 let level = |from: usize, to: usize| {
                     let peaks = peaks.get(from / PEAK_FRAMES..(to - 1) / PEAK_FRAMES + 1).unwrap_or_default();
@@ -922,8 +948,9 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             frame.fill_rectangle(Point::new(HEADER_WIDTH, y), Size::new(area.width, 1.0), theme::GRID);
         }
 
-        let visible = |clip: &&Clip| clip.track >= playlist.top_track && clip.track <= last_track;
-        for clip in app.project.playlist.clips.iter().filter(visible) {
+        for clip in &app.project.playlist.clips {
+            let clip = playlist.drag_preview.iter().find(|c| c.id == clip.id).unwrap_or(clip);
+            if clip.track < playlist.top_track || clip.track > last_track { continue; }
             let selected = playlist.selected.contains(&clip.id);
             self.draw_clip(&mut frame, clip, selected);
         }
