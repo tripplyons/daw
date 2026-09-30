@@ -560,27 +560,32 @@ impl Project {
         Some(id)
     }
 
+    fn clone_automation(&mut self, id: AutomationId) -> Option<AutomationId> {
+        let mut clip = self.automation_clip(id)?.clone();
+        clip.id = AutomationId(self.next_id());
+        clip.name = format!("{} copy", clip.name);
+        let id = clip.id;
+        self.automation.push(clip);
+        Some(id)
+    }
+
+    /// Clone an audio channel. A plugin channel's copy would share its
+    /// plugin instance, so only audio clips call this.
+    fn clone_audio_channel(&mut self, id: ChannelId) -> Option<ChannelId> {
+        let mut channel = self.channel(id)?.clone();
+        channel.id = ChannelId(self.next_id());
+        channel.name = format!("{} copy", channel.name);
+        let id = channel.id;
+        self.channels.push(channel);
+        Some(id)
+    }
+
     /// Clone a clip's source while keeping its placement and trims.
     pub fn make_unique(&mut self, id: ClipId) -> Option<ClipSource> {
-        let source = self.playlist.clips.iter().find(|c| c.id == id)?.source;
-        let source = match source {
+        let source = match self.playlist.clips.iter().find(|c| c.id == id)?.source {
             ClipSource::Pattern(pattern) => ClipSource::Pattern(self.clone_pattern(pattern)?),
-            ClipSource::Automation(id) => {
-                let mut clip = self.automation_clip(id)?.clone();
-                clip.id = AutomationId(self.next_id());
-                clip.name = format!("{} copy", clip.name);
-                let id = clip.id;
-                self.automation.push(clip);
-                ClipSource::Automation(id)
-            }
-            ClipSource::Audio(id) => {
-                let mut channel = self.channel(id)?.clone();
-                channel.id = ChannelId(self.next_id());
-                channel.name = format!("{} copy", channel.name);
-                let id = channel.id;
-                self.channels.push(channel);
-                ClipSource::Audio(id)
-            }
+            ClipSource::Automation(automation) => ClipSource::Automation(self.clone_automation(automation)?),
+            ClipSource::Audio(channel) => ClipSource::Audio(self.clone_audio_channel(channel)?),
         };
         self.playlist.clips.iter_mut().find(|c| c.id == id)?.source = source;
         Some(source)

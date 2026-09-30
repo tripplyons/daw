@@ -445,6 +445,18 @@ impl Engine {
         (ticks / self.ticks_per_frame()) as i64
     }
 
+    /// The loop range in ticks, when one is set and has a positive length.
+    fn loop_range(&self) -> Option<(f64, f64)> {
+        let (start, end) = self.song.as_ref()?.loop_range?;
+        (end > start).then_some((start as f64, end as f64))
+    }
+
+    /// The loop range, when the next `frames` of playback cross its end.
+    fn loop_crossing(&self, frames: usize) -> Option<(f64, f64)> {
+        let end = self.position + self.ticks_per_frame() * frames as f64;
+        self.loop_range().filter(|&(_, loop_end)| end > loop_end)
+    }
+
     /// Render stereo output. Buffers may be any length; they are split internally.
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         self.handle_commands();
@@ -497,14 +509,11 @@ impl Engine {
         }
         let transport = self.transport();
         let per_frame = self.ticks_per_frame();
-        // The song ticks this block covers: `from` until frame `split`, then
-        // from the loop start when the block crosses the loop end.
-        let (from, split, wrapped) = match self.song.as_ref().and_then(|s| s.loop_range) {
-            Some((loop_start, loop_end)) if loop_end > loop_start && self.position + per_frame * frames as f64 > loop_end as f64 => {
-                let split = ((loop_end as f64 - self.position) / per_frame).ceil().clamp(0.0, frames as f64) as usize;
-                (self.position, split, loop_start as f64)
-            }
-            _ => (self.position, frames, 0.0),
+        // Audio plays from the position until frame `split`, the first frame
+        // at or past the loop end, then from the loop start.
+        let (split, wrapped) = match self.loop_crossing(frames) {
+            Some((loop_start, loop_end)) => (((loop_end - self.position) / per_frame).ceil().clamp(0.0, frames as f64) as usize, loop_start),
+            None => (frames, 0.0),
         };
         let Some(mut song) = self.song.take() else {
             left.fill(0.0);
@@ -541,7 +550,7 @@ impl Engine {
             if let Some(audio) = channel.audio.as_ref().filter(|_| self.playing) {
                 let (before_l, after_l) = scratch_l.split_at_mut(split);
                 let (before_r, after_r) = scratch_r.split_at_mut(split);
-                mix_audio(audio, from, per_frame, song.bpm, before_l, before_r);
+                mix_audio(audio, self.position, per_frame, song.bpm, before_l, before_r);
                 mix_audio(audio, wrapped, per_frame, song.bpm, after_l, after_r);
             }
             let (gl, gr) = apply_pan(channel.pan, channel.volume);
@@ -663,16 +672,14 @@ impl Engine {
         let per_frame = self.ticks_per_frame();
         let start = self.position;
         let end = start + per_frame * frames as f64;
-        let loop_range = self.song.as_ref().and_then(|s| s.loop_range);
-        match loop_range {
-            Some((loop_start, loop_end)) if end > loop_end as f64 && loop_end > loop_start => {
-                let split = ((loop_end as f64 - start) / per_frame).clamp(0.0, frames as f64) as u32;
-                self.collect_notes(start, loop_end as f64, 0, per_frame);
-                self.release_all(split);
-                self.collect_notes(loop_start as f64, loop_start as f64 + (end - loop_end as f64), split, per_frame);
-            }
-            _ => self.collect_notes(start, end, 0, per_frame),
-        }
+        let Some((loop_start, loop_end)) = self.loop_crossing(frames) else {
+            self.collect_notes(start, end, 0, per_frame);
+            return;
+        };
+        let split = ((loop_end - start) / per_frame).clamp(0.0, frames as f64) as u32;
+        self.collect_notes(start, loop_end, 0, per_frame);
+        self.release_all(split);
+        self.collect_notes(loop_start, loop_start + (end - loop_end), split, per_frame);
     }
 
     /// Queue events in `from..to`, assigning each to its nearest frame. The
@@ -680,7 +687,7 @@ impl Engine {
     /// position cannot push an on-grid event into the previous frame, while
     /// consecutive windows still tile without gaps or overlap.
     fn collect_notes(&mut self, from: f64, to: f64, offset: u32, per_frame: f64) {
-        let Some(song) = self.song.take() else { return };
+        let Some(song) = &self.song else { return };
         let (low, high) = (from - per_frame / 2.0, to - per_frame / 2.0);
         let last_frame = ((to - from) / per_frame).round().max(1.0) as u32 - 1;
         for channel in &song.channels {
@@ -691,7 +698,6 @@ impl Engine {
                 node.push(Event { offset: frame, kind: EventKind::note(event.key, event.velocity) });
             }
         }
-        self.song = Some(song);
     }
 
     fn advance(&mut self, frames: usize) {
@@ -699,11 +705,10 @@ impl Engine {
         self.position += ticks;
         self.record_position += ticks;
         self.frames += frames as i64;
-        if let Some((loop_start, loop_end)) = self.song.as_ref().and_then(|s| s.loop_range)
-            && self.position >= loop_end as f64
-            && loop_end > loop_start
+        if let Some((loop_start, loop_end)) = self.loop_range()
+            && self.position >= loop_end
         {
-            self.position = loop_start as f64 + (self.position - loop_end as f64);
+            self.position = loop_start + (self.position - loop_end);
             self.frames = self.ticks_to_frames(self.position);
         }
     }

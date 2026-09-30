@@ -22,11 +22,12 @@ use objc2_audio_toolbox::{
 use objc2_avf_audio::{AVAudioFormat, AVAudioUnitComponentManager};
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioTimeStamp, AudioTimeStampFlags};
 use objc2_foundation::{
-    NSData, NSDictionary, NSError, NSInteger, NSMutableDictionary, NSPropertyListFormat, NSPropertyListSerialization, NSString,
+    NSData, NSDictionary, NSError, NSInteger, NSMutableDictionary, NSPropertyListFormat, NSPropertyListMutabilityOptions, NSPropertyListSerialization,
+    NSString,
 };
 
 use crate::window::EditorWindow;
-use crate::{Controller, Loaded, ParamInfo, PluginError, PluginInfo, PluginKind, Touch};
+use crate::{Controller, Loaded, MAX_TOUCHES, ParamInfo, PluginError, PluginInfo, PluginKind, Touch, write_out};
 
 // `requestViewControllerWithCompletionHandler:` is declared in CoreAudioKit.
 #[link(name = "CoreAudioKit", kind = "framework")]
@@ -99,13 +100,16 @@ pub fn list() -> Vec<(PluginInfo, u64)> {
     out
 }
 
-/// Spin the main run loop until `done` returns something or the timeout passes.
-/// AU instantiation and view requests may complete on the main queue, so
-/// blocking the main thread outright would deadlock.
-fn wait_for<T>(timeout: Duration, mut done: impl FnMut() -> Option<T>) -> Option<T> {
+/// Where a completion handler leaves its result for `wait_for`.
+type Completion<T> = Arc<Mutex<Option<T>>>;
+
+/// Spin the main run loop until a completion handler fills `slot` or the
+/// timeout passes. AU instantiation and view requests may complete on the
+/// main queue, so blocking the main thread outright would deadlock.
+fn wait_for<T>(slot: &Completion<T>, timeout: Duration) -> Option<T> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(value) = done() {
+        if let Some(value) = slot.lock().unwrap().take() {
             return Some(value);
         }
         if Instant::now() >= deadline {
@@ -122,8 +126,7 @@ fn wait_for<T>(timeout: Duration, mut done: impl FnMut() -> Option<T>) -> Option
 }
 
 fn instantiate(description: AudioComponentDescription) -> Result<Retained<AUAudioUnit>, PluginError> {
-    type Slot = Arc<Mutex<Option<Result<Retained<AUAudioUnit>, String>>>>;
-    let slot: Slot = Arc::default();
+    let slot: Completion<Result<Retained<AUAudioUnit>, String>> = Arc::default();
     let sink = slot.clone();
     let handler = RcBlock::new(move |unit: *mut AUAudioUnit, error: *mut NSError| {
         let result = match unsafe { Retained::retain(unit) } {
@@ -142,7 +145,7 @@ fn instantiate(description: AudioComponentDescription) -> Result<Retained<AUAudi
             &handler,
         )
     };
-    wait_for(Duration::from_secs(20), || slot.lock().unwrap().take())
+    wait_for(&slot, Duration::from_secs(20))
         .ok_or_else(|| PluginError::Load("timed out instantiating the audio unit".into()))?
         .map_err(PluginError::Load)
 }
@@ -155,6 +158,10 @@ struct ParamRange {
 }
 
 impl ParamRange {
+    fn of(parameter: &AUParameter) -> Self {
+        unsafe { ParamRange { address: parameter.address(), min: parameter.minValue(), max: parameter.maxValue() } }
+    }
+
     fn to_plain(self, value: f32) -> AUValue {
         self.min + value * (self.max - self.min)
     }
@@ -164,8 +171,27 @@ impl ParamRange {
     }
 }
 
+/// The unit's parameters, leaving out any whose address does not fit the
+/// `u32` ids the engine uses.
 fn parameters(unit: &AUAudioUnit) -> Vec<Retained<AUParameter>> {
-    unsafe { unit.parameterTree() }.map(|tree| unsafe { tree.allParameters() }.to_vec()).unwrap_or_default()
+    let all = unsafe { unit.parameterTree() }.map(|tree| unsafe { tree.allParameters() }.to_vec()).unwrap_or_default();
+    all.into_iter().filter(|p| unsafe { p.address() } <= u64::from(u32::MAX)).collect()
+}
+
+/// Parameter ranges sorted by address, for lookups without the parameter tree.
+struct ParamRanges(Vec<ParamRange>);
+
+impl ParamRanges {
+    fn of(unit: &AUAudioUnit) -> Self {
+        let mut ranges: Vec<ParamRange> = parameters(unit).iter().map(|p| ParamRange::of(p)).collect();
+        ranges.sort_by_key(|r| r.address);
+        Self(ranges)
+    }
+
+    fn find(&self, address: AUParameterAddress) -> Option<ParamRange> {
+        let index = self.0.binary_search_by_key(&address, |r| r.address).ok()?;
+        Some(self.0[index])
+    }
 }
 
 /// Transport values the AU reads through host blocks during render.
@@ -207,7 +233,7 @@ struct AuProcessor {
     midi: Option<RcBlock<ScheduleMidi>>,
     schedule_param: Option<RcBlock<ScheduleParam>>,
     pull_input: Option<RcBlock<PullInput>>,
-    ranges: Arc<Vec<ParamRange>>,
+    ranges: Arc<ParamRanges>,
     transport: Arc<TransportCell>,
     input: Arc<InputCell>,
     buffers: [Box<[f32]>; 2],
@@ -219,13 +245,6 @@ struct AuProcessor {
 // The unit and blocks are used from the audio thread only after setup.
 unsafe impl Send for AuProcessor {}
 
-impl AuProcessor {
-    fn range(&self, address: u32) -> Option<ParamRange> {
-        let index = self.ranges.binary_search_by_key(&u64::from(address), |r| r.address).ok()?;
-        Some(self.ranges[index])
-    }
-}
-
 impl Processor for AuProcessor {
     fn process(&mut self, transport: &TransportInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
         self.process_sidechain(transport, events, left, right, (&[], &[]));
@@ -236,24 +255,18 @@ impl Processor for AuProcessor {
         unsafe { *self.transport.0.get() = *transport };
         for event in events {
             let time = AUEventSampleTimeImmediate + i64::from(event.offset);
-            match event.kind {
-                EventKind::NoteOn { key, velocity } => {
-                    if let Some(midi) = &self.midi {
-                        let bytes = [0x90, key & 0x7f, ((velocity * 127.0).round() as u8).clamp(1, 127)];
-                        midi.call((time, 0, 3, NonNull::from(&bytes[0])));
-                    }
-                }
-                EventKind::NoteOff { key } => {
-                    if let Some(midi) = &self.midi {
-                        let bytes = [0x80, key & 0x7f, 0];
-                        midi.call((time, 0, 3, NonNull::from(&bytes[0])));
-                    }
-                }
+            let bytes = match event.kind {
+                EventKind::NoteOn { key, velocity } => [0x90, key & 0x7f, ((velocity * 127.0).round() as u8).clamp(1, 127)],
+                EventKind::NoteOff { key } => [0x80, key & 0x7f, 0],
                 EventKind::Param { id, value } => {
-                    if let (Some(range), Some(schedule)) = (self.range(id), &self.schedule_param) {
+                    if let (Some(range), Some(schedule)) = (self.ranges.find(u64::from(id)), &self.schedule_param) {
                         schedule.call((time, 0, range.address, range.to_plain(value)));
                     }
+                    continue;
                 }
+            };
+            if let Some(midi) = &self.midi {
+                midi.call((time, 0, 3, NonNull::from(&bytes[0])));
             }
         }
 
@@ -318,9 +331,10 @@ fn set_bus_format(unit: &AUAudioUnit, output: bool, sample_rate: f64) -> Result<
         // Bridged v2 effects report "no connection" unless the main bus is enabled.
         let _: () = unsafe { msg_send![&*bus, setEnabled: index == 0 || (!output && index == 1)] };
         if let Err(error) = result
-            && index == 0 {
-                return Err(PluginError::Load(format!("bus format rejected: {}", error.localizedDescription())));
-            }
+            && index == 0
+        {
+            return Err(PluginError::Load(format!("bus format rejected: {}", error.localizedDescription())));
+        }
     }
     Ok(())
 }
@@ -336,26 +350,14 @@ fn install_host_blocks(unit: &AUAudioUnit, transport: &Arc<TransportCell>) {
               downbeat: *mut f64|
               -> Bool {
             let t = unsafe { &*context.0.get() };
+            let frames_per_beat = t.sample_rate * 60.0 / t.bpm.max(1.0);
             unsafe {
-                if let Some(v) = tempo.as_mut() {
-                    *v = t.bpm;
-                }
-                if let Some(v) = numerator.as_mut() {
-                    *v = f64::from(t.numerator);
-                }
-                if let Some(v) = denominator.as_mut() {
-                    *v = t.denominator as isize;
-                }
-                if let Some(v) = beat.as_mut() {
-                    *v = t.beats;
-                }
-                if let Some(v) = to_next_beat.as_mut() {
-                    let frames_per_beat = t.sample_rate * 60.0 / t.bpm.max(1.0);
-                    *v = ((1.0 - t.beats.fract()) * frames_per_beat) as isize;
-                }
-                if let Some(v) = downbeat.as_mut() {
-                    *v = t.bar_start;
-                }
+                write_out(tempo, t.bpm);
+                write_out(numerator, f64::from(t.numerator));
+                write_out(denominator, t.denominator as isize);
+                write_out(beat, t.beats);
+                write_out(to_next_beat, ((1.0 - t.beats.fract()) * frames_per_beat) as isize);
+                write_out(downbeat, t.bar_start);
             }
             Bool::YES
         },
@@ -365,18 +367,10 @@ fn install_host_blocks(unit: &AUAudioUnit, transport: &Arc<TransportCell>) {
         move |flags: *mut AUHostTransportStateFlags, position: *mut f64, cycle_start: *mut f64, cycle_end: *mut f64| -> Bool {
             let t = unsafe { &*state.0.get() };
             unsafe {
-                if let Some(v) = flags.as_mut() {
-                    *v = if t.playing { AUHostTransportStateFlags::Moving } else { AUHostTransportStateFlags::empty() };
-                }
-                if let Some(v) = position.as_mut() {
-                    *v = t.frames as f64;
-                }
-                if let Some(v) = cycle_start.as_mut() {
-                    *v = 0.0;
-                }
-                if let Some(v) = cycle_end.as_mut() {
-                    *v = 0.0;
-                }
+                write_out(flags, if t.playing { AUHostTransportStateFlags::Moving } else { AUHostTransportStateFlags::empty() });
+                write_out(position, t.frames as f64);
+                write_out(cycle_start, 0.0);
+                write_out(cycle_end, 0.0);
             }
             Bool::YES
         },
@@ -388,46 +382,34 @@ fn install_host_blocks(unit: &AUAudioUnit, transport: &Arc<TransportCell>) {
     }
 }
 
+/// Decode a saved AU state, a property list holding a dictionary.
+fn decode_state<T: objc2::DowncastTarget>(state: &[u8], mutability: NSPropertyListMutabilityOptions) -> Result<Retained<T>, PluginError> {
+    let plist = unsafe { NSPropertyListSerialization::propertyListWithData_options_format_error(&NSData::with_bytes(state), mutability, std::ptr::null_mut()) }
+        .map_err(|e| PluginError::Load(format!("could not decode AU state: {}", e.localizedDescription())))?;
+    plist.downcast::<T>().map_err(|_| PluginError::Load("saved AU state is not a dictionary".into()))
+}
+
+/// Encode an AU state dictionary as a binary property list.
+fn encode_state(state: &AnyObject) -> Result<Vec<u8>, PluginError> {
+    let data = unsafe { NSPropertyListSerialization::dataWithPropertyList_format_options_error(state, NSPropertyListFormat::BinaryFormat_v1_0, 0) }
+        .map_err(|e| PluginError::Load(format!("could not encode AU state: {}", e.localizedDescription())))?;
+    Ok(data.to_vec())
+}
+
 /// Replace the `jucePluginState` entry of a saved JUCE Audio Unit state. That
 /// entry holds the plugin's own state format, e.g. a Vital preset's JSON.
 pub fn replace_juce_state(state: &[u8], juce: &[u8]) -> Result<Vec<u8>, PluginError> {
-    let bad = |what: &str| PluginError::Load(format!("saved AU state {what}"));
-    let plist = unsafe {
-        NSPropertyListSerialization::propertyListWithData_options_format_error(
-            &NSData::with_bytes(state),
-            objc2_foundation::NSPropertyListMutabilityOptions::MutableContainers,
-            std::ptr::null_mut(),
-        )
-    }
-    .map_err(|e| bad(&format!("could not be decoded: {}", e.localizedDescription())))?;
-    let dictionary = plist.downcast::<NSMutableDictionary>().map_err(|_| bad("is not a dictionary"))?;
+    let dictionary: Retained<NSMutableDictionary> = decode_state(state, NSPropertyListMutabilityOptions::MutableContainers)?;
     let key = NSString::from_str("jucePluginState");
     if dictionary.objectForKey(&key).is_none() {
         return Err(PluginError::Load("this plugin does not store JUCE plugin state".into()));
     }
     unsafe { dictionary.setObject_forKey(&NSData::with_bytes(juce), ProtocolObject::from_ref(&*key)) };
-    let data = unsafe {
-        NSPropertyListSerialization::dataWithPropertyList_format_options_error(
-            &dictionary,
-            NSPropertyListFormat::BinaryFormat_v1_0,
-            0,
-        )
-    }
-    .map_err(|e| bad(&format!("could not be encoded: {}", e.localizedDescription())))?;
-    Ok(data.to_vec())
+    encode_state(&dictionary)
 }
 
 fn restore_state(unit: &AUAudioUnit, state: &[u8]) -> Result<(), PluginError> {
-    let data = NSData::with_bytes(state);
-    let plist = unsafe {
-        NSPropertyListSerialization::propertyListWithData_options_format_error(
-            &data,
-            objc2_foundation::NSPropertyListMutabilityOptions::Immutable,
-            std::ptr::null_mut(),
-        )
-    };
-    let object = plist.map_err(|error| PluginError::Load(format!("could not decode AU state: {}", error.localizedDescription())))?;
-    let dictionary = object.downcast::<NSDictionary>().map_err(|_| PluginError::Load("saved AU state is not a dictionary".into()))?;
+    let dictionary: Retained<NSDictionary> = decode_state(state, NSPropertyListMutabilityOptions::Immutable)?;
     let dictionary: &NSDictionary<NSString, AnyObject> = unsafe { &*(Retained::as_ptr(&dictionary) as *const _) };
     unsafe { unit.setFullState(Some(dictionary)) };
     Ok(())
@@ -464,13 +446,7 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
         restore_state(&unit, state)?;
     }
 
-    let mut ranges: Vec<ParamRange> = parameters(&unit)
-        .iter()
-        .map(|p| unsafe { ParamRange { address: p.address(), min: p.minValue(), max: p.maxValue() } })
-        .filter(|r| r.address <= u64::from(u32::MAX))
-        .collect();
-    ranges.sort_by_key(|r| r.address);
-    let ranges = Arc::new(ranges);
+    let ranges = Arc::new(ParamRanges::of(&unit));
 
     let input = Arc::new(InputCell(UnsafeCell::new([std::ptr::null(); 4])));
     let pull_input = is_effect.then(|| {
@@ -526,11 +502,11 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
         if count <= 0 { return; }
         let mut touches = observer_touches.lock().unwrap();
         for event in unsafe { std::slice::from_raw_parts(events.as_ptr(), count as usize) } {
-            let Ok(index) = observer_ranges.binary_search_by_key(&event.address, |r| r.address) else { continue };
+            let Some(range) = observer_ranges.find(event.address) else { continue };
             let param = event.address as u32;
             if event.eventType == AUParameterAutomationEventType::Touch { touches.push(Touch::Begin(param)); }
-            if touches.len() < 4096 {
-                touches.push(Touch::Value { param, value: observer_ranges[index].to_normalized(event.value) });
+            if touches.len() < MAX_TOUCHES {
+                touches.push(Touch::Value { param, value: range.to_normalized(event.value) });
             }
             if event.eventType == AUParameterAutomationEventType::Release { touches.push(Touch::End(param)); }
         }
@@ -549,7 +525,7 @@ struct AuEditor {
 
 struct AuController {
     unit: Retained<AUAudioUnit>,
-    ranges: Arc<Vec<ParamRange>>,
+    ranges: Arc<ParamRanges>,
     touches: Arc<Mutex<Vec<Touch>>>,
     token: Option<AUParameterObserverToken>,
     _observer: RcBlock<dyn Fn(NSInteger, NonNull<AUParameterAutomationEvent>)>,
@@ -563,8 +539,7 @@ impl AuController {
     }
 
     fn range(&self, id: u32) -> Option<ParamRange> {
-        let index = self.ranges.binary_search_by_key(&u64::from(id), |r| r.address).ok()?;
-        Some(self.ranges[index])
+        self.ranges.find(u64::from(id))
     }
 }
 
@@ -586,9 +561,8 @@ impl Controller for AuController {
     fn params(&self) -> Vec<ParamInfo> {
         parameters(&self.unit)
             .iter()
-            .filter(|p| unsafe { p.address() } <= u64::from(u32::MAX))
             .map(|p| unsafe {
-                let range = ParamRange { address: p.address(), min: p.minValue(), max: p.maxValue() };
+                let range = ParamRange::of(p);
                 let steps = p.valueStrings().map(|s| s.count().saturating_sub(1) as u32).unwrap_or(0);
                 // kAudioUnitParameterFlag_IsWritable
                 let writable = p.flags().0 & (1 << 31) != 0;
@@ -637,15 +611,7 @@ impl Controller for AuController {
 
     fn save_state(&self) -> Result<Vec<u8>, PluginError> {
         let Some(state) = (unsafe { self.unit.fullState() }) else { return Ok(Vec::new()) };
-        let data = unsafe {
-            NSPropertyListSerialization::dataWithPropertyList_format_options_error(
-                &state,
-                NSPropertyListFormat::BinaryFormat_v1_0,
-                0,
-            )
-        }
-        .map_err(|e| PluginError::Load(format!("encode AU state: {}", e.localizedDescription())))?;
-        Ok(data.to_vec())
+        encode_state(&state)
     }
 
     fn restore_state(&mut self, state: &[u8]) -> Result<(), PluginError> {
@@ -663,14 +629,13 @@ impl Controller for AuController {
             editor.window.show();
             return Ok(());
         }
-        type Slot = Arc<Mutex<Option<Option<Retained<NSViewController>>>>>;
-        let slot: Slot = Arc::default();
+        let slot: Completion<Option<Retained<NSViewController>>> = Arc::default();
         let sink = slot.clone();
         let handler = RcBlock::new(move |controller: *mut NSViewController| {
             *sink.lock().unwrap() = Some(unsafe { Retained::retain(controller) });
         });
         let _: () = unsafe { msg_send![&*self.unit, requestViewControllerWithCompletionHandler: &*handler] };
-        let controller = wait_for(Duration::from_secs(10), || slot.lock().unwrap().take())
+        let controller = wait_for(&slot, Duration::from_secs(10))
             .flatten()
             .ok_or_else(|| PluginError::Load(format!("{title} did not provide an editor")))?;
         let view = controller.view();

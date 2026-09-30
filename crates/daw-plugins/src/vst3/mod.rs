@@ -42,7 +42,7 @@ use vst3::{ComPtr, ComWrapper, Interface};
 use crate::window::EditorWindow;
 use crate::{Controller, Loaded, ParamInfo, PluginError, PluginInfo, PluginKind, Touch};
 use host::{
-    ComponentHandler, EventList, HostApplication, MemoryStream, ParameterChanges, PlugFrame, read_string128,
+    ComponentHandler, EventList, HostApplication, MemoryStream, ParameterChanges, PlugFrame, interface, read_string128,
 };
 
 /// The window type editors attach to.
@@ -82,10 +82,7 @@ fn host_application() -> &'static ComWrapper<HostApplication> {
 }
 
 fn host_context() -> *mut FUnknown {
-    host_application()
-        .as_com_ref::<vst3::Steinberg::Vst::IHostApplication>()
-        .map(|r| r.as_ptr() as *mut FUnknown)
-        .unwrap_or(std::ptr::null_mut())
+    interface::<vst3::Steinberg::Vst::IHostApplication, _>(host_application()) as *mut FUnknown
 }
 
 /// The folder with the bundle's binaries for this platform.
@@ -256,15 +253,28 @@ fn check(call: &'static str, code: i32) -> Result<(), PluginError> {
     if code == kResultOk || code == kResultTrue { Ok(()) } else { Err(PluginError::Call { call, code }) }
 }
 
-fn stream(data: Vec<u8>) -> ComWrapper<MemoryStream> {
-    ComWrapper::new(MemoryStream::with_data(data))
+/// Pass `bytes` to a state setter as a fresh stream, returning its result.
+fn write_state(bytes: &[u8], set: impl FnOnce(*mut IBStream) -> i32) -> i32 {
+    let stream = ComWrapper::new(MemoryStream::with_data(bytes.to_vec()));
+    set(interface(&stream))
 }
 
-fn stream_ptr(stream: &ComWrapper<MemoryStream>) -> *mut IBStream {
-    stream.as_com_ref::<IBStream>().map(|r| r.as_ptr()).unwrap_or(std::ptr::null_mut())
+/// The bytes a state getter writes, or its result code when it fails.
+fn read_state(get: impl FnOnce(*mut IBStream) -> i32) -> Result<Vec<u8>, i32> {
+    let stream = ComWrapper::new(MemoryStream::default());
+    let code = get(interface(&stream));
+    if code != kResultOk { return Err(code); }
+    Ok(stream.take())
 }
 
 /// State layout: u32 little-endian component length, component bytes, controller bytes.
+fn join_state(component: &[u8], controller: &[u8]) -> Vec<u8> {
+    let mut state = (component.len() as u32).to_le_bytes().to_vec();
+    state.extend_from_slice(component);
+    state.extend_from_slice(controller);
+    state
+}
+
 fn split_state(state: &[u8]) -> Option<(&[u8], &[u8])> {
     let length = u32::from_le_bytes(state.get(..4)?.try_into().ok()?) as usize;
     let component = state.get(4..4 + length)?;
@@ -328,24 +338,21 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
         _module: module.clone(),
     });
 
+    // Loading applies every part of the state even when one is refused;
+    // `restore_state` stops at the first failure instead.
     if let Some((component_state, controller_state)) = split_state(state) {
-        let component_stream = stream(component_state.to_vec());
-        unsafe { instance.component.setState(stream_ptr(&component_stream)) };
+        write_state(component_state, |s| unsafe { instance.component.setState(s) });
         if let Some(controller) = &instance.controller {
-            unsafe {
-                controller.setComponentState(stream_ptr(&stream(component_state.to_vec())));
-                if !controller_state.is_empty() {
-                    controller.setState(stream_ptr(&stream(controller_state.to_vec())));
-                }
+            write_state(component_state, |s| unsafe { controller.setComponentState(s) });
+            if !controller_state.is_empty() {
+                write_state(controller_state, |s| unsafe { controller.setState(s) });
             }
         }
-    } else if let Some(controller) = &instance.controller {
+    } else if let Some(controller) = &instance.controller
+        && let Ok(component_state) = read_state(|s| unsafe { instance.component.getState(s) })
+    {
         // Sync the controller with the component's default state.
-        let component_stream = stream(Vec::new());
-        if unsafe { instance.component.getState(stream_ptr(&component_stream)) } == kResultOk {
-            let data = component_stream.take();
-            unsafe { controller.setComponentState(stream_ptr(&stream(data))) };
-        }
+        write_state(&component_state, |s| unsafe { controller.setComponentState(s) });
     }
 
     let (to_processor, from_editor) = rtrb::RingBuffer::new(4096);
@@ -355,8 +362,7 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
         restart: Default::default(),
     });
     if let Some(controller) = &instance.controller {
-        let handler_ptr = handler.as_com_ref::<IComponentHandler>().map(|r| r.as_ptr()).unwrap_or(std::ptr::null_mut());
-        unsafe { controller.setComponentHandler(handler_ptr) };
+        unsafe { controller.setComponentHandler(interface::<IComponentHandler, _>(&handler)) };
     }
 
     let processor = Vst3Processor::new(instance.clone(), from_editor, sample_rate, max_block)?;
@@ -574,9 +580,9 @@ impl Processor for Vst3Processor {
             numOutputs: self.output_headers.len() as i32,
             inputs: self.input_headers.as_mut_ptr(),
             outputs: self.output_headers.as_mut_ptr(),
-            inputParameterChanges: self.changes.as_com_ref::<IParameterChanges>().unwrap().as_ptr(),
-            outputParameterChanges: self.output_changes.as_com_ref::<IParameterChanges>().unwrap().as_ptr(),
-            inputEvents: self.events.as_com_ref::<IEventList>().unwrap().as_ptr(),
+            inputParameterChanges: interface::<IParameterChanges, _>(&self.changes),
+            outputParameterChanges: interface::<IParameterChanges, _>(&self.output_changes),
+            inputEvents: interface::<IEventList, _>(&self.events),
             outputEvents: std::ptr::null_mut(),
             processContext: &mut self.context,
         };
@@ -669,33 +675,26 @@ impl Controller for Vst3Controller {
     }
 
     fn save_state(&self) -> Result<Vec<u8>, PluginError> {
-        let component_stream = stream(Vec::new());
-        check("IComponent::getState", unsafe { self.instance.component.getState(stream_ptr(&component_stream)) })?;
-        let component_state = component_stream.take();
-        let mut state = (component_state.len() as u32).to_le_bytes().to_vec();
-        state.extend_from_slice(&component_state);
-        if let Some(controller) = self.controller() {
-            let controller_stream = stream(Vec::new());
-            if unsafe { controller.getState(stream_ptr(&controller_stream)) } == kResultOk {
-                state.extend_from_slice(&controller_stream.take());
-            }
-        }
-        Ok(state)
+        let component = read_state(|s| unsafe { self.instance.component.getState(s) })
+            .map_err(|code| PluginError::Call { call: "IComponent::getState", code })?;
+        // A controller without state of its own saves nothing.
+        let controller = self.controller().and_then(|c| read_state(|s| unsafe { c.getState(s) }).ok()).unwrap_or_default();
+        Ok(join_state(&component, &controller))
     }
 
     fn restore_state(&mut self, state: &[u8]) -> Result<(), PluginError> {
         let (component, editor) = split_state(state).ok_or_else(|| PluginError::Load("invalid VST3 state".into()))?;
         unsafe { self.instance.processor.setProcessing(0) };
         let result = (|| {
-            check("IComponent::setState", unsafe { self.instance.component.setState(stream_ptr(&stream(component.to_vec()))) })?;
+            check("IComponent::setState", write_state(component, |s| unsafe { self.instance.component.setState(s) }))?;
             if let Some(controller) = self.controller() {
-                let synced = unsafe { controller.setComponentState(stream_ptr(&stream(component.to_vec()))) };
+                let synced = write_state(component, |s| unsafe { controller.setComponentState(s) });
                 // Combined component/controllers may implement state only once.
                 if synced != vst3::Steinberg::kNotImplemented {
                     check("IEditController::setComponentState", synced)?;
                 }
                 if !editor.is_empty() {
-                    check("IEditController::setState", unsafe { controller.setState(stream_ptr(&stream(editor.to_vec()))) })?;
+                    check("IEditController::setState", write_state(editor, |s| unsafe { controller.setState(s) }))?;
                 }
             }
             Ok(())
@@ -734,7 +733,7 @@ impl Controller for Vst3Controller {
             run_loop: Default::default(),
         });
         unsafe {
-            view.setFrame(frame.as_com_ref::<vst3::Steinberg::IPlugFrame>().unwrap().as_ptr());
+            view.setFrame(interface::<vst3::Steinberg::IPlugFrame, _>(&frame));
             if let Err(error) = check("IPlugView::attached", view.attached(window.content_view(), EDITOR_PLATFORM)) {
                 view.setFrame(std::ptr::null_mut());
                 #[cfg(target_os = "linux")]
@@ -804,8 +803,8 @@ mod tests {
 
     #[test]
     fn state_split() {
-        let mut state = 3u32.to_le_bytes().to_vec();
-        state.extend_from_slice(&[1, 2, 3, 4, 5]);
+        let state = join_state(&[1, 2, 3], &[4, 5]);
+        assert_eq!(state[..4], 3u32.to_le_bytes());
         assert_eq!(split_state(&state), Some((&[1u8, 2, 3][..], &[4u8, 5][..])));
         assert_eq!(split_state(&[]), None);
     }

@@ -19,7 +19,7 @@ use vst3::Steinberg::{
 use vst3::Steinberg::Linux::{FileDescriptor, IEventHandler, IRunLoop, IRunLoopTrait, ITimerHandler, TimerInterval};
 use vst3::{Class, ComRef, ComWrapper, Interface};
 
-use crate::Touch;
+use crate::{MAX_TOUCHES, Touch, write_out};
 
 pub fn write_string128(text: &str, out: &mut String128) {
     let mut length = 0;
@@ -39,6 +39,19 @@ fn tuid_is(tuid: &TUID, guid: &vst3::com_scrape_types::Guid) -> bool {
     tuid.iter().zip(guid).all(|(a, b)| a.to_ne_bytes()[0] == *b)
 }
 
+/// A borrowed pointer to one of a host object's interfaces, or null when the
+/// object does not implement it. The wrapper keeps ownership.
+pub fn interface<I: Interface, C: Class>(object: &ComWrapper<C>) -> *mut I {
+    object.as_com_ref::<I>().map_or(std::ptr::null_mut(), |r| r.as_ptr())
+}
+
+/// Give a new host object to the plugin through `obj` as interface `I`.
+fn hand_out<I: Interface, C: Class>(object: ComWrapper<C>, obj: *mut *mut c_void) -> tresult {
+    let Some(ptr) = object.to_com_ptr::<I>() else { return kResultFalse };
+    unsafe { *obj = ptr.into_raw() as *mut c_void };
+    kResultOk
+}
+
 pub struct HostApplication;
 
 impl Class for HostApplication {
@@ -51,23 +64,15 @@ impl IHostApplicationTrait for HostApplication {
         kResultOk
     }
 
-    unsafe fn createInstance(&self, cid: *mut TUID, iid: *mut TUID, obj: *mut *mut c_void) -> tresult {
-        let _ = iid;
+    unsafe fn createInstance(&self, cid: *mut TUID, _iid: *mut TUID, obj: *mut *mut c_void) -> tresult {
+        unsafe { *obj = std::ptr::null_mut() };
         let wanted = unsafe { *cid };
         if tuid_is(&wanted, &IMessage::IID) {
-            let wrapper = ComWrapper::new(Message::default());
-            if let Some(ptr) = wrapper.to_com_ptr::<IMessage>() {
-                unsafe { *obj = ptr.into_raw() as *mut c_void };
-                return kResultOk;
-            }
-        } else if tuid_is(&wanted, &IAttributeList::IID) {
-            let wrapper = ComWrapper::new(AttributeList::default());
-            if let Some(ptr) = wrapper.to_com_ptr::<IAttributeList>() {
-                unsafe { *obj = ptr.into_raw() as *mut c_void };
-                return kResultOk;
-            }
+            return hand_out::<IMessage, _>(ComWrapper::new(Message::default()), obj);
         }
-        unsafe { *obj = std::ptr::null_mut() };
+        if tuid_is(&wanted, &IAttributeList::IID) {
+            return hand_out::<IAttributeList, _>(ComWrapper::new(AttributeList::default()), obj);
+        }
         kResultFalse
     }
 }
@@ -114,13 +119,9 @@ impl IAttributeListTrait for AttributeList {
     }
 
     unsafe fn getInt(&self, id: *const std::ffi::c_char, value: *mut int64) -> tresult {
-        match self.get(id) {
-            Some(Attribute::Int(v)) => {
-                unsafe { *value = v };
-                kResultOk
-            }
-            _ => kResultFalse,
-        }
+        let Some(Attribute::Int(v)) = self.get(id) else { return kResultFalse };
+        unsafe { *value = v };
+        kResultOk
     }
 
     unsafe fn setFloat(&self, id: *const std::ffi::c_char, value: f64) -> tresult {
@@ -128,29 +129,18 @@ impl IAttributeListTrait for AttributeList {
     }
 
     unsafe fn getFloat(&self, id: *const std::ffi::c_char, value: *mut f64) -> tresult {
-        match self.get(id) {
-            Some(Attribute::Float(v)) => {
-                unsafe { *value = v };
-                kResultOk
-            }
-            _ => kResultFalse,
-        }
+        let Some(Attribute::Float(v)) = self.get(id) else { return kResultFalse };
+        unsafe { *value = v };
+        kResultOk
     }
 
     unsafe fn setString(&self, id: *const std::ffi::c_char, string: *const TChar) -> tresult {
         if string.is_null() {
             return kInvalidArgument;
         }
-        let mut text = Vec::new();
-        let mut i = 0;
-        loop {
-            let c = unsafe { *string.add(i) };
-            text.push(c);
-            if c == 0 {
-                break;
-            }
-            i += 1;
-        }
+        // Keep the terminator, which `getString` copies back out.
+        let length = (0..).take_while(|&i| unsafe { *string.add(i) } != 0).count() + 1;
+        let text = unsafe { std::slice::from_raw_parts(string, length) }.to_vec();
         self.set(id, Attribute::String(text))
     }
 
@@ -219,7 +209,7 @@ impl IMessageTrait for Message {
 
     unsafe fn getAttributes(&self) -> *mut IAttributeList {
         // Borrowed pointer: the message owns the list.
-        self.attributes.as_com_ref::<IAttributeList>().map(|r| r.as_ptr()).unwrap_or(std::ptr::null_mut())
+        interface(&self.attributes)
     }
 }
 
@@ -250,9 +240,7 @@ impl IBStreamTrait for MemoryStream {
         let count = (num_bytes.max(0) as usize).min(data.len().saturating_sub(*position));
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(*position), buffer as *mut u8, count) };
         *position += count;
-        if !num_bytes_read.is_null() {
-            unsafe { *num_bytes_read = count as int32 };
-        }
+        unsafe { write_out(num_bytes_read, count as int32) };
         kResultOk
     }
 
@@ -265,9 +253,7 @@ impl IBStreamTrait for MemoryStream {
         }
         unsafe { std::ptr::copy_nonoverlapping(buffer as *const u8, data.as_mut_ptr().add(*position), count) };
         *position += count;
-        if !num_bytes_written.is_null() {
-            unsafe { *num_bytes_written = count as int32 };
-        }
+        unsafe { write_out(num_bytes_written, count as int32) };
         kResultOk
     }
 
@@ -285,16 +271,12 @@ impl IBStreamTrait for MemoryStream {
             return kInvalidArgument;
         }
         *position = target as usize;
-        if !result.is_null() {
-            unsafe { *result = target };
-        }
+        unsafe { write_out(result, target) };
         kResultOk
     }
 
     unsafe fn tell(&self, pos: *mut int64) -> tresult {
-        if !pos.is_null() {
-            unsafe { *pos = self.data.lock().unwrap().1 as int64 };
-        }
+        unsafe { write_out(pos, self.data.lock().unwrap().1 as int64) };
         kResultOk
     }
 }
@@ -325,7 +307,7 @@ impl IComponentHandlerTrait for ComponentHandler {
     unsafe fn performEdit(&self, id: ParamID, value: ParamValue) -> tresult {
         let _ = self.to_processor.lock().unwrap().push((id, value as f32));
         let mut touches = self.touches.lock().unwrap();
-        if touches.len() < 4096 {
+        if touches.len() < MAX_TOUCHES {
             touches.push(Touch::Value { param: id, value: value as f32 });
         }
         kResultOk
@@ -506,9 +488,7 @@ impl IParamValueQueueTrait for ParamQueue {
             }
             points.insert(position, (offset, value));
         }
-        if !index.is_null() {
-            unsafe { *index = position as int32 };
-        }
+        unsafe { write_out(index, position as int32) };
         kResultOk
     }
 }
@@ -529,7 +509,7 @@ impl ParameterChanges {
         let queues: Vec<_> = (0..MAX_QUEUES)
             .map(|_| ComWrapper::new(ParamQueue { id: Cell::new(0), points: UnsafeCell::new(Vec::with_capacity(MAX_POINTS)) }))
             .collect();
-        let pointers = queues.iter().map(|q| q.as_com_ref::<IParamValueQueue>().unwrap().as_ptr()).collect();
+        let pointers = queues.iter().map(interface).collect();
         Self { queues, pointers, used: Cell::new(0) }
     }
 
@@ -541,8 +521,7 @@ impl ParameterChanges {
     }
 
     pub fn add(&self, id: ParamID, offset: i32, value: f64) {
-        let queue = self.queue_for(id);
-        if let Some(queue) = queue {
+        if let Some(queue) = self.queue_for(id) {
             unsafe { self.queues[queue].addPoint(offset, value, std::ptr::null_mut()) };
         }
     }
@@ -576,9 +555,7 @@ impl IParameterChangesTrait for ParameterChanges {
 
     unsafe fn addParameterData(&self, id: *const ParamID, index: *mut int32) -> *mut IParamValueQueue {
         let Some(queue) = self.queue_for(unsafe { *id }) else { return std::ptr::null_mut() };
-        if !index.is_null() {
-            unsafe { *index = queue as int32 };
-        }
+        unsafe { write_out(index, queue as int32) };
         self.pointers[queue]
     }
 }

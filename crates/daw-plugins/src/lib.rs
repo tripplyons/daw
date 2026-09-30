@@ -50,6 +50,20 @@ pub enum Touch {
     End(u32),
 }
 
+/// Most value touches queued between `take_touches` calls. Begin and end
+/// touches are always kept so gestures stay balanced.
+const MAX_TOUCHES: usize = 4096;
+
+/// Write `value` through an out-parameter the plugin may pass as null.
+///
+/// # Safety
+/// `out` must be null or valid for writes.
+unsafe fn write_out<T>(out: *mut T, value: T) {
+    if let Some(out) = unsafe { out.as_mut() } {
+        *out = value;
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PluginError {
     #[error("{0}")]
