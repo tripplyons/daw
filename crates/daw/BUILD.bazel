@@ -1,0 +1,21 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+rust_binary(
+    name = "daw",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [
+        "//crates/daw-plugins:tests/fixtures/khs-compressor-au.bin",
+        "//crates/daw-plugins:tests/fixtures/khs-compressor-vst3.bin",
+    ],
+    deps = [
+        "//crates/daw-engine",
+        "//crates/daw-model",
+        "//crates/daw-plugins",
+    ] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":daw",
+)

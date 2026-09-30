@@ -7,14 +7,17 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-cargo build --release -p daw
+bazel build -c opt //crates/daw
+binary=$(bazel cquery -c opt --output=files //crates/daw 2>/dev/null)
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 app=target/release/DAW.app
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/daw "$app/Contents/MacOS/daw"
+cp "$binary" "$app/Contents/MacOS/daw"
+# Bazel outputs are read-only; codesign needs to write the signature.
+chmod u+w "$app/Contents/MacOS/daw"
 
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

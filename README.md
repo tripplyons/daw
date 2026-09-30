@@ -32,6 +32,22 @@ The transport separates playback, pattern selection, recording, and file actions
 
 Panel headers keep common actions visible. "More" opens the full toolset, including controls that do not fit in a narrow tile. "Focus" fills the window with that tile, and "tile" opens split and close actions. Narrow tiles keep these actions in "more". Hover a control for its purpose and shortcuts. Settings has a saved UI scale from 75% to 200%.
 
+## Build with Bazel
+
+The repo also builds with [Bazel](https://bazel.build) through [rules_rust](https://github.com/bazelbuild/rules_rust). `.bazelversion` pins Bazel 9.2.0; install it with [Bazelisk](https://github.com/bazelbuild/bazelisk) or Homebrew (`brew install bazel`).
+
+```sh
+bazel run -c opt //crates/daw
+bazel build //...
+bazel test //...
+```
+
+`-c opt` builds with optimizations, like `cargo run --release`. The first build compiles every dependency and takes a few minutes.
+
+Pass arguments after `--`, for example `bazel run -c opt //crates/daw -- song.dawproj`. Relative paths resolve from the directory where you ran `bazel`.
+
+Third-party crates come from `Cargo.lock` and the `Cargo.toml` files, so add dependencies with Cargo as usual. Dependencies between the workspace crates are listed in each crate's `BUILD.bazel`; update those when one crate starts using another.
+
 ## Build a .app (macOS)
 
 ```sh
@@ -39,7 +55,7 @@ scripts/bundle-app.sh
 open target/release/DAW.app
 ```
 
-The script builds a release binary and wraps it in `target/release/DAW.app` with an ad-hoc code signature, which is enough to run it on your own Mac. Pass `--install` to also copy it to `/Applications`; it refuses to replace a different app already at that path.
+The script builds a release binary with Bazel and wraps it in `target/release/DAW.app` with an ad-hoc code signature, which is enough to run it on your own Mac. Pass `--install` to also copy it to `/Applications`; it refuses to replace a different app already at that path.
 
 The bundle declares the `.dawproj` file type, so double-clicking a project in Finder (or dropping one on the Dock icon) opens it in DAW. After `--install`, only the copy in `/Applications` handles these files. It also carries the microphone usage text that macOS shows before audio recording.
 
@@ -196,6 +212,12 @@ On macOS, the native sidechain tests use the free kHs Compressor VST3 and Audio 
 
 ```sh
 cargo test -p daw-plugins --test khs_sidechain -- --ignored --test-threads=1
+```
+
+With Bazel, run them outside the sandbox, because the Audio Unit fails to load inside it:
+
+```sh
+bazel test //crates/daw-plugins:khs_sidechain_test --test_arg=--ignored --test_arg=--test-threads=1 --strategy=TestRunner=local
 ```
 
 The workspace has four crates:

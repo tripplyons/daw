@@ -22,6 +22,10 @@ use app::App;
 use clap::Parser;
 
 fn main() -> ExitCode {
+    // `bazel run` starts in the runfiles directory; resolve relative paths from where it was invoked.
+    if let Some(dir) = std::env::var_os("BUILD_WORKING_DIRECTORY") {
+        let _ = std::env::set_current_dir(dir);
+    }
     // Plugin scanning re-runs this executable as a child process per plugin.
     let args: Vec<String> = std::env::args().collect();
     if let Some(code) = daw_plugins::scan::run_child(&args) {

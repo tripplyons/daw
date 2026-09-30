@@ -1,0 +1,50 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["tests/fixtures/*.bin"]))
+
+rust_library(
+    name = "daw-plugins",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "daw_plugins",
+    deps = [
+        "//crates/daw-engine",
+        "//crates/daw-model",
+    ] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":daw-plugins",
+)
+
+[rust_test(
+    name = test + "_test",
+    srcs = ["tests/%s.rs" % test],
+    compile_data = glob(["tests/fixtures/*.bin"]),
+    deps = [
+        ":daw-plugins",
+        "//crates/daw-engine",
+        "//crates/daw-model",
+    ] + all_crate_deps(normal = True),
+) for test in [
+    "dpf_eq",
+    "khs_sidechain",
+]]
+
+[rust_binary(
+    name = example,
+    srcs = ["examples/%s.rs" % example],
+    deps = [
+        ":daw-plugins",
+        "//crates/daw-engine",
+        "//crates/daw-model",
+    ] + all_crate_deps(normal = True),
+) for example in [
+    "au_smoke",
+    "editor_toggle",
+    "scan_all",
+    "vst3_smoke",
+]]
