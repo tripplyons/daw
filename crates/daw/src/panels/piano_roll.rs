@@ -16,7 +16,7 @@ use iced::widget::row;
 use iced::{Element, Length};
 
 use super::timeline::{self, RULER_HEIGHT, TimeView};
-use super::{label, pick};
+use super::pick;
 use crate::app::{App, Message as AppMessage};
 
 mod roll;
@@ -389,11 +389,11 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     let selected = channels.iter().find(|c| Some(c.id) == app.selected_channel).cloned();
     row![
         pick(channels, selected, |c: ChannelChoice| Message::Channel(c.id).into()),
-        label("snap"),
-        pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into()),
+        super::labeled("snap", pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into())),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center)
+    .wrap()
     .into()
 }
 

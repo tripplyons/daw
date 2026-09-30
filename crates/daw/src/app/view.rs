@@ -4,7 +4,7 @@ use daw_engine::song::PlayMode;
 use daw_model::layout::{Axis, Node, Panel, TileId};
 use daw_model::PatternId;
 use daw_plugins::scan::Progress;
-use iced::widget::{button, column, container, mouse_area, pick_list, progress_bar, row, rule, stack, text, text_input};
+use iced::widget::{Space, column, container, mouse_area, pick_list, progress_bar, responsive, row, rule, stack, text, text_input};
 use iced::{Element, Length, mouse};
 
 use super::{App, JOBS_HEIGHT, Message, TRANSPORT_HEIGHT};
@@ -13,7 +13,7 @@ use crate::menu;
 use crate::panels::{self, automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
 use crate::theme;
 
-const GUTTER: f32 = 3.0;
+pub(super) const GUTTER: f32 = 8.0;
 
 impl App {
     pub fn view(&self) -> Element<'_, Message> {
@@ -98,43 +98,44 @@ impl App {
         let layout = self.layout();
         let panel = layout.panel(id);
         let focused = layout.focused == id;
-        let name_color = if focused { theme::BRIGHT } else { theme::TEXT_DIM };
-        let picker = pick_list(Panel::ALL, Some(panel), move |p| Message::SetPanel(id, p))
-            .text_size(theme::SMALL)
-            .padding([2, 6])
-            .style(move |theme, status| {
-                let mut style = theme::pick(theme, status);
-                style.text_color = name_color;
-                style.background = iced::Background::Color(iced::Color::TRANSPARENT);
-                style
-            })
-            .menu_style(theme::menu);
-        let tools = match panel {
-            Panel::Browser => browser::toolbar(self),
-            Panel::ChannelRack => channel_rack::toolbar(self),
-            Panel::PianoRoll => piano_roll::toolbar(self),
-            Panel::Playlist => playlist::toolbar(self),
-            Panel::Mixer => mixer::toolbar(self),
-            Panel::Automation => automation::toolbar(self),
-            Panel::Parameters => parameters::toolbar(self),
-            Panel::Settings => settings::toolbar(self),
-        };
-        let tools = if panel == Panel::Playlist {
-            crate::panels::scroll(tools, false, true).width(Length::Fill).height(theme::HEADER_HEIGHT).into()
-        } else { tools };
-        let marker = if layout.zoomed { text("focus").size(theme::SMALL).color(theme::TEXT_DIM) } else { text("") };
-        let header = container(row![picker, tools, marker].spacing(6).align_y(iced::Alignment::Center))
-            .height(theme::HEADER_HEIGHT)
-            .width(Length::Fill)
-            .padding([0, 4])
-            .align_y(iced::Alignment::Center)
-            .style(move |t| {
-                let mut style = theme::header(t);
-                if focused {
-                    style.background = Some(iced::Background::Color(theme::CONTROL));
-                }
-                style
-            });
+        let highlight = focused && !layout.zoomed && layout.leaves().len() > 1;
+        let header = responsive(move |size| {
+            let more = panels::help(
+                panels::tool("more", menu::Message::Open(menu::Item::Tools(id)).into()),
+                format!("{panel}: {}", panels::action_hint(self, Action::PanelTools)),
+            );
+            let mut bar = row![].spacing(4).align_y(iced::Alignment::Center);
+            if size.width >= 120.0 {
+                let picker = pick_list(Panel::ALL, Some(panel), move |p| Message::SetPanel(id, p))
+                    .text_size(theme::SMALL)
+                    .width((size.width - 66.0).clamp(40.0, 110.0))
+                    .padding([3, 6])
+                    .style(theme::pick)
+                    .menu_style(theme::menu);
+                bar = bar.push(panels::help(picker, "Change this tile's panel"));
+                let extra = if size.width >= 300.0 { 72.0 } else { 0.0 };
+                let available = (size.width - 170.0 - extra).max(0.0);
+                bar = bar.push(container(self.primary_tools(panel, available)).width(Length::Fill));
+            } else {
+                bar = bar.push(container(text(panel.to_string()).size(theme::SMALL).wrapping(iced::widget::text::Wrapping::None))
+                    .width(Length::Fill).clip(true));
+            }
+            bar = bar.push(more);
+            if size.width >= 300.0 {
+                let focus = panels::tool(if layout.zoomed { "restore" } else { "focus" }, Message::TileAction(id, Action::Zoom));
+                bar = bar.push(panels::help(focus, panels::action_hint(self, Action::Zoom)));
+                bar = bar.push(panels::help(
+                    panels::tool("tile", menu::Message::Open(menu::Item::Tile(id)).into()),
+                    "Split or close this tile",
+                ));
+            }
+            container(bar).padding([0, 4]).height(theme::HEADER_HEIGHT).center_y(theme::HEADER_HEIGHT)
+                .style(move |t| {
+                    let mut style = theme::header(t);
+                    if highlight { style.background = Some(theme::CONTROL.into()); }
+                    style
+                }).into()
+        }).height(theme::HEADER_HEIGHT);
         let body = match panel {
             Panel::Browser => browser::view(self),
             Panel::ChannelRack => channel_rack::view(self),
@@ -145,94 +146,114 @@ impl App {
             Panel::Parameters => parameters::view(self),
             Panel::Settings => settings::view(self),
         };
-        container(column![header, container(body).width(Length::Fill).height(Length::Fill)])
+        container(column![header, container(body).width(Length::Fill).height(Length::Fill).clip(true)])
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::panel)
+            .padding(1)
+            .style(move |t| {
+                let mut style = theme::panel(t);
+                style.border = iced::Border { color: if highlight { theme::TEXT_DIM } else { theme::LINE }, width: 1.0, radius: 0.0.into() };
+                style
+            })
             .into()
     }
 
-    fn transport(&self) -> Element<'_, Message> {
-        let small = |label: &str| text(label.to_string()).size(theme::SMALL);
-        let playing = self.playing;
-        let mode_label = match self.mode {
-            PlayMode::Song => "song",
-            PlayMode::Pattern(_) => "pattern",
-        };
-        let beats = self.position / f64::from(daw_model::time::TICKS_PER_BEAT);
-        let beats_per_bar = f64::from(self.project.signature.numerator);
-        let position = format!(
-            "{}.{}.{:02}",
-            (beats / beats_per_bar).floor() as u32 + 1,
-            (beats % beats_per_bar).floor() as u32 + 1,
-            ((beats.fract()) * 100.0).floor() as u32
-        );
-        let pattern_names: Vec<PatternChoice> =
-            self.project.patterns.iter().map(|p| PatternChoice { id: p.id, name: p.name.clone() }).collect();
-        let selected = pattern_names.iter().find(|p| p.id == self.selected_pattern).cloned();
+    fn primary_tools(&self, panel: Panel, width: f32) -> Element<'_, Message> {
+        let mut tools = row![].spacing(4).align_y(iced::Alignment::Center);
+        match panel {
+            Panel::Browser if width >= 52.0 => tools = tools.push(panels::tool("rescan", Message::Rescan)),
+            Panel::Playlist => {
+                if width >= 62.0 { tools = tools.push(panels::action(self, "+ audio", Action::ImportAudio, None)); }
+                if width >= 120.0 { tools = tools.push(panels::tool("+ track", playlist::Message::AddTrack.into())); }
+                if width >= 190.0 { tools = tools.push(panels::toggle("stretch", self.playlist.stretch_mode, playlist::Message::StretchMode.into())); }
+            }
+            Panel::ChannelRack => {
+                if width >= 64.0 { tools = tools.push(panels::tool("+ synth", channel_rack::Message::AddSynth.into())); }
+                if width >= 134.0 { tools = tools.push(panels::tool("+ sample", channel_rack::Message::AddSampler.into())); }
+            }
+            Panel::PianoRoll if width >= 95.0 => tools = tools.push(row![
+                panels::label("snap"),
+                panels::pick(daw_model::time::Grid::CHOICES.to_vec(), Some(self.project.grid), |g| piano_roll::Message::Grid(g).into()),
+            ].spacing(4).align_y(iced::Alignment::Center)),
+            Panel::Mixer if width >= 70.0 => tools = tools.push(panels::tool("+ insert", mixer::Message::AddInsert.into())),
+            Panel::Automation if width >= 132.0 => {
+                use automation::Tool;
+                for (label, tool) in [("edit", Tool::Edit), ("draw", Tool::Draw), ("line", Tool::Line)] {
+                    tools = tools.push(panels::toggle(label, self.automation.tool == tool, automation::Message::Tool(tool).into()));
+                }
+            }
+            _ => {}
+        }
+        tools.into()
+    }
+
+    fn pattern_picker(&self, width: f32) -> Element<'_, Message> {
+        let patterns: Vec<PatternChoice> = self.project.patterns.iter().map(|p| PatternChoice { id: p.id, name: p.name.clone() }).collect();
+        let selected = patterns.iter().find(|p| p.id == self.selected_pattern).cloned();
+        panels::help(mouse_area(
+            pick_list(patterns, selected, |p: PatternChoice| Message::SelectPattern(p.id))
+                .text_size(theme::SMALL).width(width).padding([3, 6]).style(theme::pick).menu_style(theme::menu)
+        ).on_right_press(menu::Message::Open(menu::Item::Pattern(self.selected_pattern)).into()),
+            "Selected pattern; right-click to rename or clone")
+    }
+
+    pub(crate) fn pattern_tools(&self) -> Element<'_, Message> {
         let bar = self.project.signature.ticks_per_bar();
         let bars = self.project.pattern(self.selected_pattern).map(|p| p.length.div_ceil(bar).max(1));
-        let mut bar_choices: Vec<u64> = (1..=16).collect();
-        if let Some(bars) = bars
-            && !bar_choices.contains(&bars)
-        {
-            bar_choices.push(bars);
-        }
+        let mut choices: Vec<u64> = (1..=16).collect();
+        if let Some(bars) = bars && !choices.contains(&bars) { choices.push(bars); }
+        column![
+            panels::label("pattern"), self.pattern_picker(250.0),
+            row![panels::label("length"), panels::pick(choices, bars, Message::PatternBars), panels::label("bars")].spacing(6).align_y(iced::Alignment::Center),
+            row![panels::tool("+ pattern", Message::NewPattern), panels::tool("clone", Message::ClonePattern(self.selected_pattern))].spacing(4),
+        ].spacing(8).padding(8).into()
+    }
+
+    fn transport(&self) -> Element<'_, Message> {
+        let beats = self.position / f64::from(daw_model::time::TICKS_PER_BEAT);
+        let beats_per_bar = f64::from(self.project.signature.numerator);
+        let position = format!("{}.{}.{:02}", (beats / beats_per_bar).floor() as u32 + 1,
+            (beats % beats_per_bar).floor() as u32 + 1, ((beats.fract()) * 100.0).floor() as u32);
+        let mode = match self.mode { PlayMode::Song => "song", PlayMode::Pattern(_) => "pattern" };
+        let play = panels::action(self, if self.playing { "pause" } else { "play" }, Action::PlayPause, Some(self.playing));
+        let playback = row![
+            play,
+            panels::action(self, "rewind", Action::Stop, None),
+            panels::action(self, mode, Action::ToggleMode, None),
+            panels::help(text(position).size(theme::TEXT_SIZE).font(iced::Font::MONOSPACE).width(70), "Position: bar.beat.fraction"),
+            text_input("bpm", &self.bpm_text.clone().unwrap_or_else(|| format!("{}", self.project.bpm)))
+                .id("tempo").on_submit(Message::BpmDone).on_input(Message::SetBpm).size(theme::SMALL)
+                .width(48).padding([3, 4]).style(theme::input),
+            panels::label("bpm"),
+        ].spacing(4).align_y(iced::Alignment::Center);
+        let pattern: Element<'_, Message> = if self.window.width >= 880.0 {
+            row![self.pattern_picker(150.0), panels::tool("more", menu::Message::Open(menu::Item::PatternTools).into())].spacing(4).into()
+        } else { panels::tool("pattern", menu::Message::Open(menu::Item::PatternTools).into()) };
+        let mut files = row![].spacing(4).align_y(iced::Alignment::Center);
+        if self.window.width >= 1000.0 { files = files.push(panels::action(self, "save", Action::Save, None)); }
+        if self.window.width >= 1200.0 { files = files.push(panels::action(self, "export", Action::Export, None)); }
+        files = files.push(panels::help(panels::tool("file", menu::Message::Open(menu::Item::Files).into()), "New, open, save, import, and export"))
+            .push(panels::action(self, "settings", Action::Settings, None));
+        let top = row![playback, divider(), pattern, Space::new().width(Length::Fill), files].spacing(8).align_y(iced::Alignment::Center);
+        let recording = row![
+            panels::label("record"),
+            panels::action(self, "automation", Action::ToggleRecord, Some(self.record)),
+            panels::action(self, "MIDI", Action::ToggleMidiRecord, Some(self.midi.recording)),
+            panels::action(self, "audio", Action::ToggleAudioRecord, Some(self.session.recording_armed())),
+            divider(), panels::action(self, "bind automation", Action::ToggleBind, Some(self.bind_mode)),
+        ].spacing(4).align_y(iced::Alignment::Center);
         let scan = match self.scan {
             Some(Progress { done, total }) if total > 0 => format!("scanning plugins {done}/{total}"),
-            Some(_) => "scanning plugins".into(),
-            None => String::new(),
+            Some(_) => "scanning plugins".into(), None => self.status.clone(),
         };
-        let bar = row![
-            button(small(if playing { "stop" } else { "play" }))
-                .on_press(Message::Action(Action::PlayPause))
-                .style(theme::toggle(playing))
-                .padding([3, 8]),
-            button(small(mode_label)).on_press(Message::Action(Action::ToggleMode)).style(theme::control).padding([3, 8]),
-            text(position).size(theme::TEXT_SIZE).font(iced::Font::MONOSPACE).width(70),
-            text_input("bpm", &self.bpm_text.clone().unwrap_or_else(|| format!("{}", self.project.bpm)))
-                .id("tempo")
-                .on_submit(Message::BpmDone)
-                .on_input(Message::SetBpm)
-                .size(theme::SMALL)
-                .width(48)
-                .padding([3, 4])
-                .style(theme::input),
-            small("bpm").color(theme::TEXT_DIM),
-            mouse_area(
-                pick_list(pattern_names, selected, |p: PatternChoice| Message::SelectPattern(p.id))
-                    .text_size(theme::SMALL)
-                    .padding([3, 6])
-                    .style(theme::pick)
-                    .menu_style(theme::menu)
-            )
-            .on_right_press(menu::Message::Open(menu::Item::Pattern(self.selected_pattern)).into()),
-            pick_list(bar_choices, bars, Message::PatternBars)
-                .text_size(theme::SMALL)
-                .padding([3, 6])
-                .style(theme::pick)
-                .menu_style(theme::menu),
-            small("bars").color(theme::TEXT_DIM),
-            button(small("+ pattern")).on_press(Message::NewPattern).style(theme::control).padding([3, 8]),
-            button(small("bind")).on_press(Message::Action(Action::ToggleBind)).style(theme::toggle(self.bind_mode)).padding([3, 8]),
-            button(small("rec")).on_press(Message::Action(Action::ToggleRecord)).style(theme::toggle(self.record)).padding([3, 8]),
-            button(small("rec midi")).on_press(Message::Action(Action::ToggleMidiRecord))
-                .style(theme::toggle(self.midi.recording)).padding([3, 8]),
-            button(small("rec audio"))
-                .on_press(Message::Action(Action::ToggleAudioRecord))
-                .style(theme::toggle(self.session.recording_armed()))
-                .padding([3, 8]),
-            text(self.status.clone()).size(theme::SMALL).color(theme::TEXT_DIM).width(Length::Fill),
-            small(&scan).color(theme::TEXT_DIM),
-            button(small("export")).on_press(Message::Action(Action::Export)).style(theme::control).padding([3, 8]),
-            button(small("open")).on_press(Message::Action(Action::Open)).style(theme::control).padding([3, 8]),
-            button(small("save")).on_press(Message::Action(Action::Save)).style(theme::control).padding([3, 8]),
-            button(small("settings")).on_press(Message::Action(Action::Settings)).style(theme::control).padding([3, 8]),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
-        container(bar).height(TRANSPORT_HEIGHT).width(Length::Fill).padding([0, 4]).center_y(TRANSPORT_HEIGHT).style(theme::header).into()
+        let status = container(panels::help(
+            text(scan.clone()).size(theme::SMALL).color(theme::TEXT_DIM).wrapping(iced::widget::text::Wrapping::None), scan,
+        )).width(Length::Fill).clip(true);
+        let bottom = row![recording, divider(), status].spacing(8).align_y(iced::Alignment::Center);
+        container(column![container(top).height(30).center_y(30), container(bottom).height(30).center_y(30)])
+            .height(TRANSPORT_HEIGHT).width(Length::Fill).padding([2, 6]).style(theme::header).into()
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -261,4 +282,8 @@ fn job(label: &str, progress: f32, cancel: Message) -> Element<'_, Message> {
 
 fn rule_style() -> rule::Style {
     rule::Style { color: theme::LINE, radius: 0.0.into(), fill_mode: rule::FillMode::Full, snap: true }
+}
+
+fn divider<'a>() -> Element<'a, Message> {
+    container(rule::vertical(1).style(|_| rule_style())).height(18).width(1).into()
 }

@@ -190,19 +190,28 @@ impl Layout {
 
     /// Tile rectangles within `area`. In focus mode only the focused tile is returned.
     pub fn rects(&self, area: Rect) -> Vec<(TileId, Rect)> {
+        self.rects_with_gap(area, 0.0)
+    }
+
+    /// Pixel geometry when split handles reserve space between the children.
+    pub fn rects_with_gap(&self, area: Rect, gap: f32) -> Vec<(TileId, Rect)> {
         if self.zoomed {
             return vec![(self.focused, area)];
         }
         let mut out = Vec::new();
-        collect_rects(&self.root, area, &mut out);
+        collect_rects(&self.root, area, gap, &mut out);
         out
     }
 
     /// Split lines as (path to split node, axis, line rect) for mouse resizing.
     pub fn splits(&self, area: Rect) -> Vec<(Vec<bool>, Axis, Rect)> {
+        self.splits_with_gap(area, 0.0)
+    }
+
+    pub fn splits_with_gap(&self, area: Rect, gap: f32) -> Vec<(Vec<bool>, Axis, Rect)> {
         let mut out = Vec::new();
         if !self.zoomed {
-            collect_splits(&self.root, area, &mut Vec::new(), &mut out);
+            collect_splits(&self.root, area, gap, &mut Vec::new(), &mut out);
         }
         out
     }
@@ -270,7 +279,7 @@ impl Layout {
 
     fn rects_unzoomed(&self) -> Vec<(TileId, Rect)> {
         let mut out = Vec::new();
-        collect_rects(&self.root, Rect::UNIT, &mut out);
+        collect_rects(&self.root, Rect::UNIT, 0.0, &mut out);
         out
     }
 
@@ -383,26 +392,42 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
     }
 }
 
-fn collect_rects(node: &Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
+fn split_with_gap(area: Rect, axis: Axis, ratio: f32, gap: f32) -> (Rect, Rect) {
+    let mut available = area;
+    match axis {
+        Axis::Horizontal => available.width = (area.width - gap).max(0.0),
+        Axis::Vertical => available.height = (area.height - gap).max(0.0),
+    }
+    // The renderer distributes integer fill portions on a 1000-point scale.
+    let portion = (ratio * 1000.0).round().clamp(1.0, 999.0) / 1000.0;
+    let (first, mut second) = available.split(axis, portion);
+    match axis {
+        Axis::Horizontal => second.x += gap,
+        Axis::Vertical => second.y += gap,
+    }
+    (first, second)
+}
+
+fn collect_rects(node: &Node, area: Rect, gap: f32, out: &mut Vec<(TileId, Rect)>) {
     match node {
         Node::Leaf(id) => out.push((*id, area)),
         Node::Split { axis, ratio, first, second } => {
-            let (a, b) = area.split(*axis, *ratio);
-            collect_rects(first, a, out);
-            collect_rects(second, b, out);
+            let (a, b) = if gap == 0.0 { area.split(*axis, *ratio) } else { split_with_gap(area, *axis, *ratio, gap) };
+            collect_rects(first, a, gap, out);
+            collect_rects(second, b, gap, out);
         }
     }
 }
 
-fn collect_splits(node: &Node, area: Rect, path: &mut Vec<bool>, out: &mut Vec<(Vec<bool>, Axis, Rect)>) {
+fn collect_splits(node: &Node, area: Rect, gap: f32, path: &mut Vec<bool>, out: &mut Vec<(Vec<bool>, Axis, Rect)>) {
     if let Node::Split { axis, ratio, first, second } = node {
         out.push((path.clone(), *axis, area));
-        let (a, b) = area.split(*axis, *ratio);
+        let (a, b) = if gap == 0.0 { area.split(*axis, *ratio) } else { split_with_gap(area, *axis, *ratio, gap) };
         path.push(false);
-        collect_splits(first, a, path, out);
+        collect_splits(first, a, gap, path, out);
         path.pop();
         path.push(true);
-        collect_splits(second, b, path, out);
+        collect_splits(second, b, gap, path, out);
         path.pop();
     }
 }
@@ -480,6 +505,20 @@ mod tests {
         let rects = layout.rects(Rect::UNIT);
         assert_eq!(rects[0].1, Rect { x: 0.0, y: 0.0, width: 0.5, height: 0.5 });
         assert_eq!(rects[2].1, Rect { x: 0.0, y: 0.5, width: 1.0, height: 0.5 });
+    }
+
+    #[test]
+    fn pixel_geometry_reserves_handles_in_nested_splits() {
+        let (layout, a, b, c) = three();
+        let area = Rect { x: 20.0, y: 64.0, width: 1000.0, height: 600.0 };
+        let rects = layout.rects_with_gap(area, 8.0);
+        assert_eq!(rects, vec![
+            (a, Rect { x: 20.0, y: 64.0, width: 496.0, height: 296.0 }),
+            (b, Rect { x: 524.0, y: 64.0, width: 496.0, height: 296.0 }),
+            (c, Rect { x: 20.0, y: 368.0, width: 1000.0, height: 296.0 }),
+        ]);
+        let splits = layout.splits_with_gap(area, 8.0);
+        assert_eq!(splits[1], (vec![false], Axis::Horizontal, Rect { x: 20.0, y: 64.0, width: 1000.0, height: 296.0 }));
     }
 
     #[test]

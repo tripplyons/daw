@@ -16,8 +16,8 @@ pub const LINE: Color = gray(0x26);
 pub const GRID: Color = gray(0x1e);
 pub const GRID_STRONG: Color = gray(0x2e);
 pub const TEXT: Color = gray(0xd0);
-pub const TEXT_DIM: Color = gray(0x80);
-pub const TEXT_FAINT: Color = gray(0x55);
+pub const TEXT_DIM: Color = gray(0x9a);
+pub const TEXT_FAINT: Color = gray(0x78);
 pub const BRIGHT: Color = gray(0xf4);
 pub const FILL: Color = gray(0x8a);
 pub const FILL_DIM: Color = gray(0x4a);
@@ -25,7 +25,7 @@ pub const SELECTED: Color = gray(0xe8);
 
 pub const TEXT_SIZE: f32 = 12.0;
 pub const SMALL: f32 = 11.0;
-pub const HEADER_HEIGHT: f32 = 22.0;
+pub const HEADER_HEIGHT: f32 = 28.0;
 
 pub fn theme() -> Theme {
     Theme::custom(

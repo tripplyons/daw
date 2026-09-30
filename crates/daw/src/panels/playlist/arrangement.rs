@@ -22,6 +22,26 @@ const EDGE: f32 = 5.0;
 /// Left part of a track header that toggles mute.
 const MUTE_WIDTH: f32 = 14.0;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget::canvas::Program;
+
+    #[test]
+    fn right_click_on_a_clip_opens_its_menu_without_removing_it() {
+        let mut app = App::boot().0;
+        let id = app.project.add_clip(0, 0, ClipSource::Pattern(app.selected_pattern));
+        let arrangement = Arrangement { tempo: app.project.tempo_map(), app: &app };
+        let event = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right));
+        let cursor = mouse::Cursor::Available(Point::new(HEADER_WIDTH + 20.0, RULER_HEIGHT + 10.0));
+        let action = arrangement.update(&mut CanvasState::default(), &event, Rectangle::with_size(Size::new(800.0, 500.0)), cursor).unwrap();
+        let (message, _, status) = action.into_inner();
+        assert!(matches!(message, Some(AppMessage::Menu(menu::Message::Open(menu::Item::Clip(clicked)))) if clicked == id));
+        assert_eq!(status, iced::event::Status::Captured);
+        assert_eq!(app.project.playlist.clips.len(), 1);
+    }
+}
+
 pub(super) struct Arrangement<'a> {
     pub(super) app: &'a App,
     pub(super) tempo: TempoMap,
@@ -306,7 +326,10 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                         state.drag = Some(Drag::Clips { tick: start as f64, track });
                         publish(Message::Add { start, track: track as usize })
                     }
-                    (Button::Right, Some((id, _))) => publish(Message::Delete(id)),
+                    (Button::Right, Some((id, _))) => {
+                        let open = menu::Message::Open(menu::Item::Clip(id));
+                        Some(canvas::Action::publish(open.into()).and_capture())
+                    }
                     (Button::Left | Button::Right, _) => {
                         state.drag = Some(Drag::Box { from: p, to: p, additive: state.modifiers.shift() });
                         Some(canvas::Action::request_redraw().and_capture())

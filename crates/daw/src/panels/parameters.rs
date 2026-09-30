@@ -69,7 +69,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
         let open = app.session.editor_open(instance);
         bar = bar.push(super::toggle("window", open, AppMessage::TogglePlugin(instance)));
     }
-    bar.into()
+    bar.wrap().into()
 }
 
 fn param_row<'a>(name: String, value: f32, shown: String, steps: u32, on_change: impl Fn(f32) -> AppMessage + 'a, target: Option<Target>) -> Element<'a, AppMessage> {

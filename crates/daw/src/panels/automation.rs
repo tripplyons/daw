@@ -654,20 +654,19 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
         toggle("edit", state.tool == Tool::Edit, Message::Tool(Tool::Edit).into()),
         toggle("draw", state.tool == Tool::Draw, Message::Tool(Tool::Draw).into()),
         toggle("line", state.tool == Tool::Line, Message::Tool(Tool::Line).into()),
-        label("time"),
-        pick(time_snaps, Some(state.time_snap), |s| Message::TimeSnap(s).into()),
-        label("value"),
-        pick(ValueSnap::CHOICES.to_vec(), Some(state.value_snap), |s| Message::ValueSnap(s).into()),
-        label("shape"),
-        super::pick_or(Shape::CYCLE.to_vec(), selected_shape, "-", |s| Message::Shape(s).into()),
-        pick(LfoShape::ALL.to_vec(), Some(state.lfo_shape), |s| Message::LfoShape(s).into()),
-        pick(LfoRate::CHOICES.to_vec(), Some(state.lfo_rate), |r| Message::LfoRate(r).into()),
-        tool("lfo", Message::Lfo.into()),
-        label("bars"),
-        pick(bar_choices, bars, |b| Message::Bars(b).into()),
+        super::labeled("time", pick(time_snaps, Some(state.time_snap), |s| Message::TimeSnap(s).into())),
+        super::labeled("value", pick(ValueSnap::CHOICES.to_vec(), Some(state.value_snap), |s| Message::ValueSnap(s).into())),
+        super::labeled("shape", super::pick_or(Shape::CYCLE.to_vec(), selected_shape, "-", |s| Message::Shape(s).into())),
+        row![
+            pick(LfoShape::ALL.to_vec(), Some(state.lfo_shape), |s| Message::LfoShape(s).into()),
+            pick(LfoRate::CHOICES.to_vec(), Some(state.lfo_rate), |r| Message::LfoRate(r).into()),
+            tool("lfo", Message::Lfo.into()),
+        ].spacing(3).align_y(iced::Alignment::Center),
+        super::labeled("bars", pick(bar_choices, bars, |b| Message::Bars(b).into())),
     ]
     .spacing(3)
     .align_y(iced::Alignment::Center)
+    .wrap()
     .into()
 }
 

@@ -170,7 +170,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     } else {
         tool("delete insert", Message::DeleteInsert.into())
     };
-    row![tool("+ insert", Message::AddInsert.into()), delete].spacing(2).into()
+    row![tool("+ insert", Message::AddInsert.into()), delete].spacing(2).wrap().into()
 }
 
 fn meter<'a>(peak: f32) -> Element<'a, AppMessage> {
@@ -210,6 +210,8 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                 .style(theme::fader),
         )
         .on_right_press(AppMessage::Automate(Target::InsertPan(id)));
+        let fader = super::help(fader, format!("Volume: {}\nRight-click to automate", gain_text(insert.volume)));
+        let pan = super::help(pan, format!("Pan: {}\nRight-click to automate", pan_text(insert.pan)));
         let name = button(text(insert.name.clone()).size(theme::SMALL))
             .on_press(Message::Select(id).into())
             .style(theme::plain(selected))
@@ -231,8 +233,8 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             pan,
             text(pan_text(insert.pan)).size(10).color(theme::TEXT_DIM),
             row![
-                toggle("m", insert.mute, Message::Mute(id).into()),
-                toggle("s", insert.solo, Message::Solo(id).into()),
+                super::help(toggle("m", insert.mute, Message::Mute(id).into()), "Mute insert"),
+                super::help(toggle("s", insert.solo, Message::Solo(id).into()), "Solo insert"),
             ]
             .spacing(2),
         ]

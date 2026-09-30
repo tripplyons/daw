@@ -1,7 +1,7 @@
 //! Song arrangement: pattern, automation, and audio clips on tracks.
 //!
 //! Left click places the brush clip or drags clips (either edge trims),
-//! double click opens a clip, right click deletes, right drag (or Ctrl drag
+//! double click opens a clip, right click opens its menu, right drag (or Ctrl drag
 //! on macOS) selects a box, Alt click splits a clip. Click a track name to
 //! select the track, or its square to mute it; right click it for its menu.
 //! In the ruler, left click seeks and right drag sets the loop.
@@ -105,6 +105,9 @@ impl State {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    SelectClip(ClipId),
+    Duplicate,
+    DeleteSelection,
     MakeUnique,
     Consolidate,
     Reverse,
@@ -124,7 +127,6 @@ pub enum Message {
     Begin { id: ClipId, edge: Option<Edge>, additive: bool },
     Drag { ticks: f64, tracks: i32, bypass: bool },
     End,
-    Delete(ClipId),
     Split(ClipId, f64),
     Open(ClipId),
     BoxSelect { from: (f64, usize), to: (f64, usize), additive: bool },
@@ -191,6 +193,18 @@ fn grow_tracks(app: &mut App, needed: usize) {
 
 pub fn update(app: &mut App, message: Message) {
     match message {
+        Message::SelectClip(id) => {
+            if !app.project.playlist.clips.iter().any(|c| c.id == id) { return; }
+            if !app.playlist.selected.contains(&id) { app.playlist.selected = vec![id]; }
+            app.playlist.selected_track = None;
+        }
+        Message::Duplicate => {
+            begin_drag(app);
+            let source = std::mem::take(&mut app.playlist.originals);
+            let (Some(first), Some(last)) = (source.iter().map(|c| c.start).min(), source.iter().map(Clip::end).max()) else { return };
+            paste(app, source, (last - first) as i64);
+        }
+        Message::DeleteSelection => { delete_selected(app); }
         Message::MakeUnique => {
             let selected = app.playlist.selected.clone();
             if selected.is_empty() { app.set_status("select clips to make unique"); return; }
@@ -429,12 +443,6 @@ pub fn update(app: &mut App, message: Message) {
             }
             app.playlist.cancel_drag();
         }
-        Message::Delete(id) => {
-            app.checkpoint();
-            app.project.playlist.clips.retain(|c| c.id != id);
-            app.playlist.selected.retain(|&c| c != id);
-            app.edited();
-        }
         Message::Split(id, tick) => {
             let (grid, signature) = (app.project.grid, app.project.signature);
             let at = grid.snap(tick.max(0.0) as Ticks, signature);
@@ -579,39 +587,33 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
             begin_drag(app);
             app.playlist.clipboard = std::mem::take(&mut app.playlist.originals);
         }
-        Key::Character(c) if modifiers.command() && (c.as_str() == "v" || c.as_str() == "d") => {
-            let source = if c.as_str() == "d" {
-                begin_drag(app);
-                std::mem::take(&mut app.playlist.originals)
-            } else {
-                app.playlist.clipboard.clone()
-            };
-            let (Some(first), Some(last)) = (source.iter().map(|c| c.start).min(), source.iter().map(Clip::end).max()) else {
-                return true;
-            };
-            let offset = if c.as_str() == "d" {
-                (last - first) as i64
-            } else {
-                app.project.grid.snap_floor(app.position as Ticks, app.project.signature) as i64 - first as i64
-            };
-            app.checkpoint();
-            let mut added = Vec::new();
-            for clip in source {
-                let id = app.project.add_clip(clip.track, (clip.start as i64 + offset).max(0) as Ticks, clip.source);
-                if let Some(new) = app.project.playlist.clips.iter_mut().find(|c| c.id == id) {
-                    new.length = clip.length;
-                    new.offset = clip.offset;
-                    new.audio = clip.audio;
-                    new.muted = clip.muted;
-                }
-                added.push(id);
-            }
-            app.playlist.selected = added;
-            app.edited();
+        Key::Character(c) if modifiers.command() && c.as_str() == "d" => update(app, Message::Duplicate),
+        Key::Character(c) if modifiers.command() && c.as_str() == "v" => {
+            let source = app.playlist.clipboard.clone();
+            let Some(first) = source.iter().map(|c| c.start).min() else { return true };
+            let offset = app.project.grid.snap_floor(app.position as Ticks, app.project.signature) as i64 - first as i64;
+            paste(app, source, offset);
         }
         _ => return false,
     }
     true
+}
+
+fn paste(app: &mut App, source: Vec<Clip>, offset: i64) {
+    app.checkpoint();
+    let mut added = Vec::new();
+    for clip in source {
+        let id = app.project.add_clip(clip.track, (clip.start as i64 + offset).max(0) as Ticks, clip.source);
+        if let Some(new) = app.project.playlist.clips.iter_mut().find(|c| c.id == id) {
+            new.length = clip.length;
+            new.offset = clip.offset;
+            new.audio = clip.audio;
+            new.muted = clip.muted;
+        }
+        added.push(id);
+    }
+    app.playlist.selected = added;
+    app.edited();
 }
 
 pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
@@ -640,14 +642,13 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
         toggle("stretch", app.playlist.stretch_mode, Message::StretchMode.into()),
         super::tool("+ track", Message::AddTrack.into()),
         delete,
-        super::tool("+ audio", AppMessage::Action(Action::ImportAudio)),
-        label("brush"),
-        pick(choices, current, |c| Message::Brush(c).into()),
-        label("snap"),
-        pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into()),
+        super::action(app, "+ audio", Action::ImportAudio, None),
+        super::labeled("brush", pick(choices, current, |c| Message::Brush(c).into())),
+        super::labeled("snap", pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into())),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center)
+    .wrap()
     .into()
 }
 

@@ -28,6 +28,10 @@ The first build takes a few minutes. Debug builds also work (`cargo run`); the w
 
 Tempo edits apply when you press Enter or leave the BPM field.
 
+The transport separates playback, pattern selection, recording, and file actions. "Pause" returns to the start marker; "rewind" stops and moves the marker to the loop start or song start. The "file" menu contains new, open, save, import, and export actions.
+
+Panel headers keep common actions visible. "More" opens the full toolset, including controls that do not fit in a narrow tile. "Focus" fills the window with that tile, and "tile" opens split and close actions. Narrow tiles keep these actions in "more". Hover a control for its purpose and shortcuts. Settings has a saved UI scale from 75% to 200%.
+
 ## Build a .app (macOS)
 
 ```sh
@@ -57,7 +61,7 @@ Click a plugin in the browser panel to use it: an instrument gets a new channel 
 Audio clips play part of a WAV file at its own speed, without following tempo changes. Each file gets an audio channel in the channel rack, which sets its volume, pan, and mixer insert; double-click an audio clip to select its channel.
 
 - Import: press Cmd+I, click "+ audio" in the playlist toolbar, or drop WAV files on the window. The clip starts at the song start marker on the first free track.
-- Record: press Alt+Shift+R or click "rec audio" to arm the default input device, then play in song mode. Each stretch of playback becomes a take, written to the recordings folder and placed on the first free track. Saving the project embeds the take in the project file. Input latency is compensated. Click "rec audio" again to disarm. The app asks for microphone access the first time.
+- Record: press Alt+Shift+R or click "audio" in the recording row to arm the default input device, then play in song mode. Each stretch of playback becomes a take, written to the recordings folder and placed on the first free track. Saving the project embeds the take in the project file. Input latency is compensated. Click "audio" again to disarm. The app asks for microphone access the first time.
 - Edit: drag a clip's left or right edge to trim it, Alt-click to split it, and Cmd+C, Cmd+V, and Cmd+D to copy, paste, and duplicate it. After an import or a take, the playlist brush is that file, so a click places the whole file again.
 
 A take recorded over a loop keeps going past the loop end as one clip.
@@ -82,11 +86,11 @@ A sidechain feeds the destination plugin's first auxiliary audio input. Use an e
 
 Open settings (Cmd+comma), choose a MIDI input, and select an instrument channel. "Rescan inputs" updates the device list. The choice is saved in the config. MIDI note input plays the selected instrument even while stopped; a note-off returns to the instrument that received its note-on.
 
-Click "rec midi" or press Cmd+Shift+R to arm recording, then play. Pattern mode records into the current pattern. Song mode creates a "MIDI take" pattern and playlist clip at the start marker or loop start, growing the take as needed. Pitch, velocity, start, and duration are recorded. Notes crossing a loop boundary are split; holding a key across several passes fills one loop. Stop or disarm to finish held notes.
+Click "MIDI" in the recording row or press Cmd+Shift+R to arm recording, then play. Pattern mode records into the current pattern. Song mode creates a "MIDI take" pattern and playlist clip at the start marker or loop start, growing the take as needed. Pitch, velocity, start, and duration are recorded. Notes crossing a loop boundary are split; holding a key across several passes fills one loop. Stop or disarm to finish held notes.
 
 ## Renaming
 
-Right-click a channel name, a mixer strip, or a playlist track name to open a menu with rename and delete; channels also have preview. Right-click the pattern picker in the top bar or the clip picker in the automation editor to rename a pattern or automation clip. Enter or clicking away saves the name, Escape cancels, and Cmd+Z undoes it. Right-clicking a playlist clip still deletes it.
+Right-click a channel name, a mixer strip, or a playlist track name to open a menu with rename and delete; channels also have preview. Right-click the pattern picker in the top bar or the clip picker in the automation editor to rename a pattern or automation clip. Enter or clicking away saves the name, Escape cancels, and Cmd+Z undoes it. Right-click a playlist clip for open, duplicate, make unique, consolidate, mute, and delete actions. Right-clicking a selected clip keeps the selection so these actions can edit several clips. Shift+F10 opens the selected item's menu. Use Up/Down and Enter to choose menu entries, or Escape to dismiss.
 
 ## Files
 
@@ -143,6 +147,7 @@ Alt is the tiling modifier. Keys match by physical position, so they work on any
 | Alt+Enter | Split the focused tile |
 | Alt+V / Alt+B | Next split stacked / side by side |
 | Alt+Space | Change the focused tile's panel |
+| Alt+T | Open the focused panel's tools |
 | Alt+F | Focus mode (one tile fills the window) |
 | Alt+Q | Close the focused tile |
 | Alt+1 to Alt+9 | Switch workspace |
@@ -157,6 +162,7 @@ Alt is the tiling modifier. Keys match by physical position, so they work on any
 | Cmd+Alt+C in playlist | Consolidate selection to audio |
 | M in playlist | Mute or unmute selected clips |
 | Delete | Delete the selection in the focused panel |
+| Shift+F10 | Open the selected item's menu |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo |
 | Cmd+N / Cmd+O / Cmd+S / Cmd+Shift+S | New / open / save / save as |
 | Cmd+E | Export WAV |

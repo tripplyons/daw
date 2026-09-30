@@ -93,6 +93,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
         rescan,
     ]
     .spacing(2)
+    .wrap()
     .into()
 }
 
@@ -125,23 +126,28 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                 continue;
             }
             let format = match info.plugin.format {
-                PluginFormat::Vst3 => "vst3",
-                PluginFormat::AudioUnit => "au",
+                PluginFormat::Vst3 => "VST3",
+                PluginFormat::AudioUnit => "AU",
             };
             let kind = match info.kind {
-                PluginKind::Instrument => "inst",
-                PluginKind::Effect => "fx",
+                PluginKind::Instrument => "instrument",
+                PluginKind::Effect => "effect",
             };
-            let line = row![
-                text(info.plugin.name.clone()).size(theme::SMALL).width(Length::Fill),
-                text(info.plugin.vendor.clone()).size(theme::SMALL).color(theme::TEXT_FAINT),
-                text(kind).size(theme::SMALL).color(theme::TEXT_DIM).width(28),
-                text(format).size(theme::SMALL).color(theme::TEXT_DIM).width(28),
-            ]
-            .spacing(6);
-            list = list.push(
-                button(line).on_press(Message::Add(index).into()).style(theme::plain(false)).padding([2, 6]).width(Length::Fill),
-            );
+            let badge = container(text(format).size(theme::SMALL).color(theme::TEXT_DIM)).padding([1, 4]).style(theme::fill(theme::CONTROL));
+            let title = row![text(info.plugin.name.clone()).size(theme::TEXT_SIZE).width(Length::Fill), badge].spacing(6);
+            let detail = text(format!("{} · {kind}", info.plugin.vendor)).size(theme::SMALL).color(theme::TEXT_DIM);
+            let line = column![title, detail].spacing(2);
+            let hint = match info.kind {
+                PluginKind::Instrument => format!("{}\n{} · {format} · instrument\nAdd to the channel rack", info.plugin.name, info.plugin.vendor),
+                PluginKind::Effect => {
+                    let target = app.project.mixer.insert(app.selected_insert).map(|i| i.name.as_str()).unwrap_or("selected insert");
+                    format!("{}\n{} · {format} · effect\nAdd to {target}", info.plugin.name, info.plugin.vendor)
+                }
+            };
+            list = list.push(super::help(
+                button(line).on_press(Message::Add(index).into()).style(theme::plain(false)).padding([5, 6]).width(Length::Fill),
+                hint,
+            ));
         }
     }
     let empty = app.catalog.plugins.is_empty() && app.scan.is_some();
@@ -150,5 +156,11 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
     } else {
         super::scroll(list, true, false).height(Length::Fill).into()
     };
-    column![container(search).padding(4), body].into()
+    let filters = row![
+        toggle("all", state.filter == Filter::All, Message::Filter(Filter::All).into()),
+        toggle("inst", state.filter == Filter::Instruments, Message::Filter(Filter::Instruments).into()),
+        toggle("fx", state.filter == Filter::Effects, Message::Filter(Filter::Effects).into()),
+        toggle("failed", state.filter == Filter::Failed, Message::Filter(Filter::Failed).into()),
+    ].spacing(2).wrap();
+    column![container(search).padding(4), container(filters).padding([0, 4]), body].spacing(4).into()
 }

@@ -15,11 +15,132 @@ use crate::panels::{automation as auto, piano_roll as roll, playlist as list, ti
 fn app() -> App {
     let mut app = App::boot().0;
     app.keymap = crate::keys::Keymap::default();
+    app.config.ui_scale = 100;
     app.config_error = None;
     let id = std::sync::atomic::AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!("daw-app-config-{}-{:p}", std::process::id(), &id));
     app.config_path = dir.join("config.json");
     app
+}
+
+#[test]
+fn clip_menu_selects_without_editing_and_duplicates_as_one_undo_step() {
+    use crate::menu::{Item, Message as Menu};
+    let mut app = app();
+    let pattern = app.selected_pattern;
+    let a = app.project.add_clip(0, 0, ClipSource::Pattern(pattern));
+    let b = app.project.add_clip(1, 3840, ClipSource::Pattern(pattern));
+    let other = app.project.add_clip(2, 0, ClipSource::Pattern(pattern));
+    let original = app.project.playlist.clips.iter_mut().find(|c| c.id == a).unwrap();
+    original.offset = 120;
+    original.length = 1440;
+    original.muted = true;
+    original.audio = daw_model::AudioEdit { stretch: 1.5, semitones: 3.0, reverse: true };
+    let before = app.project.playlist.clips.clone();
+    app.playlist.selected = vec![a, b];
+    let _ = app.update(Menu::Open(Item::Clip(a)).into());
+    assert_eq!(app.playlist.selected, vec![a, b]);
+    assert_eq!(app.project.playlist.clips, before);
+    assert!(app.undo.is_empty());
+    assert!(!app.dirty);
+    let _ = app.update(Menu::Choose(Box::new(list::Message::Duplicate.into())).into());
+    assert!(app.menu.is_none());
+    assert_eq!(app.project.playlist.clips.len(), 5);
+    assert_eq!(app.undo.len(), 1);
+    let copy = &app.project.playlist.clips[3];
+    assert_eq!(copy.start, 7680);
+    assert_eq!((copy.length, copy.offset, copy.muted, copy.audio), (before[0].length, before[0].offset, before[0].muted, before[0].audio));
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.playlist.clips, before);
+
+    let _ = app.update(Menu::Open(Item::Clip(other)).into());
+    assert_eq!(app.playlist.selected, vec![other]);
+    let _ = app.update(Menu::Choose(Box::new(list::Message::DeleteSelection.into())).into());
+    assert_eq!(app.project.playlist.clips.iter().map(|c| c.id).collect::<Vec<_>>(), vec![a, b]);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.playlist.clips, before);
+}
+
+#[test]
+fn tile_header_actions_target_the_named_tile_and_close_stale_menus() {
+    use crate::menu::{Item, Message as Menu};
+    let mut app = app();
+    let target = app.layout().find_panel(Panel::PianoRoll).unwrap();
+    let _ = app.update(Message::TileAction(target, Action::Zoom));
+    assert_eq!(app.layout().focused, target);
+    assert!(app.layout().zoomed);
+    let _ = app.update(Message::TileAction(target, Action::Zoom));
+    let count = app.layout().leaves().len();
+    let _ = app.update(Message::SplitTile(target, Axis::Vertical));
+    assert_eq!(app.layout().leaves().len(), count + 1);
+    let tile = app.layout().focused;
+    let _ = app.update(Menu::Open(Item::Tools(tile)).into());
+    let _ = app.update(Message::Action(Action::Close));
+    assert!(app.menu.is_none());
+    assert!(!app.layout().leaves().contains(&tile));
+    let _ = app.update(Message::TileAction(tile, Action::Zoom));
+    assert!(!app.layout().zoomed, "stale tile messages do nothing");
+}
+
+#[test]
+fn split_handles_follow_the_cursor_and_gaps_do_not_focus_a_neighbor() {
+    let mut app = app();
+    app.window = Size::new(1000.0, 664.0);
+    *app.layout_mut() = daw_model::layout::Layout::single(Panel::Playlist);
+    let upper = app.layout_mut().split(Axis::Horizontal, Panel::Automation);
+    let lower = app.layout_mut().split(Axis::Vertical, Panel::ChannelRack);
+    let _ = app.update(Message::MouseMoved(Point::new(502.0, 100.0)));
+    let _ = app.update(Message::MousePressed);
+    assert_eq!(app.layout().focused, lower, "a split handle does not change focus");
+    let _ = app.update(Message::MouseMoved(Point::new(505.0, 100.0)));
+    let _ = app.update(Message::MousePressed);
+    assert_eq!(app.layout().focused, upper);
+
+    let _ = app.update(Message::SplitDrag(vec![]));
+    let _ = app.update(Message::MouseMoved(Point::new(600.0, 200.0)));
+    let first = app.layout().rects_with_gap(app.tile_area(), view::GUTTER)[0].1;
+    assert!((first.x + first.width + view::GUTTER / 2.0 - 600.0).abs() < 1.0);
+    let _ = app.update(Message::SplitDrag(vec![true]));
+    let _ = app.update(Message::MouseMoved(Point::new(800.0, 400.0)));
+    let upper = app.layout().rects_with_gap(app.tile_area(), view::GUTTER).into_iter().find(|(id, _)| *id == upper).unwrap().1;
+    assert!((upper.y + upper.height + view::GUTTER / 2.0 - 400.0).abs() < 1.0);
+    let _ = app.update(Message::MouseReleased);
+    assert!(app.dragging_split.is_none());
+}
+
+#[test]
+fn ui_scale_updates_geometry_and_persists_without_editing_the_project() {
+    let mut app = app();
+    app.window = Size::new(1400.0, 860.0);
+    app.cursor = Point::new(700.0, 400.0);
+    let _ = app.update(settings::Message::UiScale(125).into());
+    assert_eq!(app.window, Size::new(1120.0, 688.0));
+    assert_eq!(app.cursor, Point::new(560.0, 320.0));
+    assert_eq!(crate::config::load(&app.config_path).0.ui_scale, 125);
+    assert!(!app.dirty);
+    assert!(app.undo.is_empty());
+    let _ = app.update(settings::Message::UiScale(0).into());
+    assert_eq!(app.config.ui_scale, 125);
+    let _ = app.update(settings::Message::UiScale(100).into());
+    assert_eq!(app.window, Size::new(1400.0, 860.0));
+    std::fs::remove_dir_all(app.config_path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn clip_context_menu_supports_keyboard_selection_and_activation() {
+    let mut app = app();
+    focus(&mut app, Panel::Playlist);
+    let id = app.project.add_clip(0, 0, ClipSource::Pattern(app.selected_pattern));
+    app.playlist.selected = vec![id];
+    let _ = app.update(Message::Action(Action::ContextMenu));
+    assert!(matches!(app.menu.as_ref().map(|m| m.item), Some(menu::Item::Clip(clicked)) if clicked == id));
+    let _ = app.update(menu::Message::Move(1).into()); // open
+    let _ = app.update(menu::Message::Move(1).into()); // duplicate
+    let _ = app.update(menu::Message::Activate.into());
+    assert_eq!(app.project.playlist.clips.len(), 2);
+    assert!(app.menu.is_none());
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.playlist.clips.len(), 1);
 }
 
 fn wait_saves(app: &mut App) -> usize {

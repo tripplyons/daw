@@ -47,6 +47,7 @@ pub enum Message {
     MidiPort(crate::midi::Port),
     MidiRescan,
     Autosave(u64),
+    UiScale(u16),
     TailText(Tail, String),
     TailDone(Tail),
     Capture(&'static str),
@@ -79,6 +80,18 @@ pub fn update(app: &mut App, message: Message) {
         Message::Autosave(minutes) => {
             app.config.autosave_minutes = minutes;
             app.save_config(if minutes == 0 { "autosave off".into() } else { format!("autosave every {minutes} minutes") });
+        }
+        Message::UiScale(scale) => {
+            if !crate::config::UI_SCALES.contains(&scale) { return; }
+            // Window and cursor coordinates are in the scaled UI's logical pixels.
+            let ratio = f32::from(app.config.ui_scale) / f32::from(scale);
+            app.window.width *= ratio;
+            app.window.height *= ratio;
+            app.cursor.x *= ratio;
+            app.cursor.y *= ratio;
+            app.menu = None;
+            app.config.ui_scale = scale;
+            app.save_config(format!("UI scale {scale}%"));
         }
         Message::TailText(tail, value) => app.settings.tail_text = Some((tail, value)),
         Message::TailDone(tail) => {
@@ -144,6 +157,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     row![tool("reset all", Message::ResetAll.into()), label(app.config_path.display())]
         .spacing(6)
         .align_y(iced::Alignment::Center)
+        .wrap()
         .into()
 }
 
@@ -155,6 +169,7 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             label(format!("seconds (0-{})", RenderSettings::MAX_TAIL_SECONDS)), tool("set", Message::TailDone(tail).into())].spacing(6).align_y(iced::Alignment::Center)
     };
     let mut list = column![
+        row![label("UI scale"), pick(crate::config::UI_SCALES.to_vec(), Some(app.config.ui_scale), |s| Message::UiScale(s).into()), label("percent")].spacing(6),
         label("MIDI input"),
         pick(app.midi.ports.clone(), app.midi.selected.clone(), |p| Message::MidiPort(p).into()),
         row![tool("rescan inputs", Message::MidiRescan.into())],

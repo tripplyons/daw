@@ -148,6 +148,7 @@ pub fn toolbar(_app: &App) -> Element<'_, AppMessage> {
     ]
     .spacing(2)
     .align_y(iced::Alignment::Center)
+    .wrap()
     .into()
 }
 
@@ -200,7 +201,7 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         )
         .on_right_press(AppMessage::Automate(Target::ChannelVolume(id)));
         let current = inserts.iter().find(|i| i.id == channel.insert).cloned();
-        let route = container(pick(inserts.clone(), current, move |i: InsertChoice| Message::Route(id, i.id).into())).width(76);
+        let route = super::help(container(pick(inserts.clone(), current, move |i: InsertChoice| Message::Route(id, i.id).into())).width(90), "Mixer insert for this channel");
         let mut step_row = row![].spacing(1);
         // Audio channels play from playlist clips, not steps.
         let steps = if matches!(channel.source, Source::Audio { .. }) { 0 } else { steps };
@@ -219,6 +220,9 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                 let color = if muted { theme::FILL_DIM } else { theme::SELECTED };
                 button::Style { background: Some(color.into()), ..button::Style::default() }
             });
+        let name = super::help(name, format!("{}\nSelect channel; right-click for rename, preview, and delete", channel.name));
+        let volume = super::help(volume, format!("Channel volume: {:.0}%\nRight-click to automate", channel.volume * 100.0));
+        let mute = super::help(mute, if muted { "Unmute channel" } else { "Mute channel" });
         rows = rows.push(row![mute, name, volume, route, step_row].spacing(4).align_y(iced::Alignment::Center));
     }
     super::scroll(rows, true, true).width(Length::Fill).height(Length::Fill).into()

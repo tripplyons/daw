@@ -47,6 +47,7 @@ fn run_app() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title(App::title)
         .theme(|_: &App| theme::theme())
+        .scale_factor(|app: &App| f32::from(app.config.ui_scale) / 100.0)
         .subscription(App::subscription)
         .settings(iced::Settings { default_text_size: theme::TEXT_SIZE.into(), ..iced::Settings::default() })
         .window_size(iced::Size::new(1400.0, 860.0))

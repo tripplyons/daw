@@ -34,7 +34,7 @@ use closing::Pending;
 /// Project given on the command line, set by `main` before the app starts.
 pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-pub const TRANSPORT_HEIGHT: f32 = 26.0;
+pub const TRANSPORT_HEIGHT: f32 = 64.0;
 /// Height of the background job bar under the transport, while it shows.
 const JOBS_HEIGHT: f32 = 26.0;
 const UNDO_LIMIT: usize = 200;
@@ -53,6 +53,8 @@ pub enum Message {
     MouseReleased,
     SplitDrag(Vec<bool>),
     SetPanel(TileId, Panel),
+    TileAction(TileId, Action),
+    SplitTile(TileId, Axis),
     Action(Action),
     SetBpm(String),
     /// Enter in the bpm field, or leaving it: apply the finished tempo.
@@ -444,6 +446,18 @@ impl App {
                     self.menu = None;
                     return Task::none();
                 }
+                if self.menu.as_ref().is_some_and(|m| m.rename.is_none())
+                    && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(key), .. } = &event
+                {
+                    use keyboard::key::Named;
+                    let message = match key {
+                        Named::ArrowDown => Some(menu::Message::Move(1)),
+                        Named::ArrowUp => Some(menu::Message::Move(-1)),
+                        Named::Enter => Some(menu::Message::Activate),
+                        _ => None,
+                    };
+                    if let Some(message) = message { return menu::update(self, message); }
+                }
                 if let Some(action) = self.keymap.action(&event, typing) {
                     return self.update(Message::Action(action));
                 }
@@ -461,9 +475,10 @@ impl App {
                 }
             }
             Message::MousePressed => {
+                if self.menu.is_some() { return Task::none(); }
                 let point = self.cursor;
                 let area = self.tile_area();
-                let hit = self.layout().rects(area).into_iter().find(|(_, r)| {
+                let hit = self.layout().rects_with_gap(area, view::GUTTER).into_iter().find(|(_, r)| {
                     point.x >= r.x && point.x < r.x + r.width && point.y >= r.y && point.y < r.y + r.height
                 });
                 if let Some((tile, _)) = hit {
@@ -478,6 +493,17 @@ impl App {
             Message::SetPanel(tile, panel) => {
                 self.layout_mut().set_panel(tile, panel);
                 self.layout_mut().focused = tile;
+            }
+            Message::TileAction(tile, action) => {
+                if !self.layout().leaves().contains(&tile) { return Task::none(); }
+                self.layout_mut().focused = tile;
+                return self.action(action);
+            }
+            Message::SplitTile(tile, axis) => {
+                if !self.layout().leaves().contains(&tile) { return Task::none(); }
+                self.layout_mut().focused = tile;
+                self.split_axis = axis;
+                return self.action(Action::Split);
             }
             Message::Action(action) => return self.action(action),
             Message::SetBpm(value) => self.bpm_text = Some(value),
@@ -695,15 +721,16 @@ impl App {
 
     fn drag_split(&mut self, path: &[bool], point: Point) {
         let area = self.tile_area();
-        let Some((_, axis, rect)) = self.layout().splits(area).into_iter().find(|(p, _, _)| p == path) else { return };
+        let Some((_, axis, rect)) = self.layout().splits_with_gap(area, view::GUTTER).into_iter().find(|(p, _, _)| p == path) else { return };
         let ratio = match axis {
-            Axis::Horizontal => (point.x - rect.x) / rect.width,
-            Axis::Vertical => (point.y - rect.y) / rect.height,
+            Axis::Horizontal => (point.x - rect.x - view::GUTTER / 2.0) / (rect.width - view::GUTTER).max(1.0),
+            Axis::Vertical => (point.y - rect.y - view::GUTTER / 2.0) / (rect.height - view::GUTTER).max(1.0),
         };
         self.layout_mut().set_split_ratio(path, ratio);
     }
 
     fn action(&mut self, action: Action) -> Task<Message> {
+        self.menu = None;
         match action {
             Action::Focus(d) => {
                 self.layout_mut().focus(d);
@@ -736,6 +763,23 @@ impl App {
                 let current = layout.panel(focused);
                 let index = Panel::ALL.iter().position(|&p| p == current).unwrap_or(0);
                 layout.set_panel(focused, Panel::ALL[(index + 1) % Panel::ALL.len()]);
+            }
+            Action::PanelTools | Action::ContextMenu => {
+                let tile = self.layout().focused;
+                let item = if action == Action::PanelTools { menu::Item::Tools(tile) } else {
+                    match self.focused_panel() {
+                        Panel::Playlist => self.playlist.selected.first().copied().map(menu::Item::Clip)
+                            .or_else(|| self.playlist.selected_track.map(menu::Item::Track)),
+                        Panel::ChannelRack => self.selected_channel.map(menu::Item::Channel),
+                        Panel::Mixer => Some(menu::Item::Insert(self.selected_insert)),
+                        Panel::PianoRoll => Some(menu::Item::Pattern(self.selected_pattern)),
+                        Panel::Automation => self.automation.clip.map(menu::Item::Automation),
+                        _ => None,
+                    }.unwrap_or(menu::Item::Tools(tile))
+                };
+                let rect = self.layout().rects_with_gap(self.tile_area(), view::GUTTER).into_iter().find(|(id, _)| *id == tile).unwrap().1;
+                let at = Point::new(rect.x + 8.0, rect.y + crate::theme::HEADER_HEIGHT + 2.0);
+                return menu::update(self, menu::Message::OpenAt(item, at));
             }
             Action::Zoom => self.layout_mut().toggle_zoom(),
             Action::Workspace(n) => {
@@ -868,6 +912,7 @@ impl App {
         let events = event::listen_with(|event, status, _| match event {
             iced::Event::Keyboard(event) => Some(Message::Key(event, status == event::Status::Captured)),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
+            iced::Event::Window(window::Event::Opened { size, .. }) => Some(Message::WindowResized(size)),
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::MouseMoved(position)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
