@@ -180,6 +180,20 @@ fn pattern_mode_loops_at_pattern_length() {
 }
 
 #[test]
+fn loop_notes_restart_on_the_frame_nearest_the_loop_end() {
+    let mut project = unity_project();
+    // A bar lasts 11_520_000 / 131 = 87_938.93 frames, so the loop end falls
+    // late in a frame.
+    project.bpm = 131.0;
+    let channel = project.channels[0].id;
+    let pattern = project.patterns[0].id;
+    project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    let (mut engine, _handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    let signal = render(&mut engine, 180_000);
+    assert_eq!(onsets(&signal), vec![0, 87_939, 175_878]);
+}
+
+#[test]
 fn song_mode_places_clips_and_trims_notes() {
     let mut project = unity_project();
     let channel = project.channels[0].id;
@@ -416,6 +430,22 @@ fn audio_clips_restart_at_the_loop_start() {
     for j in [500, 5000, 20_000] {
         assert_eq!(signal[FRAMES_PER_BEAT + j], signal[j], "frame {j} after the wrap");
     }
+}
+
+#[test]
+fn audio_wraps_on_the_frame_nearest_the_loop_end() {
+    let (mut project, channel) = audio_project();
+    // A beat lasts 2_880_000 / 127 = 22_677.17 frames, so the loop end falls
+    // early in a frame.
+    project.bpm = 127.0;
+    let beat = TICKS_PER_BEAT as u64;
+    project.add_audio_clip(0, 0, channel, beat * 2);
+    project.playlist.loop_range = Some((0, beat));
+    let mut engine = engine_with_ramp(&project);
+    let signal = render(&mut engine, 23_000);
+    // The ramp is near its loop-end value, then restarts faded in from silence.
+    assert!(signal[22_676] > 0.2, "before the wrap: {}", signal[22_676]);
+    assert_eq!(signal[22_677], 0.0, "at the wrap");
 }
 
 #[test]

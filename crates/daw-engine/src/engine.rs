@@ -1,6 +1,7 @@
 //! The realtime engine. `Engine::render` runs on the audio thread; the UI talks
 //! to it only through `EngineHandle`.
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
@@ -334,6 +335,15 @@ fn mix_audio(plan: &AudioPlan, from: f64, per_frame: f64, bpm: f64, left: &mut [
     }
 }
 
+/// Where a block wraps from the loop end back to the loop start, in ticks.
+#[derive(Clone, Copy)]
+struct LoopWrap {
+    /// The first frame played from the loop start.
+    frame: usize,
+    start: f64,
+    end: f64,
+}
+
 impl Engine {
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
@@ -445,16 +455,16 @@ impl Engine {
         (ticks / self.ticks_per_frame()) as i64
     }
 
-    /// The loop range in ticks, when one is set and has a positive length.
-    fn loop_range(&self) -> Option<(f64, f64)> {
+    /// The wrap in the next `frames` of playback, when the frame nearest the
+    /// loop end falls inside them. Notes and audio both wrap at that frame.
+    fn loop_wrap(&self, frames: usize) -> Option<LoopWrap> {
         let (start, end) = self.song.as_ref()?.loop_range?;
-        (end > start).then_some((start as f64, end as f64))
-    }
-
-    /// The loop range, when the next `frames` of playback cross its end.
-    fn loop_crossing(&self, frames: usize) -> Option<(f64, f64)> {
-        let end = self.position + self.ticks_per_frame() * frames as f64;
-        self.loop_range().filter(|&(_, loop_end)| end > loop_end)
+        if end <= start {
+            return None;
+        }
+        let (start, end) = (start as f64, end as f64);
+        let frame = ((end - self.position) / self.ticks_per_frame()).round().max(0.0);
+        (frame < frames as f64).then_some(LoopWrap { frame: frame as usize, start, end })
     }
 
     /// Render stereo output. Buffers may be any length; they are split internally.
@@ -503,18 +513,20 @@ impl Engine {
     /// for the stem capture.
     fn render_block(&mut self, left: &mut [f32], right: &mut [f32], offset: usize) {
         let frames = left.len();
-        if self.playing {
+        let wrap = if self.playing {
+            // Automation goes first because it can change the tempo.
             self.apply_automation();
-            self.schedule_notes(frames);
-        }
+            let wrap = self.loop_wrap(frames);
+            self.schedule_notes(frames, wrap);
+            wrap
+        } else {
+            None
+        };
         let transport = self.transport();
         let per_frame = self.ticks_per_frame();
-        // Audio plays from the position until frame `split`, the first frame
-        // at or past the loop end, then from the loop start.
-        let (split, wrapped) = match self.loop_crossing(frames) {
-            Some((loop_start, loop_end)) => (((loop_end - self.position) / per_frame).ceil().clamp(0.0, frames as f64) as usize, loop_start),
-            None => (frames, 0.0),
-        };
+        // Audio plays from the position until frame `split`, then from the
+        // loop start.
+        let (split, wrapped) = wrap.map_or((frames, 0.0), |wrap| (wrap.frame, wrap.start));
         let Some(mut song) = self.song.take() else {
             left.fill(0.0);
             right.fill(0.0);
@@ -582,7 +594,7 @@ impl Engine {
         self.song = Some(song);
 
         if self.playing {
-            self.advance(frames);
+            self.advance(frames, wrap);
         }
     }
 
@@ -668,47 +680,47 @@ impl Engine {
     }
 
     /// Queue note events that start in this block, wrapping at the loop end.
-    fn schedule_notes(&mut self, frames: usize) {
+    fn schedule_notes(&mut self, frames: usize, wrap: Option<LoopWrap>) {
         let per_frame = self.ticks_per_frame();
         let start = self.position;
         let end = start + per_frame * frames as f64;
-        let Some((loop_start, loop_end)) = self.loop_crossing(frames) else {
-            self.collect_notes(start, end, 0, per_frame);
+        let frames = frames as u32;
+        let Some(wrap) = wrap else {
+            self.collect_notes(start, end, 0..frames, per_frame);
             return;
         };
-        let split = ((loop_end - start) / per_frame).clamp(0.0, frames as f64) as u32;
-        self.collect_notes(start, loop_end, 0, per_frame);
+        let split = wrap.frame as u32;
+        self.collect_notes(start, wrap.end, 0..split, per_frame);
         self.release_all(split);
-        self.collect_notes(loop_start, loop_start + (end - loop_end), split, per_frame);
+        self.collect_notes(wrap.start, wrap.start + (end - wrap.end), split..frames, per_frame);
     }
 
-    /// Queue events in `from..to`, assigning each to its nearest frame. The
-    /// window is shifted back half a frame so accumulated float error in the
-    /// position cannot push an on-grid event into the previous frame, while
-    /// consecutive windows still tile without gaps or overlap.
-    fn collect_notes(&mut self, from: f64, to: f64, offset: u32, per_frame: f64) {
+    /// Queue events in `from..to`, assigning each to its nearest frame within
+    /// `frames`, which starts at tick `from`. The window is shifted back half
+    /// a frame so accumulated float error in the position cannot push an
+    /// on-grid event into the previous frame, while consecutive windows still
+    /// tile without gaps or overlap.
+    fn collect_notes(&mut self, from: f64, to: f64, frames: Range<u32>, per_frame: f64) {
         let Some(song) = &self.song else { return };
         let (low, high) = (from - per_frame / 2.0, to - per_frame / 2.0);
-        let last_frame = ((to - from) / per_frame).round().max(1.0) as u32 - 1;
+        let last_frame = frames.end.saturating_sub(1);
         for channel in &song.channels {
             let first = channel.events.partition_point(|e| (e.tick as f64) < low);
             let Some(node) = self.nodes.iter_mut().find(|n| n.key == channel.node) else { continue };
             for event in channel.events[first..].iter().take_while(|e| (e.tick as f64) < high) {
-                let frame = offset + (((event.tick as f64 - from) / per_frame).round().max(0.0) as u32).min(last_frame);
+                let frame = (frames.start + ((event.tick as f64 - from) / per_frame).round().max(0.0) as u32).min(last_frame);
                 node.push(Event { offset: frame, kind: EventKind::note(event.key, event.velocity) });
             }
         }
     }
 
-    fn advance(&mut self, frames: usize) {
+    fn advance(&mut self, frames: usize, wrap: Option<LoopWrap>) {
         let ticks = self.ticks_per_frame() * frames as f64;
         self.position += ticks;
         self.record_position += ticks;
         self.frames += frames as i64;
-        if let Some((loop_start, loop_end)) = self.loop_range()
-            && self.position >= loop_end
-        {
-            self.position = loop_start + (self.position - loop_end);
+        if let Some(wrap) = wrap {
+            self.position = wrap.start + (self.position - wrap.end);
             self.frames = self.ticks_to_frames(self.position);
         }
     }
