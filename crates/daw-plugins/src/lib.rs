@@ -42,11 +42,12 @@ pub struct ParamInfo {
     pub automatable: bool,
 }
 
-/// A parameter change made in the plugin's own editor.
+/// A parameter gesture made in the plugin's own editor.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Touch {
-    pub param: u32,
-    pub value: f32,
+pub enum Touch {
+    Begin(u32),
+    Value { param: u32, value: f32 },
+    End(u32),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +69,8 @@ pub trait Controller {
     fn set_param(&mut self, id: u32, value: f32);
     fn param_text(&self, id: u32, value: f32) -> String;
     fn save_state(&self) -> Result<Vec<u8>, PluginError>;
+    /// Restore processor and controller state while the host excludes audio processing.
+    fn restore_state(&mut self, state: &[u8]) -> Result<(), PluginError>;
     fn has_editor(&self) -> bool;
     /// Show the editor, creating it the first time. Later calls show the same
     /// editor again, because some plugins fail to build a second one.

@@ -503,7 +503,7 @@ pub fn record(app: &mut App, target: Target, value: f32) {
     let id = match app.project.automation_for(target) {
         Some(id) => id,
         None => {
-            app.checkpoint();
+            app.checkpoint_parameter(target);
             app.bind_at(target, value)
         }
     };
@@ -521,7 +521,7 @@ pub fn record(app: &mut App, target: Target, value: f32) {
     let Some(length) = app.project.automation_clip(id).map(|a| a.length.max(1)) else { return };
     let local = (position - clip.start as f64 + clip.offset as f64) % length as f64;
     if !app.automation.recording.contains_key(&target) {
-        app.checkpoint();
+        app.checkpoint_parameter(target);
     }
     let previous = app.automation.recording.insert(target, local);
     let Some(automation) = app.project.automation_clip_mut(id) else { return };

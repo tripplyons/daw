@@ -16,13 +16,13 @@ use objc2::{AnyThread, msg_send};
 use objc2_app_kit::NSViewController;
 use objc2_audio_toolbox::{
     AUAudioUnit, AUEventSampleTimeImmediate, AUHostTransportStateFlags, AUParameter, AUParameterAddress,
-    AUParameterObserverToken, AUValue, AudioComponentDescription, AudioComponentInstantiationOptions,
+    AUParameterAutomationEvent, AUParameterAutomationEventType, AUParameterObserverToken, AUValue, AudioComponentDescription, AudioComponentInstantiationOptions,
     AudioUnitRenderActionFlags,
 };
 use objc2_avf_audio::{AVAudioFormat, AVAudioUnitComponentManager};
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioTimeStamp, AudioTimeStampFlags};
 use objc2_foundation::{
-    NSData, NSDictionary, NSError, NSMutableDictionary, NSPropertyListFormat, NSPropertyListSerialization, NSString,
+    NSData, NSDictionary, NSError, NSInteger, NSMutableDictionary, NSPropertyListFormat, NSPropertyListSerialization, NSString,
 };
 
 use crate::window::EditorWindow;
@@ -417,7 +417,7 @@ pub fn replace_juce_state(state: &[u8], juce: &[u8]) -> Result<Vec<u8>, PluginEr
     Ok(data.to_vec())
 }
 
-fn restore_state(unit: &AUAudioUnit, state: &[u8]) {
+fn restore_state(unit: &AUAudioUnit, state: &[u8]) -> Result<(), PluginError> {
     let data = NSData::with_bytes(state);
     let plist = unsafe {
         NSPropertyListSerialization::propertyListWithData_options_format_error(
@@ -426,16 +426,11 @@ fn restore_state(unit: &AUAudioUnit, state: &[u8]) {
             std::ptr::null_mut(),
         )
     };
-    match plist {
-        Ok(object) => match object.downcast::<NSDictionary>() {
-            Ok(dictionary) => unsafe {
-                let dictionary: &NSDictionary<NSString, AnyObject> = &*(Retained::as_ptr(&dictionary) as *const _);
-                unit.setFullState(Some(dictionary))
-            },
-            Err(_) => log::warn!("saved AU state is not a dictionary"),
-        },
-        Err(error) => log::warn!("could not decode AU state: {}", error.localizedDescription()),
-    }
+    let object = plist.map_err(|error| PluginError::Load(format!("could not decode AU state: {}", error.localizedDescription())))?;
+    let dictionary = object.downcast::<NSDictionary>().map_err(|_| PluginError::Load("saved AU state is not a dictionary".into()))?;
+    let dictionary: &NSDictionary<NSString, AnyObject> = unsafe { &*(Retained::as_ptr(&dictionary) as *const _) };
+    unsafe { unit.setFullState(Some(dictionary)) };
+    Ok(())
 }
 
 pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize) -> Result<Loaded, PluginError> {
@@ -466,7 +461,7 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
     // Restore after allocating, as hosts like Logic do: some plugins, such as
     // Dexed, reset their patch while allocating.
     if !state.is_empty() {
-        restore_state(&unit, state);
+        restore_state(&unit, state)?;
     }
 
     let mut ranges: Vec<ParamRange> = parameters(&unit)
@@ -527,15 +522,21 @@ pub fn load(plugin: &PluginRef, state: &[u8], sample_rate: f64, max_block: usize
     let touches: Arc<Mutex<Vec<Touch>>> = Arc::default();
     let observer_touches = touches.clone();
     let observer_ranges = ranges.clone();
-    let observer = RcBlock::new(move |address: AUParameterAddress, value: AUValue| {
-        let Ok(index) = observer_ranges.binary_search_by_key(&address, |r| r.address) else { return };
+    let observer = RcBlock::new(move |count: NSInteger, events: NonNull<AUParameterAutomationEvent>| {
+        if count <= 0 { return; }
         let mut touches = observer_touches.lock().unwrap();
-        if touches.len() < 4096 {
-            touches.push(Touch { param: address as u32, value: observer_ranges[index].to_normalized(value) });
+        for event in unsafe { std::slice::from_raw_parts(events.as_ptr(), count as usize) } {
+            let Ok(index) = observer_ranges.binary_search_by_key(&event.address, |r| r.address) else { continue };
+            let param = event.address as u32;
+            if event.eventType == AUParameterAutomationEventType::Touch { touches.push(Touch::Begin(param)); }
+            if touches.len() < 4096 {
+                touches.push(Touch::Value { param, value: observer_ranges[index].to_normalized(event.value) });
+            }
+            if event.eventType == AUParameterAutomationEventType::Release { touches.push(Touch::End(param)); }
         }
     });
     let token = unsafe { unit.parameterTree() }
-        .map(|tree| unsafe { tree.tokenByAddingParameterObserver(RcBlock::as_ptr(&observer)) });
+        .map(|tree| unsafe { tree.tokenByAddingParameterAutomationObserver(RcBlock::as_ptr(&observer)) });
 
     let controller = AuController { unit, ranges, touches, token, _observer: observer, editor: None };
     Ok(Loaded { processor: Box::new(processor), controller: Box::new(controller) })
@@ -551,7 +552,7 @@ struct AuController {
     ranges: Arc<Vec<ParamRange>>,
     touches: Arc<Mutex<Vec<Touch>>>,
     token: Option<AUParameterObserverToken>,
-    _observer: RcBlock<dyn Fn(AUParameterAddress, AUValue)>,
+    _observer: RcBlock<dyn Fn(NSInteger, NonNull<AUParameterAutomationEvent>)>,
     editor: Option<AuEditor>,
 }
 
@@ -645,6 +646,12 @@ impl Controller for AuController {
         }
         .map_err(|e| PluginError::Load(format!("encode AU state: {}", e.localizedDescription())))?;
         Ok(data.to_vec())
+    }
+
+    fn restore_state(&mut self, state: &[u8]) -> Result<(), PluginError> {
+        restore_state(&self.unit, state)?;
+        self.touches.lock().unwrap().clear();
+        Ok(())
     }
 
     fn has_editor(&self) -> bool {

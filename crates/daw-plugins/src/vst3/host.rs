@@ -317,7 +317,8 @@ impl Class for ComponentHandler {
 }
 
 impl IComponentHandlerTrait for ComponentHandler {
-    unsafe fn beginEdit(&self, _id: ParamID) -> tresult {
+    unsafe fn beginEdit(&self, id: ParamID) -> tresult {
+        self.touches.lock().unwrap().push(Touch::Begin(id));
         kResultOk
     }
 
@@ -325,12 +326,13 @@ impl IComponentHandlerTrait for ComponentHandler {
         let _ = self.to_processor.lock().unwrap().push((id, value as f32));
         let mut touches = self.touches.lock().unwrap();
         if touches.len() < 4096 {
-            touches.push(Touch { param: id, value: value as f32 });
+            touches.push(Touch::Value { param: id, value: value as f32 });
         }
         kResultOk
     }
 
-    unsafe fn endEdit(&self, _id: ParamID) -> tresult {
+    unsafe fn endEdit(&self, id: ParamID) -> tresult {
+        self.touches.lock().unwrap().push(Touch::End(id));
         kResultOk
     }
 
@@ -584,6 +586,21 @@ impl IParameterChangesTrait for ParameterChanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_gestures_preserve_boundaries_and_forward_values() {
+        let (producer, mut consumer) = rtrb::RingBuffer::new(8);
+        let handler = ComponentHandler { to_processor: Mutex::new(producer), touches: Mutex::new(Vec::new()), restart: Cell::new(0) };
+        unsafe {
+            handler.beginEdit(6);
+            handler.performEdit(6, 0.2);
+            handler.performEdit(6, 0.7);
+            handler.endEdit(6);
+        }
+        assert_eq!(*handler.touches.lock().unwrap(), vec![Touch::Begin(6), Touch::Value { param: 6, value: 0.2 }, Touch::Value { param: 6, value: 0.7 }, Touch::End(6)]);
+        assert_eq!(consumer.pop().unwrap(), (6, 0.2));
+        assert_eq!(consumer.pop().unwrap(), (6, 0.7));
+    }
 
     #[test]
     fn latest_edit_at_same_sample_replaces_earlier_value() {

@@ -13,7 +13,14 @@ use daw_engine::{Command, MAX_BLOCK, Node, create};
 use daw_model::{ClipSource, PluginFormat, PluginRef, Project, Send, Source};
 
 fn render(plugin: &PluginRef, state: &[u8], detector: f32) -> (f64, Vec<u8>) {
-    let loaded = daw_plugins::load(plugin, state, 48_000.0, MAX_BLOCK).expect("load compressor");
+    let mut loaded = daw_plugins::load(plugin, state, 48_000.0, MAX_BLOCK).expect("load compressor");
+    if !state.is_empty() {
+        let values: Vec<_> = loaded.controller.params().iter().map(|p| (p.id, loaded.controller.param_value(p.id))).collect();
+        let reset = daw_plugins::load(plugin, &[], 48_000.0, MAX_BLOCK).expect("load default compressor");
+        loaded.controller.restore_state(&reset.controller.save_state().unwrap()).expect("reset live instance");
+        loaded.controller.restore_state(state).expect("restore live instance");
+        for (id, value) in values { assert!((loaded.controller.param_value(id) - value).abs() < 0.0001, "parameter {id} not restored"); }
+    }
     let mut project = Project::new();
     project.bpm = 120.0;
     for insert in &mut project.mixer.inserts { insert.volume = 1.0; }

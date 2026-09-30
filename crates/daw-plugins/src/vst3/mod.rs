@@ -683,6 +683,28 @@ impl Controller for Vst3Controller {
         Ok(state)
     }
 
+    fn restore_state(&mut self, state: &[u8]) -> Result<(), PluginError> {
+        let (component, editor) = split_state(state).ok_or_else(|| PluginError::Load("invalid VST3 state".into()))?;
+        unsafe { self.instance.processor.setProcessing(0) };
+        let result = (|| {
+            check("IComponent::setState", unsafe { self.instance.component.setState(stream_ptr(&stream(component.to_vec()))) })?;
+            if let Some(controller) = self.controller() {
+                let synced = unsafe { controller.setComponentState(stream_ptr(&stream(component.to_vec()))) };
+                // Combined component/controllers may implement state only once.
+                if synced != vst3::Steinberg::kNotImplemented {
+                    check("IEditController::setComponentState", synced)?;
+                }
+                if !editor.is_empty() {
+                    check("IEditController::setState", unsafe { controller.setState(stream_ptr(&stream(editor.to_vec()))) })?;
+                }
+            }
+            Ok(())
+        })();
+        unsafe { self.instance.processor.setProcessing(1) };
+        self.handler.touches.lock().unwrap().clear();
+        result
+    }
+
     fn has_editor(&self) -> bool {
         self.controller().is_some()
     }

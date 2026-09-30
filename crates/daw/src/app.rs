@@ -24,6 +24,7 @@ use crate::session::Session;
 use crate::theme;
 
 pub mod audio;
+mod history;
 mod saving;
 
 /// Project given on the command line, set by `main` before the app starts.
@@ -146,8 +147,9 @@ pub struct App {
     pub window: Size,
     pub cursor: Point,
     dragging_split: Option<Vec<bool>>,
-    undo: Vec<Project>,
-    redo: Vec<Project>,
+    undo: Vec<history::Snapshot>,
+    redo: Vec<history::Snapshot>,
+    history: history::State,
     editing: bool,
     pub dirty: bool,
     pub selected_channel: Option<ChannelId>,
@@ -210,6 +212,7 @@ impl App {
             dragging_split: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            history: history::State::default(),
             editing: false,
             dirty: false,
             selected_channel,
@@ -288,17 +291,6 @@ impl App {
         Rect { x: 0.0, y: TRANSPORT_HEIGHT, width: self.window.width, height: (self.window.height - TRANSPORT_HEIGHT).max(1.0) }
     }
 
-    /// Record an undo snapshot before an edit.
-    pub fn checkpoint(&mut self) {
-        // Layout changes are not undoable; `restore` keeps the current workspaces.
-        self.undo.push(self.project.clone());
-        if self.undo.len() > UNDO_LIMIT {
-            self.undo.remove(0);
-        }
-        self.redo.clear();
-        self.dirty = true;
-    }
-
     fn load_config(&mut self) {
         let (config, error) = config::load(&self.config_path);
         let (keymap, warnings) = Keymap::from_config(&config.keys);
@@ -337,13 +329,17 @@ impl App {
         }
     }
 
-    fn restore(&mut self, mut project: Project) {
+    fn restore(&mut self, snapshot: history::Snapshot) {
+        let mut project = snapshot.project;
         project.workspaces = self.project.workspaces.clone();
         self.project = project;
         self.dirty = true;
         self.revision += 1;
         self.validate_selection();
         self.refresh();
+        if let Err(error) = self.session.restore_plugins(&self.project, &snapshot.parameters) {
+            self.set_status(format!("could not restore plugin settings: {error}"));
+        }
     }
 
     fn validate_selection(&mut self) {
@@ -377,6 +373,7 @@ impl App {
         self.playlist.pitch_edit = None;
         self.bpm_text = None;
         self.editing = false;
+        self.history = history::State::default();
         self.playlist.selected.retain(|id| self.project.playlist.clips.iter().any(|c| c.id == *id));
     }
 
@@ -458,7 +455,7 @@ impl App {
         self.last_touched.push_front((target, value));
         self.last_touched.truncate(LAST_TOUCHED);
         if self.bind_mode && self.project.automation_for(target).is_none() {
-            self.checkpoint();
+            self.checkpoint_parameter(target);
             self.bind_at(target, value);
         }
         if self.record && self.playing {
@@ -531,7 +528,7 @@ impl App {
             Message::Key(event, typing) => {
                 if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
                     playlist::update(self, playlist::Message::AudioPitchDone);
-                    self.editing = false;
+                    self.finish_edit();
                 }
                 if self.settings.capturing.is_some() {
                     settings::key(self, &event);
@@ -571,9 +568,7 @@ impl App {
             }
             Message::MouseReleased => {
                 self.dragging_split = None;
-                if self.editing {
-                    self.editing = false;
-                }
+                self.finish_edit();
             }
             Message::SplitDrag(path) => self.dragging_split = Some(path),
             Message::SetPanel(tile, panel) => {
@@ -644,7 +639,7 @@ impl App {
             }
             Message::EndEdit => {
                 playlist::update(self, playlist::Message::AudioPitchDone);
-                self.editing = false;
+                self.finish_edit();
             }
             Message::Browser(message) => return browser::update(self, message),
             Message::Rack(message) => return channel_rack::update(self, message),
@@ -794,11 +789,9 @@ impl App {
         let shared = self.session.shared();
         self.meters = (0..self.project.mixer.inserts.len()).map(|i| shared.take_peak(i)).collect();
         for (instance, touch) in self.session.poll() {
-            self.touched(Target::Plugin { instance, param: touch.param }, touch.value);
-            if self.param_instance.is_none() {
-                self.param_instance = Some(instance);
-            }
+            self.plugin_touch(instance, touch);
         }
+        self.finish_idle_plugin_edits();
         self.collect_takes();
         self.poll_midi();
         if was_playing && !self.playing { self.finish_midi(); }
@@ -943,14 +936,20 @@ impl App {
                 self.return_to_start();
             }
             Action::Undo => {
+                self.finish_edit();
+                self.finish_plugin_edits();
                 if let Some(previous) = self.undo.pop() {
-                    self.redo.push(self.project.clone());
+                    let current = self.snapshot(None);
+                    self.redo.push(current);
                     self.restore(previous);
                 }
             }
             Action::Redo => {
+                self.finish_edit();
+                self.finish_plugin_edits();
                 if let Some(next) = self.redo.pop() {
-                    self.undo.push(self.project.clone());
+                    let current = self.snapshot(None);
+                    self.undo.push(current);
                     let redo = std::mem::take(&mut self.redo);
                     self.restore(next);
                     self.redo = redo;

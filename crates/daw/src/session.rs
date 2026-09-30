@@ -16,6 +16,14 @@ use daw_plugins::{Controller, ParamInfo, Touch};
 /// Frames summarized by each waveform peak.
 pub const PEAK_FRAMES: usize = 256;
 
+pub type PluginParameters = HashMap<InstanceId, Vec<(u32, f32)>>;
+
+#[derive(Clone)]
+struct PluginState {
+    state: Vec<u8>,
+    parameters: Vec<(u32, f32)>,
+}
+
 /// What a built-in node was created from, to know when to rebuild it.
 #[derive(Debug, Clone, PartialEq)]
 enum BuiltIn {
@@ -31,6 +39,7 @@ pub struct Session {
     pub preparation_error: Option<String>,
     controllers: HashMap<InstanceId, Box<dyn Controller>>,
     params: HashMap<InstanceId, Vec<ParamInfo>>,
+    plugin_states: HashMap<InstanceId, PluginState>,
     pub load_errors: HashMap<InstanceId, String>,
     built_in: HashMap<u64, BuiltIn>,
     samples: HashMap<String, Arc<Sample>>,
@@ -69,6 +78,7 @@ impl Session {
             preparation_error: None,
             controllers: HashMap::new(),
             params: HashMap::new(),
+            plugin_states: HashMap::new(),
             load_errors: HashMap::new(),
             built_in: HashMap::new(),
             samples: HashMap::new(),
@@ -104,6 +114,7 @@ impl Session {
                 Ok(loaded) => {
                     self.params.insert(instance.id, loaded.controller.params());
                     self.controllers.insert(instance.id, loaded.controller);
+                    self.remember_plugin(instance.id);
                     self.send(Command::AddNode(Node::new(instance.id.0, loaded.processor)));
                 }
                 Err(error) => {
@@ -117,6 +128,7 @@ impl Session {
             if project.plugin(id).is_none() {
                 self.controllers.remove(&id);
                 self.params.remove(&id);
+                self.plugin_states.remove(&id);
                 self.send(Command::RemoveNode(id.0));
             }
         }
@@ -202,7 +214,9 @@ impl Session {
 
     #[cfg(test)]
     pub fn test_controller(&mut self, instance: InstanceId, controller: Box<dyn Controller>) {
+        self.params.insert(instance, controller.params());
         self.controllers.insert(instance, controller);
+        self.remember_plugin(instance);
     }
 
     pub fn set_mix(&mut self, project: &Project, target: Target, value: f32) {
@@ -381,15 +395,88 @@ impl Session {
     }
 
     /// Copy plugin states into the project before saving.
-    pub fn store_states(&self, project: &mut Project) {
+    pub fn store_states(&mut self, project: &mut Project) {
+        self.capture_plugins(project, None);
+    }
+
+    fn remember_plugin(&mut self, id: InstanceId) {
+        let Some(controller) = self.controllers.get(&id) else { return };
+        if let Ok(state) = controller.save_state() {
+            let parameters = self.params(id).iter().map(|p| (p.id, controller.param_value(p.id))).collect();
+            self.plugin_states.insert(id, PluginState { state, parameters });
+        }
+    }
+
+    /// Native callbacks are polled after the plugin has already changed.
+    /// Use the last observed values for that plugin's pre-gesture snapshot.
+    pub fn capture_plugins(&mut self, project: &mut Project, previous: Option<InstanceId>) -> PluginParameters {
+        let mut parameters = HashMap::new();
         for instance in &mut project.plugins {
+            if previous == Some(instance.id) && let Some(saved) = self.plugin_states.get(&instance.id) {
+                instance.state = saved.state.clone();
+                parameters.insert(instance.id, saved.parameters.clone());
+                continue;
+            }
             if let Some(controller) = self.controllers.get(&instance.id) {
                 match controller.save_state() {
-                    Ok(state) => instance.state = state,
+                    Ok(state) => {
+                        let values: Vec<_> = self.params(instance.id).iter().map(|p| (p.id, controller.param_value(p.id))).collect();
+                        instance.state = state.clone();
+                        parameters.insert(instance.id, values.clone());
+                        self.plugin_states.insert(instance.id, PluginState { state, parameters: values });
+                    }
                     Err(error) => log::warn!("could not save state of {}: {error}", instance.plugin.name),
                 }
             }
         }
+        parameters
+    }
+
+    pub fn previous_parameter(&self, id: InstanceId, param: u32) -> Option<f32> {
+        self.plugin_states.get(&id)?.parameters.iter().find(|(p, _)| *p == param).map(|(_, value)| *value)
+    }
+
+    pub fn record_parameter(&mut self, id: InstanceId, param: u32, value: f32) {
+        if let Some(saved) = self.plugin_states.get_mut(&id) {
+            if let Some((_, previous)) = saved.parameters.iter_mut().find(|(p, _)| *p == param) { *previous = value; }
+            else { saved.parameters.push((param, value)); }
+        }
+    }
+
+    pub fn finish_plugin_gesture(&mut self, project: &mut Project, id: InstanceId) {
+        let Some(controller) = self.controllers.get(&id) else { return };
+        match controller.save_state() {
+            Ok(state) => {
+                if let Some(instance) = project.plugin_mut(id) { instance.state = state.clone(); }
+                if let Some(saved) = self.plugin_states.get_mut(&id) { saved.state = state; }
+            }
+            Err(error) => log::warn!("could not save plugin gesture: {error}"),
+        }
+    }
+
+    pub fn restore_plugins(&mut self, project: &Project, parameters: &PluginParameters) -> Result<(), String> {
+        let mut commands = Vec::new();
+        let mut errors = Vec::new();
+        {
+            let _engine = self.engine.lock().map_err(|_| "audio engine lock poisoned")?;
+            for instance in &project.plugins {
+                let values = parameters.get(&instance.id).cloned().unwrap_or_default();
+                if self.plugin_states.get(&instance.id).is_some_and(|s| s.state == instance.state && s.parameters == values) { continue; }
+                let Some(controller) = self.controllers.get_mut(&instance.id) else { continue };
+                if !instance.state.is_empty() && let Err(error) = controller.restore_state(&instance.state) {
+                    errors.push(format!("{}: {error}", instance.plugin.name));
+                    continue;
+                }
+                for &(param, value) in &values {
+                    controller.set_param(param, value);
+                    commands.push(Command::Param { node: instance.id.0, id: param, value });
+                }
+                self.params.insert(instance.id, controller.params());
+                self.plugin_states.insert(instance.id, PluginState { state: instance.state.clone(), parameters: values });
+            }
+        }
+        for command in commands { self.send(command); }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
     }
 
     /// Drop every plugin and built-in node, e.g. before opening another project.
@@ -402,6 +489,7 @@ impl Session {
         }
         self.controllers.clear();
         self.params.clear();
+        self.plugin_states.clear();
         self.load_errors.clear();
         self.built_in.clear();
         self.stop();

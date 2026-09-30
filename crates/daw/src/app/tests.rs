@@ -30,11 +30,17 @@ fn wait_saves(app: &mut App) -> usize {
 struct TestPlugin(f32);
 
 impl daw_plugins::Controller for TestPlugin {
-    fn params(&self) -> Vec<daw_plugins::ParamInfo> { Vec::new() }
+    fn params(&self) -> Vec<daw_plugins::ParamInfo> {
+        vec![daw_plugins::ParamInfo { id: 0, name: "value".into(), units: String::new(), steps: 0, default: 0.0, automatable: true }]
+    }
     fn param_value(&self, _: u32) -> f32 { self.0 }
     fn set_param(&mut self, _: u32, value: f32) { self.0 = value; }
     fn param_text(&self, _: u32, value: f32) -> String { value.to_string() }
     fn save_state(&self) -> Result<Vec<u8>, daw_plugins::PluginError> { Ok(self.0.to_le_bytes().to_vec()) }
+    fn restore_state(&mut self, state: &[u8]) -> Result<(), daw_plugins::PluginError> {
+        self.0 = f32::from_le_bytes(state.try_into().map_err(|_| daw_plugins::PluginError::Load("invalid test state".into()))?);
+        Ok(())
+    }
     fn has_editor(&self) -> bool { false }
     fn open_editor(&mut self, _: &str) -> Result<(), daw_plugins::PluginError> { Err(daw_plugins::PluginError::Load("no editor".into())) }
     fn hide_editor(&mut self) {}
@@ -1472,4 +1478,79 @@ fn a_portable_project_renders_identically_after_removing_the_source_folder() {
     assert_eq!(loaded.patterns.len(), 2);
     assert_eq!(loaded.playlist.clips[0].audio, app.project.playlist.clips[0].audio);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn test_plugin(app: &mut App) -> daw_model::InstanceId {
+    let id = app.project.add_plugin(daw_model::PluginRef {
+        format: daw_model::PluginFormat::Vst3, id: "test".into(), path: String::new(), name: "test".into(), vendor: String::new(),
+    });
+    app.session.test_controller(id, Box::new(TestPlugin(0.0)));
+    id
+}
+
+#[test]
+fn plugin_slider_drag_restores_settings_and_groups_recording_in_one_undo() {
+    let mut app = app();
+    let id = test_plugin(&mut app);
+    let _ = app.update(crate::panels::parameters::Message::Set(id, 0, 0.0).into());
+    assert!(!app.dirty);
+    assert!(app.undo.is_empty());
+    app.bind_mode = true;
+    app.record = true;
+    app.playing = true;
+    for value in [0.2, 0.4, 0.8] {
+        let _ = app.update(crate::panels::parameters::Message::Set(id, 0, value).into());
+    }
+    let _ = app.update(Message::EndEdit);
+    assert_eq!(app.undo.len(), 1);
+    assert_eq!(app.session.param_value(id, 0), 0.8);
+    assert!(app.project.automation_for(Target::Plugin { instance: id, param: 0 }).is_some());
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.session.param_value(id, 0), 0.0);
+    assert!(app.project.automation_for(Target::Plugin { instance: id, param: 0 }).is_none());
+    let _ = app.update(Message::Action(Action::Redo));
+    assert_eq!(app.session.param_value(id, 0), 0.8);
+    assert_eq!(app.project.plugin(id).unwrap().state, 0.8_f32.to_le_bytes());
+    let _ = app.update(crate::panels::parameters::Message::Set(id, 0, 0.6).into());
+    let _ = app.update(Message::EndEdit);
+    assert_eq!(app.undo.len(), 2);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.session.param_value(id, 0), 0.8);
+}
+
+#[test]
+fn native_plugin_gestures_capture_previous_values_before_polling() {
+    use daw_plugins::Touch;
+    let mut app = app();
+    let id = test_plugin(&mut app);
+    app.plugin_touch(id, Touch::Begin(0));
+    app.plugin_touch(id, Touch::Value { param: 0, value: 0.0 });
+    app.plugin_touch(id, Touch::End(0));
+    assert!(!app.dirty);
+    assert!(app.undo.is_empty());
+    // Both gestures have already reached the plugin before the UI polls them.
+    app.session.set_plugin_param(id, 0, 0.9);
+    app.bind_mode = true;
+    for value in [0.4, 0.9] {
+        app.plugin_touch(id, Touch::Begin(0));
+        app.plugin_touch(id, Touch::Value { param: 0, value });
+        app.plugin_touch(id, Touch::End(0));
+    }
+    assert_eq!(app.undo.len(), 2);
+    for value in [0.4, 0.0] {
+        let _ = app.update(Message::Action(Action::Undo));
+        assert_eq!(app.session.param_value(id, 0), value);
+    }
+    for value in [0.4, 0.9] {
+        let _ = app.update(Message::Action(Action::Redo));
+        assert_eq!(app.session.param_value(id, 0), value);
+    }
+    // Value-only editors also coalesce edits until their gesture is finished.
+    app.session.set_plugin_param(id, 0, 0.3);
+    app.plugin_touch(id, Touch::Value { param: 0, value: 0.5 });
+    app.plugin_touch(id, Touch::Value { param: 0, value: 0.3 });
+    app.finish_plugin_edits();
+    assert_eq!(app.undo.len(), 3);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.session.param_value(id, 0), 0.9);
 }

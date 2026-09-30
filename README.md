@@ -62,6 +62,8 @@ Audio clips play part of a WAV file at its own speed, without following tempo ch
 
 A take recorded over a loop keeps going past the loop end as one clip.
 
+Plugin parameter drags create one undo step in both the parameter panel and native plugin windows. Undo and redo restore plugin state and pending parameter values, including automation recorded during the drag.
+
 Select audio clips to show their pitch, duration, and reverse controls below the playlist. Pitch shifts keep the duration; duration changes keep the pitch. Turn on "stretch" in the playlist toolbar to stretch an audio clip by dragging its edge. Pitch and stretch drags show a preview and process audio on release. With stretch off, edge drags trim the file. These edits stay in the project and leave the source WAV unchanged.
 
 Select pattern or audio clips and click "consolidate", or press Cmd+Alt+C in the playlist, to render the selection to a stereo WAV on a free track. The originals are muted and retained for undo. Insert effects and routing are rendered into the file; master effects and master gain remain live. The render ends at the selection's end, without an effect tail.
