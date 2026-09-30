@@ -42,7 +42,7 @@ pub struct Session {
     plugin_states: HashMap<InstanceId, PluginState>,
     pub load_errors: HashMap<InstanceId, String>,
     built_in: HashMap<u64, BuiltIn>,
-    samples: HashMap<String, Arc<Sample>>,
+    samples: daw_engine::audio::Cache,
     /// Waveform summaries of loaded samples: the largest absolute value per
     /// `PEAK_FRAMES` frames, across both sides.
     peaks: HashMap<String, Vec<f32>>,
@@ -81,7 +81,7 @@ impl Session {
             plugin_states: HashMap::new(),
             load_errors: HashMap::new(),
             built_in: HashMap::new(),
-            samples: HashMap::new(),
+            samples: daw_engine::audio::Cache::default(),
             peaks: HashMap::new(),
             recorder: None,
             #[cfg(test)]
@@ -263,7 +263,7 @@ impl Session {
         let prepared = daw_engine::audio::prepare(project, &mut self.samples);
         self.preparation_error = prepared.as_ref().err().cloned();
         self.peaks.retain(|key, _| self.samples.contains_key(key));
-        for (path, sample) in &self.samples {
+        for (path, sample) in self.samples.iter() {
             if !self.peaks.contains_key(path) {
                 let peaks = sample.left.chunks(PEAK_FRAMES).zip(sample.right.chunks(PEAK_FRAMES))
                     .map(|(l, r)| l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs()))).collect();
