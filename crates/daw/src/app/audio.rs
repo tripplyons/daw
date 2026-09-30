@@ -114,7 +114,8 @@ impl App {
         let folder = recordings_dir(self.path.as_deref());
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let path = folder.join(format!("consolidated-{}.wav", crate::project_files::stamp()));
-        if let Err(error) = self.session.export(&render, &path, daw_engine::output::BitDepth::Float32, self.mode, Some((start, end)), &[]) {
+        let options = crate::session::RenderOptions { depth: daw_engine::output::BitDepth::Float32, range: Some((start, end)), tail_seconds: self.project.render.consolidation_tail_seconds };
+        if let Err(error) = self.session.export(&render, &path, self.mode, options, &[]) {
             let _ = std::fs::remove_file(&path);
             self.refresh();
             return Err(error);
@@ -123,7 +124,8 @@ impl App {
         for clip in &mut self.project.playlist.clips {
             if clips.iter().any(|c| c.id == clip.id) { clip.muted = true; }
         }
-        let channel = self.add_audio(&path, start, end - start);
+        let tail = seconds_to_ticks(options.tail_seconds, self.project.bpm).round() as Ticks;
+        let channel = self.add_audio(&path, start, end - start + tail);
         let audio = self.project.channel_mut(channel).expect("new channel");
         audio.volume = 1.0;
         audio.pan = 0.0;

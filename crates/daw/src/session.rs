@@ -24,6 +24,26 @@ struct PluginState {
     parameters: Vec<(u32, f32)>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions {
+    pub depth: BitDepth,
+    pub range: Option<(Ticks, Ticks)>,
+    pub tail_seconds: f64,
+}
+
+impl RenderOptions {
+    pub fn timing(self, project: &Project, sample_rate: f64) -> Result<(Ticks, usize), String> {
+        if !self.tail_seconds.is_finite() || !(0.0..=120.0).contains(&self.tail_seconds) { return Err("render tail must be between 0 and 120 seconds".into()); }
+        let (start, length) = match self.range {
+            Some((start, end)) if end > start => (start, end - start),
+            Some(_) => return Err("render range must end after it starts".into()),
+            None => (0, project.song_length()),
+        };
+        let seconds = ticks_to_seconds(length as f64, project.bpm) + self.tail_seconds;
+        Ok((start, (seconds * sample_rate).round() as usize))
+    }
+}
+
 /// What a built-in node was created from, to know when to rebuild it.
 #[derive(Debug, Clone, PartialEq)]
 enum BuiltIn {
@@ -496,31 +516,30 @@ impl Session {
     }
 
     /// Render the song to a WAV file, then restore the live plan. With a range,
-    /// render only those ticks, without a tail; notes that start before it are
+    /// render only those ticks plus the chosen tail; notes that start before it are
     /// not heard. Stems come from the same pass.
     pub fn export(
         &mut self,
         project: &Project,
         path: &Path,
-        depth: BitDepth,
         live_mode: PlayMode,
-        range: Option<(Ticks, Ticks)>,
+        options: RenderOptions,
         stems: &[Stem],
     ) -> Result<(), String> {
+        let (start, frames) = options.timing(project, self.sample_rate())?;
         daw_engine::audio::prepare(project, &mut self.samples)?;
         if !self.load_errors.is_empty() { return Err("one or more plugins failed to load".into()); }
         self.stop();
         let mut render = project.clone();
         render.playlist.loop_range = None;
+        if let Some((_, end)) = options.range {
+            render.playlist.clips.retain(|c| c.start < end);
+            for clip in &mut render.playlist.clips { clip.length = clip.length.min(end - clip.start); }
+        }
         self.update_song(&render, PlayMode::Song)?;
-        let (start, seconds) = match range {
-            Some((start, end)) => (start, ticks_to_seconds(end.saturating_sub(start) as f64, project.bpm)),
-            None => (0, ticks_to_seconds(project.song_length() as f64, project.bpm) + 2.0),
-        };
-        let frames = (seconds * self.sample_rate()) as usize;
         let result = {
             let mut engine = self.engine.lock().map_err(|_| "audio engine lock poisoned")?;
-            output::export_wav(&mut engine, path, start, frames, depth, stems).map_err(|e| e.to_string())
+            output::export_wav(&mut engine, path, start, frames, options.depth, stems).map_err(|e| e.to_string())
         };
         self.update_song(project, live_mode)?;
         self.seek(0.0);

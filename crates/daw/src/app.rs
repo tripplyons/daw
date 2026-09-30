@@ -372,6 +372,7 @@ impl App {
         self.playlist.cancel_drag();
         self.playlist.pitch_edit = None;
         self.playlist.audio_text = None;
+        self.settings.tail_text = None;
         self.bpm_text = None;
         self.editing = false;
         self.history = history::State::default();
@@ -754,7 +755,8 @@ impl App {
                     let path = if path.extension().is_none() { path.with_extension("wav") } else { path };
                     // Export renders offline, so the input would record silence.
                     self.stop_audio_recording();
-                    match self.session.export(&self.project, &path, BitDepth::Int24, self.mode, None, &[]) {
+                    let options = crate::session::RenderOptions { depth: BitDepth::Int24, range: None, tail_seconds: self.project.render.export_tail_seconds };
+                    match self.session.export(&self.project, &path, self.mode, options, &[]) {
                         Ok(()) => self.set_status(format!("exported {}", path.display())),
                         Err(error) => self.set_status(format!("export failed: {error}")),
                     }
@@ -1432,7 +1434,7 @@ pub fn pan_text(pan: f32) -> String {
 
 /// Headless render for `daw export`, loading the project's plugins. With
 /// `stems`, each mixer insert also goes to its own file in that folder.
-pub fn export_cli(project: &Path, out: &Path, range: Option<(Ticks, Ticks)>, stems: Option<&Path>) -> Result<(), String> {
+pub fn export_cli(project: &Path, out: &Path, range: Option<(Ticks, Ticks)>, stems: Option<&Path>, tail: Option<f64>) -> Result<(), String> {
     let mut app = App::boot().0;
     app.open(project.to_path_buf());
     for (instance, error) in &app.session.load_errors {
@@ -1459,7 +1461,8 @@ pub fn export_cli(project: &Path, out: &Path, range: Option<(Ticks, Ticks)>, ste
         None => Vec::new(),
     };
     let mode = app.mode;
-    app.session.export(&app.project, out, BitDepth::Int24, mode, range, &stems).map_err(|e| format!("export failed: {e}"))
+    let options = crate::session::RenderOptions { depth: BitDepth::Int24, range, tail_seconds: tail.unwrap_or(app.project.render.export_tail_seconds) };
+    app.session.export(&app.project, out, mode, options, &stems).map_err(|e| format!("export failed: {e}"))
 }
 
 async fn save_dialog() -> Option<PathBuf> {

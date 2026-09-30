@@ -66,7 +66,7 @@ Plugin parameter drags create one undo step in both the parameter panel and nati
 
 Select audio clips to show their pitch, duration, and reverse controls below the playlist. Pitch shifts keep the duration; duration changes keep the pitch. Type semitones and cents, or an exact duration ratio, then press Enter or click "set". Reset buttons restore pitch, cents, or the duration ratio. The pitch slider moves in cents. Turn on "stretch" in the playlist toolbar to stretch an audio clip by dragging its edge. Pitch and stretch drags show a preview and process audio on release. With stretch off, edge drags trim the file. These edits stay in the project and leave the source WAV unchanged. Recent processed versions are reused by undo and redo. Inactive cached audio is limited to 256 MiB and 64 entries; the current project's audio stays available.
 
-Select pattern or audio clips and click "consolidate", or press Cmd+Alt+C in the playlist, to render the selection to a stereo WAV on a free track. The originals are muted and retained for undo. Insert effects and routing are rendered into the file; master effects and master gain remain live. The render ends at the selection's end, without an effect tail.
+Select pattern or audio clips and click "consolidate", or press Cmd+Alt+C in the playlist, to render the selection to a stereo WAV on a free track. The originals are muted and retained for undo. Insert effects and routing are rendered into the file; master effects and master gain remain live. Settings has separate export and consolidation tails from 0 to 120 seconds. These values are saved in the project. A consolidated clip includes its chosen tail. Ranged renders stop new notes and clips at the range end, then render the effect tail.
 
 ## Patterns and unique clips
 
@@ -110,7 +110,7 @@ daw edit song.dawproj clip add pattern:10 0 4bar
 daw batch song.dawproj edits.txt            # many edits with one load and save
 daw plugins                                # installed plugins from the scan cache
 daw params song.dawproj 42 Cutoff=0.3      # set plugin parameters
-daw export song.dawproj song.wav --range 16bar..24bar --stems stems
+daw export song.dawproj song.wav --range 16bar..24bar --tail 4.5 --stems stems
 daw analyze song.wav stems/*.wav           # levels and octave bands
 daw pack song.dawproj song.dawzip          # project and referenced audio
 daw unpack song.dawzip relocated-song      # destination must be a new folder

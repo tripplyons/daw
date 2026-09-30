@@ -1176,14 +1176,14 @@ fn consolidation_bakes_insert_gain_and_leaves_master_processing_live() {
     app.refresh();
     let end = app.project.playlist.clips[0].end();
     let before = dir.join("before.wav");
-    app.session.export(&app.project, &before, BitDepth::Float32, app.mode, Some((960, end)), &[]).unwrap();
+    app.session.export(&app.project, &before, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((960, end)), tail_seconds: 0.0 }, &[]).unwrap();
     app.consolidate_selection().unwrap();
     assert!(app.project.playlist.clips[0].muted);
     let audio = app.project.channels.last().unwrap();
     assert_eq!((audio.volume, audio.pan, audio.insert), (1.0, 0.0, daw_model::MASTER));
     assert_eq!(app.project.mixer.inserts[0].volume, 0.5);
     let after = dir.join("after.wav");
-    app.session.export(&app.project, &after, BitDepth::Float32, app.mode, Some((960, end)), &[]).unwrap();
+    app.session.export(&app.project, &after, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((960, end)), tail_seconds: 0.0 }, &[]).unwrap();
     let before = daw_engine::synth::Sample::load(before.to_str().unwrap()).unwrap();
     let after = daw_engine::synth::Sample::load(after.to_str().unwrap()).unwrap();
     assert_eq!(before.left.len(), after.left.len());
@@ -1449,7 +1449,7 @@ fn a_portable_project_renders_identically_after_removing_the_source_folder() {
     app.refresh();
     let end = app.project.song_length();
     let before = dir.join("before.wav");
-    app.session.export(&app.project, &before, BitDepth::Float32, app.mode, Some((0, end)), &[]).unwrap();
+    app.session.export(&app.project, &before, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((0, end)), tail_seconds: 0.0 }, &[]).unwrap();
     let saved = dir.join("song.dawproj");
     let _ = app.update(Message::SavedAs(Some(saved.clone())));
     wait_saves(&mut app);
@@ -1463,7 +1463,7 @@ fn a_portable_project_renders_identically_after_removing_the_source_folder() {
     assert_eq!(app.path, Some(relocated.clone()));
     assert!(app.session.preparation_error.is_none());
     let after = dir.join("after.wav");
-    app.session.export(&app.project, &after, BitDepth::Float32, app.mode, Some((0, end)), &[]).unwrap();
+    app.session.export(&app.project, &after, app.mode, crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((0, end)), tail_seconds: 0.0 }, &[]).unwrap();
     let before = daw_engine::synth::Sample::load(before.to_str().unwrap()).unwrap();
     let after = daw_engine::synth::Sample::load(after.to_str().unwrap()).unwrap();
     assert!(before.left.iter().any(|s| s.abs() > 0.01));
@@ -1598,5 +1598,40 @@ fn precise_audio_values_commit_once_and_reset_without_spurious_undo() {
     let _ = app.update(Message::Action(Action::Undo));
     assert_eq!(app.project.playlist.clips.last().unwrap().audio.stretch, 1.333333333);
     assert!(path.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn render_tails_are_adjustable_portable_and_extend_consolidated_clips() {
+    let mut app = app();
+    let dir = std::env::temp_dir().join(format!("daw-tails-{}", crate::project_files::stamp()));
+    std::fs::create_dir_all(&dir).unwrap();
+    app.path = Some(dir.join("song.dawproj"));
+    let channel = app.selected_channel.unwrap();
+    let pattern = app.selected_pattern;
+    let _ = app.update(roll::Message::Add { start: 3600, key: 60 }.into());
+    let id = app.project.add_clip(0, 0, ClipSource::Pattern(pattern));
+    let end = app.project.playlist.clips.last().unwrap().end();
+    app.playlist.selected = vec![id];
+    let _ = app.update(crate::panels::settings::Message::TailText(true, "0.75".into()).into());
+    let _ = app.update(crate::panels::settings::Message::TailDone(true).into());
+    let _ = app.update(crate::panels::settings::Message::TailText(false, "1.25".into()).into());
+    let _ = app.update(crate::panels::settings::Message::TailDone(false).into());
+    crate::project_files::save(app.path.as_ref().unwrap(), &app.project).unwrap();
+    assert_eq!(crate::project_files::load(app.path.as_ref().unwrap()).unwrap().render, app.project.render);
+    let _ = app.update(list::Message::Consolidate.into());
+    let clip = app.project.playlist.clips.last().unwrap();
+    assert_eq!(clip.length, end + daw_model::time::seconds_to_ticks(0.75, app.project.bpm).round() as Ticks);
+    let ClipSource::Audio(audio) = clip.source else { panic!("consolidated audio") };
+    let daw_model::Source::Audio { path } = &app.project.channel(audio).unwrap().source else { panic!("audio file") };
+    let sample = daw_engine::synth::Sample::load(path).unwrap();
+    let nominal_frames = (daw_model::time::ticks_to_seconds(end as f64, app.project.bpm) * app.session.sample_rate()).round() as usize;
+    assert_eq!(sample.left.len(), nominal_frames + (0.75 * app.session.sample_rate()).round() as usize);
+    assert!(sample.left[nominal_frames..].iter().any(|s| s.abs() > 0.0001), "synth release was cut off");
+    assert!(app.project.channel(channel).is_some());
+    let options = crate::session::RenderOptions { depth: BitDepth::Float32, range: Some((100, 200)), tail_seconds: 1.25 };
+    let (_, frames) = options.timing(&app.project, 48_000.0).unwrap();
+    assert_eq!(frames, ((daw_model::time::ticks_to_seconds(100.0, app.project.bpm) + 1.25) * 48_000.0).round() as usize);
+    assert!(crate::session::RenderOptions { tail_seconds: f64::NAN, ..options }.timing(&app.project, 48_000.0).is_err());
     std::fs::remove_dir_all(dir).unwrap();
 }

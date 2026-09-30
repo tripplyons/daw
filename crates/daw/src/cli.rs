@@ -99,7 +99,7 @@ pub enum Command {
     Export {
         file: PathBuf,
         out: PathBuf,
-        /// Render only this span, e.g. 64bar..72bar, with no tail. Notes that
+        /// Render only this span, e.g. 64bar..72bar, plus the chosen tail. Notes that
         /// start before it are not heard.
         #[arg(long, value_parser = parse::range)]
         range: Option<(Time, Time)>,
@@ -107,6 +107,9 @@ pub enum Command {
         /// from the same render.
         #[arg(long)]
         stems: Option<PathBuf>,
+        /// Effect tail in seconds (0 to 120). Defaults to the project's export tail.
+        #[arg(long, value_parser = |t: &str| parse::bounded(t, 0.0, 120.0))]
+        tail: Option<f64>,
     },
     /// Print peak, RMS, stereo width, and octave-band levels of WAV files, such
     /// as an export and its stems.
@@ -222,7 +225,7 @@ fn execute(command: Command) -> Result<String, String> {
             save(&file, &project)?;
             Ok(output)
         }
-        Command::Export { file, out, range, stems } => {
+        Command::Export { file, out, range, stems, tail } => {
             // Load here first: the app reports a bad file only in its status bar.
             let project = load(&file)?;
             let range = match range {
@@ -232,7 +235,7 @@ fn execute(command: Command) -> Result<String, String> {
                 Some((start, end)) => Some((ticks(&project, start), ticks(&project, end))),
                 None => None,
             };
-            crate::app::export_cli(&file, &out, range, stems.as_deref())?;
+            crate::app::export_cli(&file, &out, range, stems.as_deref(), tail)?;
             Ok(format!("exported {}", out.display()))
         }
         Command::Analyze { files, bars, bpm } => {

@@ -49,6 +49,7 @@ fn load_document(path: &Path) -> Result<Project, String> {
 }
 
 fn validate(project: &Project) -> Result<(), String> {
+    project.render.validate()?;
     if project.patterns.is_empty() || project.mixer.inserts.first().is_none_or(|i| i.id != daw_model::MASTER) {
         return Err("project needs a pattern and a master mixer insert".into());
     }

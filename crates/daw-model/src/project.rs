@@ -357,6 +357,26 @@ pub struct Workspaces {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderSettings {
+    pub export_tail_seconds: f64,
+    pub consolidation_tail_seconds: f64,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self { Self { export_tail_seconds: 2.0, consolidation_tail_seconds: 0.0 } }
+}
+
+impl RenderSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [("export tail", self.export_tail_seconds), ("consolidation tail", self.consolidation_tail_seconds)] {
+            if !value.is_finite() || !(0.0..=120.0).contains(&value) { return Err(format!("{name} must be between 0 and 120 seconds")); }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     pub bpm: f64,
@@ -369,6 +389,8 @@ pub struct Project {
     pub plugins: Vec<PluginInstance>,
     pub workspaces: Workspaces,
     pub grid: Grid,
+    #[serde(default)]
+    pub render: RenderSettings,
     next_id: u64,
 }
 
@@ -403,6 +425,7 @@ impl Project {
                     .collect(),
             },
             grid: Grid::Division(16),
+            render: RenderSettings::default(),
             next_id: 1,
         };
         project.mixer.inserts.push(Insert::new(MASTER, "master"));
