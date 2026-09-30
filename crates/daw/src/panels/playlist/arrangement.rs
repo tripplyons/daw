@@ -3,7 +3,8 @@
 
 use daw_engine::input::Take;
 use daw_engine::song::PlayMode;
-use daw_model::time::{TICKS_PER_BEAT, Ticks, seconds_to_ticks};
+use daw_model::tempo::TempoMap;
+use daw_model::time::Ticks;
 use daw_model::{Clip, ClipId, ClipSource, Source};
 use iced::keyboard::Modifiers;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
@@ -23,6 +24,7 @@ const MUTE_WIDTH: f32 = 14.0;
 
 pub(super) struct Arrangement<'a> {
     pub(super) app: &'a App,
+    pub(super) tempo: TempoMap,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -161,8 +163,8 @@ impl Arrangement<'_> {
                 let prepared = app.project.playlist.clips.iter().find(|c| c.id == clip.id).map_or(clip.audio, |c| c.audio);
                 let Some((sample, peaks)) = app.session.waveform(&daw_engine::audio::cache_key(path, prepared)) else { return };
                 let ratio = clip.audio.stretch / prepared.stretch;
-                let frames_per_tick = sample.sample_rate * 60.0 / (app.project.bpm * f64::from(TICKS_PER_BEAT)) / ratio;
-                let frame_at = |x: f32| (view.tick(x - HEADER_WIDTH) - clip.start as f64 + clip.offset as f64) * frames_per_tick;
+                let file_start = clip.start as f64 - clip.offset as f64;
+                let frame_at = |x: f32| self.tempo.seconds_between(file_start, view.tick(x - HEADER_WIDTH)) * sample.sample_rate / ratio;
                 let level = |from: usize, to: usize| {
                     let peaks = peaks.get(from / PEAK_FRAMES..(to - 1) / PEAK_FRAMES + 1).unwrap_or_default();
                     peaks.iter().fold(0.0f32, |m, &p| m.max(p))
@@ -185,8 +187,8 @@ impl Arrangement<'_> {
         let channels = usize::from(take.channels.max(1));
         let frames = take.samples.len() / channels;
         let rate = f64::from(take.sample_rate);
-        let start = take.start.max(app.song_start.max(0.0));
-        let end = take.start + seconds_to_ticks(frames as f64 / rate, app.project.bpm);
+        let start = take.start;
+        let end = start + self.tempo.ticks_spanned(start, frames as f64 / rate);
         if end <= start {
             return;
         }
@@ -203,8 +205,7 @@ impl Arrangement<'_> {
         };
         frame.fill_rectangle(body.position(), body.size(), theme::CONTROL_HOVER);
         let inner = Rectangle { y: body.y + 13.0, height: (body.height - 15.0).max(1.0), ..body };
-        let frames_per_tick = rate * 60.0 / (app.project.bpm * f64::from(TICKS_PER_BEAT));
-        let frame_at = |x: f32| (view.tick(x - HEADER_WIDTH) - take.start) * frames_per_tick;
+        let frame_at = |x: f32| self.tempo.seconds_between(start, view.tick(x - HEADER_WIDTH)) * rate;
         // Look at a bounded number of frames per column: the take has no
         // peak summary yet and grows every tick.
         let level = |from: usize, to: usize| {

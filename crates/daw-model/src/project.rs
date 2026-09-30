@@ -4,8 +4,9 @@ use std::ops::RangeInclusive;
 
 use serde::{Deserialize, Serialize};
 
-use crate::automation::{Envelope, Point, insert_volume_to_normalized, pan_to_normalized, tempo_to_normalized};
+use crate::automation::{Envelope, Point, Segment, insert_volume_to_normalized, pan_to_normalized, tempo_to_normalized};
 use crate::layout::Layout;
+use crate::tempo::TempoMap;
 use crate::time::{Grid, TICKS_PER_BEAT, TimeSignature, Ticks};
 
 macro_rules! id_type {
@@ -696,6 +697,29 @@ impl Project {
     }
 
     /// End of the last playlist clip.
+    /// The automation clips that play in song mode for targets that `keep`
+    /// accepts, sorted by start. Muted clips and clips on muted tracks are
+    /// left out.
+    pub fn automation_segments(&self, keep: impl Fn(Target) -> bool) -> Vec<(Target, Segment)> {
+        let mut segments: Vec<_> = self.playlist.clips.iter()
+            .filter(|c| !c.muted && !self.playlist.tracks.get(c.track).is_some_and(|t| t.mute))
+            .filter_map(|clip| {
+                let ClipSource::Automation(id) = clip.source else { return None };
+                let source = self.automation_clip(id).filter(|a| keep(a.target))?;
+                let segment = Segment { start: clip.start, end: clip.end(), offset: clip.offset, length: source.length, envelope: source.envelope.clone() };
+                Some((source.target, segment))
+            })
+            .collect();
+        segments.sort_by_key(|(_, s)| s.start);
+        segments
+    }
+
+    /// The song's tempo at every tick, following tempo automation.
+    pub fn tempo_map(&self) -> TempoMap {
+        let segments: Vec<_> = self.automation_segments(|t| t == Target::Tempo).into_iter().map(|(_, s)| s).collect();
+        TempoMap::new(self.bpm, &segments)
+    }
+
     pub fn song_length(&self) -> Ticks {
         self.playlist.clips.iter().map(Clip::end).max().unwrap_or(0)
     }

@@ -7,7 +7,7 @@ use daw_engine::output::{self, BitDepth, Stem};
 use daw_engine::song::{PlayMode, channel_node, compile};
 use daw_engine::synth::instrument;
 use daw_engine::{Command, Engine, EngineHandle, MAX_BLOCK, Node};
-use daw_model::time::{Ticks, ticks_to_seconds};
+use daw_model::time::Ticks;
 use daw_model::{Project, RenderSettings};
 use daw_plugins::Controller;
 
@@ -29,7 +29,7 @@ impl RenderOptions {
             Some(_) => return Err("render range must end after it starts".into()),
             None => (0, project.song_length()),
         };
-        let seconds = ticks_to_seconds(length as f64, project.bpm) + self.tail_seconds;
+        let seconds = project.tempo_map().seconds_between(start as f64, (start + length) as f64) + self.tail_seconds;
         Ok((start, (seconds * sample_rate).round() as usize))
     }
 }
@@ -100,6 +100,20 @@ mod tests {
     use std::sync::Arc;
     use daw_engine::synth::Sample;
     use daw_model::{PluginFormat, PluginRef, Send, Source};
+
+    #[test]
+    fn render_length_follows_tempo_automation() {
+        use daw_model::automation::{tempo_from_normalized, tempo_to_normalized};
+        let mut project = Project::new();
+        project.bpm = 120.0;
+        let tempo = project.add_automation("tempo", daw_model::Target::Tempo, tempo_to_normalized(60.0));
+        project.add_clip(0, 1920, daw_model::ClipSource::Automation(tempo));
+        let options = RenderOptions { depth: daw_engine::output::BitDepth::Float32, range: Some((0, 3840)), tail_seconds: 0.5 };
+        let (start, frames) = options.timing(&project, 48_000.0).unwrap();
+        // Two beats at 120 bpm, two at the clip's tempo, then the tail.
+        let seconds = 1.0 + 120.0 / tempo_from_normalized(tempo_to_normalized(60.0)) + 0.5;
+        assert_eq!((start, frames), (0, (seconds * 48_000.0).round() as usize));
+    }
 
     fn native_render(format: PluginFormat, detector: f32, boost: bool) -> f64 {
         let au = format == PluginFormat::AudioUnit;

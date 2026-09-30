@@ -11,7 +11,7 @@ use daw_plugins::PluginKind;
 use daw_plugins::scan::Catalog;
 
 use super::parse::{self, Time};
-use crate::app::audio::file_length;
+use crate::app::audio::{audio_ticks, file_seconds};
 use super::{find_plugin, ticks};
 
 #[derive(Subcommand)]
@@ -373,7 +373,7 @@ fn channel(project: &mut Project, op: ChannelOp, catalog: impl FnOnce() -> Catal
                     // The app may run from another folder, so keep the absolute path.
                     let path = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
                     let path = path.to_string_lossy().into_owned();
-                    file_length(&path, project.bpm)?;
+                    file_seconds(&path)?;
                     Source::Audio { path }
                 }
                 (_, _, _, Some(query)) => {
@@ -529,7 +529,7 @@ fn clip(project: &mut Project, op: ClipOp) -> Result<String, String> {
                 ClipSource::Pattern(id) => find_pattern(project, id.0)?.length,
                 ClipSource::Automation(id) => find_automation(project, id.0)?.length,
                 ClipSource::Audio(id) => match find_channel(project, id.0)?.source.clone() {
-                    Source::Audio { path } => file_length(&path, project.bpm)?,
+                    Source::Audio { path } => audio_ticks(&project.tempo_map(), ticks(project, start) as f64, file_seconds(&path)?),
                     _ => return Err(format!("channel {} is not an audio channel", id.0)),
                 },
             };

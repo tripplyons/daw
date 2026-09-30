@@ -57,7 +57,7 @@ Variables hold only command outputs, not environment variables, so write paths o
 - Channels, patterns, automation clips, playlist clips, mixer inserts, and plugin instances share one id counter, so an id names exactly one thing. Read ids from `show`; never guess them. Insert 0 is the master.
 - Notes belong to a pattern and a channel. Notes and automation points have no ids: notes are matched by key and start, points by index.
 - Nothing plays in song mode until it is on the playlist. After making a pattern or automation clip, place it with `clip add`.
-- Audio clips play part of a WAV file at its own speed. Add the file with `channel add NAME --audio WAV`, which embeds the WAV on save, then place it with `clip add audio:CHANNEL TRACK START`. `--offset` skips into the file. Changing the tempo does not stretch the audio or change clip lengths.
+- Audio clips play part of a WAV file at its own speed. Add the file with `channel add NAME --audio WAV`, which embeds the WAV on save, then place it with `clip add audio:CHANNEL TRACK START`. `--offset` skips into the file. Changing the tempo does not stretch the audio or change clip lengths. Tempo automation clips set the tempo inside them, and the last tempo holds after them; audio keeps its own speed through tempo changes.
 - A new project (`$DAW new song.dawproj`) has 8 mixer inserts, a saw synth channel on insert 1, one empty 1-bar pattern, and 16 empty tracks. Channels added later take the next unused insert.
 
 ## Value forms
@@ -126,7 +126,7 @@ Behavior worth knowing:
 - `note remove` with no filters clears the channel's notes in that pattern.
 - `pattern set --length` and `automation set --length` also resize playlist clips that show the whole source.
 - `set --bpm` accepts 1 to 999, the same range tempo automation covers.
-- `clip add` adds tracks up to the index you give. Its length defaults to the source's length, less `--offset`; for `audio:CHANNEL`, that is the WAV file's length at the project tempo.
+- `clip add` adds tracks up to the index you give. Its length defaults to the source's length, less `--offset`; for `audio:CHANNEL`, that is the WAV file's length at the tempo from START on, including tempo automation.
 - `automation add` makes two points, at 0 and at the clip's length, both at the target's current value or `--value`. Each point sets the shape of the segment that follows it. One clip per target. `point add` past the clip's end grows the clip; `point add` and `point set` print the point's index after sorting by time.
 - `--plugin` and `effect add` match an exact plugin id or a case-insensitive name. When a plugin exists in several formats, pass the id from `$DAW plugins`. If the cache is empty, run `$DAW plugins --scan` (it can take a minute).
 - INSTANCE in `params` and `presets` is a plugin instance id (as `show` prints next to plugin channels and insert effects, and `effect add` prints) or the id of a plugin channel.

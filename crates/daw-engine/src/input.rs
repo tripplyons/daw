@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::engine::Shared;
+use crate::engine::{ClockReading, Shared};
 
 /// Seconds of audio the ring holds between drains.
 const RING_SECONDS: usize = 30;
@@ -23,8 +23,7 @@ pub enum InputError {
 /// Audio recorded during one stretch of playback.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Take {
-    /// Song position of the first frame, in ticks. Negative when the input
-    /// latency reaches back before the song start.
+    /// Song position of the first frame, in ticks.
     pub start: f64,
     pub channels: u16,
     pub sample_rate: u32,
@@ -34,7 +33,7 @@ pub struct Take {
 
 #[derive(Debug, Clone, Copy)]
 enum Marker {
-    /// A take starts at this sample count.
+    /// A take starts at this sample count, ending the one before it.
     Start { at: u64, tick: f64 },
     End { at: u64 },
 }
@@ -61,37 +60,22 @@ impl Recorder {
         let config = device.default_input_config()?.config();
         let channels = config.channels;
         let sample_rate = config.sample_rate;
-        let (mut sample_tx, samples) = rtrb::RingBuffer::new(sample_rate as usize * usize::from(channels) * RING_SECONDS);
-        let (mut marker_tx, markers) = rtrb::RingBuffer::new(64);
+        let (samples_tx, samples) = rtrb::RingBuffer::new(sample_rate as usize * usize::from(channels) * RING_SECONDS);
+        let (markers_tx, markers) = rtrb::RingBuffer::new(64);
         let overflowed = Arc::new(AtomicBool::new(false));
-        let overflow = overflowed.clone();
-        let mut pushed = 0u64;
-        let mut recording = false;
+        let mut capture = Capture {
+            samples: samples_tx,
+            markers: markers_tx,
+            channels: usize::from(channels),
+            frame_nanos: 1e9 / f64::from(sample_rate),
+            pushed: 0,
+            run: None,
+            overflowed: overflowed.clone(),
+        };
         let stream = device.build_input_stream::<f32, _, _>(
             config,
             move |data: &[f32], info: &cpal::InputCallbackInfo| {
-                let clock = shared.clock().filter(|c| c.playing);
-                let Some(clock) = clock else {
-                    if recording && marker_tx.push(Marker::End { at: pushed }).is_ok() {
-                        recording = false;
-                    }
-                    return;
-                };
-                if !recording {
-                    let tick = clock.tick_at(info.timestamp().capture.as_nanos() as u64);
-                    if marker_tx.push(Marker::Start { at: pushed, tick }).is_err() {
-                        return;
-                    }
-                    recording = true;
-                }
-                // Whole frames only, so channels stay interleaved in order.
-                let room = sample_tx.slots();
-                let room = room - room % usize::from(channels);
-                let (written, _) = sample_tx.push_partial_slice(&data[..data.len().min(room)]);
-                pushed += written.len() as u64;
-                if written.len() < data.len() {
-                    overflow.store(true, Ordering::Relaxed);
-                }
+                capture.receive(data, info.timestamp().capture.as_nanos() as u64, shared.clock());
             },
             |error| log::error!("audio input: {error}"),
             None,
@@ -122,6 +106,65 @@ impl Recorder {
         let mut ended = self.takes.poll();
         ended.extend(self.takes.take.take());
         ended
+    }
+}
+
+/// The input callback's end of the rings. Each stretch of playback without
+/// loop wraps or seeks records into its own take.
+struct Capture {
+    samples: rtrb::Producer<f32>,
+    markers: rtrb::Producer<Marker>,
+    channels: usize,
+    frame_nanos: f64,
+    /// Samples pushed so far.
+    pushed: u64,
+    /// The playback run the open take records, by `ClockReading::run`.
+    run: Option<u64>,
+    overflowed: Arc<AtomicBool>,
+}
+
+impl Capture {
+    /// Record `data`, whose first frame was captured at host time `captured`.
+    fn receive(&mut self, data: &[f32], captured: u64, clock: Option<ClockReading>) {
+        let Some(clock) = clock.filter(|c| c.playing) else {
+            if self.run.is_some() && self.markers.push(Marker::End { at: self.pushed }).is_ok() {
+                self.run = None;
+            }
+            return;
+        };
+        if self.run == Some(clock.run) {
+            self.write(data);
+            return;
+        }
+        // Frames captured before the new run was heard finish the take
+        // before it. Without one, they are input latency from before
+        // playback and are dropped.
+        let split = clock.frames_before_run(captured, self.frame_nanos).min(data.len() / self.channels);
+        let (before, after) = data.split_at(split * self.channels);
+        if self.run.is_some() {
+            self.write(before);
+        }
+        if after.is_empty() {
+            return;
+        }
+        let tick = clock.tick_at(captured + (split as f64 * self.frame_nanos) as u64);
+        if self.markers.push(Marker::Start { at: self.pushed, tick }).is_ok() {
+            self.run = Some(clock.run);
+        }
+        if self.run.is_some() {
+            self.write(after);
+        }
+    }
+
+    fn write(&mut self, data: &[f32]) {
+        // Whole frames only, so channels stay interleaved in order.
+        let room = self.samples.slots();
+        let room = room - room % self.channels;
+        let (written, _) = self.samples.push_partial_slice(&data[..data.len().min(room)]);
+        self.pushed += written.len() as u64;
+        if written.len() < data.len() {
+            self.overflowed.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -193,5 +236,27 @@ mod tests {
         sample_tx.push_entire_slice(&[4.0, 5.0]).unwrap();
         assert_eq!(takes.poll(), vec![take(10.0, &[1.0, 2.0, 3.0])]);
         assert_eq!(takes.take, Some(take(99.0, &[4.0, 5.0])));
+    }
+
+    #[test]
+    fn takes_split_where_each_run_of_playback_is_heard() {
+        let (samples_tx, samples) = rtrb::RingBuffer::new(64);
+        let (markers_tx, markers) = rtrb::RingBuffer::new(8);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let mut capture = Capture { samples: samples_tx, markers: markers_tx, channels: 1, frame_nanos: 1000.0, pushed: 0, run: None, overflowed };
+        let mut takes = Takes { samples, markers, channels: 1, sample_rate: 1_000_000, drained: 0, take: None };
+        let take = |start, samples: &[f32]| Take { start, channels: 1, sample_rate: 1_000_000, samples: samples.to_vec() };
+        // One tick per microsecond, so one tick per frame.
+        let clock = |tick, run| Some(ClockReading { tick, nanos: run, ticks_per_second: 1e6, playing: true, run });
+
+        // Playback from tick 100 is heard from 5000 ns on; input before
+        // that came before playback.
+        capture.receive(&[1.0, 2.0, 3.0, 4.0], 3000, clock(100.0, 5000));
+        capture.receive(&[5.0, 6.0], 7000, clock(100.0, 5000));
+        // The loop wraps to tick 0, heard from 10_000 ns on.
+        capture.receive(&[7.0, 8.0, 9.0, 10.0], 9000, clock(0.0, 10_000));
+        capture.receive(&[11.0], 13_000, None);
+        assert_eq!(takes.poll(), vec![take(100.0, &[3.0, 4.0, 5.0, 6.0, 7.0]), take(0.0, &[8.0, 9.0, 10.0])]);
+        assert_eq!(takes.take, None);
     }
 }

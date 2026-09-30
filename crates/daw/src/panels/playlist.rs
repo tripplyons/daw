@@ -16,6 +16,7 @@ use iced::{Element, Length};
 
 use super::timeline::{self, RULER_HEIGHT, TimeView};
 use super::{label, pick, tool, toggle};
+use crate::app::audio::audio_ticks;
 use crate::app::{App, Message as AppMessage};
 use crate::keys::Action;
 use crate::theme;
@@ -330,7 +331,8 @@ pub fn update(app: &mut App, message: Message) {
             grow_tracks(app, track + 1);
             let id = match brush {
                 ClipSource::Audio(channel) => {
-                    let length = app.audio_length(channel).unwrap_or(app.project.signature.ticks_per_bar());
+                    let length = app.audio_seconds(channel)
+                        .map_or(app.project.signature.ticks_per_bar(), |seconds| audio_ticks(&app.project.tempo_map(), start as f64, seconds));
                     app.project.add_audio_clip(track, start, channel, length)
                 }
                 _ => app.project.add_clip(track, start, brush),
@@ -363,12 +365,14 @@ pub fn update(app: &mut App, message: Message) {
             let delta = timeline::snap_delta(ticks, grid, signature, bypass);
             let min_length = grid.step(signature).filter(|_| !bypass).unwrap_or(10);
             let originals = app.playlist.originals.clone();
+            let tempo = app.project.tempo_map();
             let mut preview = Vec::with_capacity(originals.len());
             let resizing = app.playlist.resizing;
             for original in originals {
                 // Audio clips end where their file does.
                 let file_end = match original.source {
-                    ClipSource::Audio(channel) => app.audio_length(channel).map(|end| (end as f64 * original.audio.stretch).round() as Ticks),
+                    ClipSource::Audio(channel) => app.audio_seconds(channel)
+                        .map(|seconds| audio_ticks(&tempo, original.start as f64 - original.offset as f64, seconds * original.audio.stretch)),
                     _ => None,
                 };
                 let mut clip = original.clone();
@@ -648,7 +652,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 }
 
 pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
-    let canvas = Canvas::new(Arrangement { app }).width(Length::Fill).height(Length::Fill);
+    let canvas = Canvas::new(Arrangement { app, tempo: app.project.tempo_map() }).width(Length::Fill).height(Length::Fill);
     let selected = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_)));
     let Some(clip) = selected else { return canvas.into() };
     let semitones = app.playlist.pitch_edit.as_ref().filter(|(ids, _)| ids.contains(&clip.id))

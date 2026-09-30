@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use daw_engine::input::Take;
 use daw_engine::song::PlayMode;
-use daw_model::time::{Ticks, seconds_to_ticks, ticks_to_seconds};
+use daw_model::tempo::TempoMap;
+use daw_model::time::Ticks;
 use daw_model::{ChannelId, Source};
 
 use super::App;
@@ -61,24 +62,16 @@ impl App {
     }
 
     /// Write a take to the recordings folder and place it on the first free
-    /// track. Returns the file, or `None` when nothing was recorded after
-    /// the song start marker.
+    /// track. Returns the file, or `None` when the take is empty.
     pub(super) fn place_take(&mut self, take: Take) -> Result<Option<PathBuf>, String> {
         let channels = usize::from(take.channels.max(1));
-        let rate = f64::from(take.sample_rate);
-        let bpm = self.project.bpm;
-        // Input latency reaches back before playback was heard; that part
-        // was recorded before the song started.
-        let floor = self.song_start.max(0.0);
-        let skip = if take.start < floor { (ticks_to_seconds(floor - take.start, bpm) * rate).round() as usize } else { 0 };
-        let samples = take.samples.get(skip * channels..).unwrap_or_default();
-        let frames = samples.len() / channels;
+        let frames = take.samples.len() / channels;
         if frames == 0 {
             return Ok(None);
         }
-        let path = write_take(&recordings_dir(self.path.as_deref()), &samples[..frames * channels], take.channels, take.sample_rate)?;
-        let start = take.start.max(floor).round() as Ticks;
-        let length = seconds_to_ticks(frames as f64 / rate, bpm).round() as Ticks;
+        let path = write_take(&recordings_dir(self.path.as_deref()), &take.samples[..frames * channels], take.channels, take.sample_rate)?;
+        let start = take.start.max(0.0).round() as Ticks;
+        let length = audio_ticks(&self.project.tempo_map(), start as f64, frames as f64 / f64::from(take.sample_rate));
         self.checkpoint();
         self.add_audio(&path, start, length);
         self.edited();
@@ -117,7 +110,7 @@ impl App {
         let path = folder.join(format!("consolidated-{}.wav", crate::project_files::stamp()));
         let options = crate::render::RenderOptions { depth: daw_engine::output::BitDepth::Float32, range: Some((start, end)), tail_seconds: self.project.render.consolidation_tail_seconds };
         let renderer = self.session.renderer(&render)?;
-        let tail = seconds_to_ticks(options.tail_seconds, self.project.bpm).round() as Ticks;
+        let tail = render.tempo_map().ticks_spanned(end as f64, options.tail_seconds).round() as Ticks;
         self.rendering.start(renderer, super::rendering::Kind::Consolidate { clips, start, length: end - start + tail }, path, options, self.revision)?;
         self.set_status("consolidating selection");
         Ok(())
@@ -144,7 +137,7 @@ impl App {
     /// Add a WAV file as an audio channel with one clip of the whole file at `start`.
     pub fn import_audio(&mut self, path: &Path, start: Ticks) -> Result<ChannelId, String> {
         let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let length = file_length(&path.to_string_lossy(), self.project.bpm)?;
+        let length = audio_ticks(&self.project.tempo_map(), start as f64, file_seconds(&path.to_string_lossy())?);
         self.checkpoint();
         let channel = self.add_audio(&path, start, length);
         self.edited();
@@ -152,14 +145,13 @@ impl App {
         Ok(channel)
     }
 
-    /// Length of an audio channel's whole file at the current tempo.
-    pub fn audio_length(&self, channel: ChannelId) -> Option<Ticks> {
+    /// Length of an audio channel's whole file in seconds.
+    pub fn audio_seconds(&self, channel: ChannelId) -> Option<f64> {
         let Source::Audio { path } = &self.project.channel(channel)?.source else { return None };
         if let Some((sample, _)) = self.session.waveform(path) {
-            let seconds = sample.left.len() as f64 / sample.sample_rate;
-            return Some((seconds_to_ticks(seconds, self.project.bpm).round() as Ticks).max(1));
+            return Some(sample.left.len() as f64 / sample.sample_rate);
         }
-        file_length(path, self.project.bpm).ok()
+        file_seconds(path).ok()
     }
 
     fn add_audio(&mut self, path: &Path, start: Ticks, length: Ticks) -> ChannelId {
@@ -173,11 +165,16 @@ impl App {
     }
 }
 
-/// Length of a WAV file in ticks at `bpm`, read from its header.
-pub fn file_length(path: &str, bpm: f64) -> Result<Ticks, String> {
+/// Length of a WAV file in seconds, read from its header.
+pub fn file_seconds(path: &str) -> Result<f64, String> {
     let reader = hound::WavReader::open(path).map_err(|e| format!("could not read {path}: {e}"))?;
-    let seconds = f64::from(reader.duration()) / f64::from(reader.spec().sample_rate);
-    Ok((seconds_to_ticks(seconds, bpm).round() as Ticks).max(1))
+    Ok(f64::from(reader.duration()) / f64::from(reader.spec().sample_rate))
+}
+
+/// Whole ticks, at least one, that `seconds` of audio span when played
+/// from tick `start` under `tempo`.
+pub fn audio_ticks(tempo: &TempoMap, start: f64, seconds: f64) -> Ticks {
+    (tempo.ticks_spanned(start, seconds).round() as Ticks).max(1)
 }
 
 /// `recordings` next to the project file, or in the app's data folder for

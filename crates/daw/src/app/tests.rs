@@ -756,34 +756,31 @@ fn write_wav(path: &std::path::Path, frames: usize) {
 }
 
 #[test]
-fn recorded_takes_start_at_the_song_marker_and_undo() {
+fn recorded_takes_become_clips_at_their_start_and_undo() {
     let dir = std::env::temp_dir().join(format!("daw-take-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut app = app();
     app.path = Some(dir.join("song.dawproj"));
     app.project.bpm = 120.0;
-    app.song_start = 1920.0;
     let channels = app.project.channels.len();
-    // One second of stereo input whose first quarter second came before the
-    // marker, because of input latency.
-    let take = daw_engine::input::Take { start: 1440.0, channels: 2, sample_rate: 48_000, samples: vec![0.25; 96_000] };
+    // One second of stereo input.
+    let take = daw_engine::input::Take { start: 1920.0, channels: 2, sample_rate: 48_000, samples: vec![0.25; 96_000] };
     let path = app.place_take(take).unwrap().expect("a take");
     assert_eq!(path, dir.join("recordings").join("take 1.wav"));
 
     let reader = hound::WavReader::open(&path).unwrap();
-    assert_eq!((reader.spec().channels, reader.duration()), (2, 36_000));
+    assert_eq!((reader.spec().channels, reader.duration()), (2, 48_000));
     let channel = app.project.channels.last().unwrap();
     assert_eq!(channel.source, daw_model::Source::Audio { path: path.to_string_lossy().into_owned() });
     let clip = app.project.playlist.clips.last().unwrap();
-    assert_eq!((clip.source, clip.start, clip.length, clip.offset), (ClipSource::Audio(channel.id), 1920, 1440, 0));
+    assert_eq!((clip.source, clip.start, clip.length, clip.offset), (ClipSource::Audio(channel.id), 1920, 1920, 0));
 
     let _ = app.update(Message::Action(Action::Undo));
     assert_eq!(app.project.channels.len(), channels);
     assert!(app.project.playlist.clips.is_empty());
 
-    // Audio that all came before the marker is dropped.
-    let early = daw_engine::input::Take { start: 0.0, channels: 1, sample_rate: 48_000, samples: vec![0.0; 100] };
-    assert_eq!(app.place_take(early), Ok(None));
+    let empty = daw_engine::input::Take { start: 0.0, channels: 1, sample_rate: 48_000, samples: Vec::new() };
+    assert_eq!(app.place_take(empty), Ok(None));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -5,8 +5,9 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
-use daw_model::automation::{insert_volume_from_normalized, pan_from_normalized, tempo_from_normalized};
-use daw_model::time::{TICKS_PER_BEAT, Ticks};
+use daw_model::automation::{insert_volume_from_normalized, pan_from_normalized};
+use daw_model::tempo::TempoMap;
+use daw_model::time::{TICKS_PER_BEAT, Ticks, seconds_to_ticks};
 
 use crate::processor::{Event, EventKind, Processor, TransportInfo};
 use crate::song::{AudioPlan, EngineTarget, InsertPlan, Song};
@@ -27,18 +28,23 @@ pub struct Node {
     events: Vec<Event>,
     /// Keys with a note-on sent and no note-off yet.
     held: u128,
+    /// Held keys the sequencer started, which a song edit may end.
+    sequenced: u128,
 }
 
 impl Node {
     /// Allocates the event buffer here, off the audio thread.
     pub fn new(key: u64, processor: Box<dyn Processor>) -> Box<Node> {
-        Box::new(Node { key, processor, events: Vec::with_capacity(EVENT_CAPACITY), held: 0 })
+        Box::new(Node { key, processor, events: Vec::with_capacity(EVENT_CAPACITY), held: 0, sequenced: 0 })
     }
 
     fn push(&mut self, event: Event) {
         match event.kind {
             EventKind::NoteOn { key, .. } => self.held |= 1 << key,
-            EventKind::NoteOff { key } => self.held &= !(1 << key),
+            EventKind::NoteOff { key } => {
+                self.held &= !(1 << key);
+                self.sequenced &= !(1 << key);
+            }
             EventKind::Param { .. } => {}
         }
         // Drop events past capacity rather than allocate on the audio thread.
@@ -109,6 +115,9 @@ pub struct ClockReading {
     pub nanos: u64,
     pub ticks_per_second: f64,
     pub playing: bool,
+    /// Host time at which the current stretch of playback, without loop
+    /// wraps or seeks, started being heard.
+    pub run: u64,
 }
 
 impl ClockReading {
@@ -118,6 +127,16 @@ impl ClockReading {
     pub fn tick_at(&self, nanos: u64) -> f64 {
         let seconds = (nanos as f64 - self.nanos as f64) / 1e9;
         if seconds.abs() > 1.0 { self.tick } else { self.tick + seconds * self.ticks_per_second }
+    }
+
+    /// Frames of input captured from host time `captured` on, `frame_nanos`
+    /// apart, that came before this run of playback was heard. Zero when the
+    /// input and output clocks differ.
+    pub fn frames_before_run(&self, captured: u64, frame_nanos: f64) -> usize {
+        if (captured as f64 - self.nanos as f64).abs() > 1e9 {
+            return 0;
+        }
+        ((self.run as f64 - captured as f64) / frame_nanos).ceil().max(0.0) as usize
     }
 }
 
@@ -130,6 +149,7 @@ struct Clock {
     nanos: AtomicU64,
     ticks_per_second: AtomicU64,
     playing: AtomicBool,
+    run: AtomicU64,
 }
 
 impl Clock {
@@ -141,6 +161,7 @@ impl Clock {
         self.nanos.store(reading.nanos, Ordering::Relaxed);
         self.ticks_per_second.store(reading.ticks_per_second.to_bits(), Ordering::Relaxed);
         self.playing.store(reading.playing, Ordering::Relaxed);
+        self.run.store(reading.run, Ordering::Relaxed);
         self.sequence.store(sequence + 2, Ordering::Release);
     }
 
@@ -159,6 +180,7 @@ impl Clock {
                 nanos: self.nanos.load(Ordering::Relaxed),
                 ticks_per_second: f64::from_bits(self.ticks_per_second.load(Ordering::Relaxed)),
                 playing: self.playing.load(Ordering::Relaxed),
+                run: self.run.load(Ordering::Relaxed),
             };
             fence(Ordering::Acquire);
             if self.sequence.load(Ordering::Relaxed) == before {
@@ -243,6 +265,13 @@ pub struct Engine {
     playing: bool,
     /// Transport position in ticks.
     position: f64,
+    /// Where playback last started or jumped, in ticks.
+    run_start: f64,
+    /// The frame of the live buffer being rendered where playback started
+    /// or jumped, until the clock publishes it.
+    run_frame: Option<usize>,
+    /// Host time at which the playback from `run_start` started being heard.
+    run_heard: u64,
     record_position: f64,
     /// Frames since song start, for plugins that want a sample position.
     frames: i64,
@@ -274,6 +303,9 @@ pub fn create(sample_rate: f64) -> (Engine, EngineHandle) {
         nodes: Vec::with_capacity(MAX_NODES),
         playing: false,
         position: 0.0,
+        run_start: 0.0,
+        run_frame: None,
+        run_heard: 0,
         record_position: 0.0,
         frames: 0,
         scratch: [vec![0.0; MAX_BLOCK].into_boxed_slice(), vec![0.0; MAX_BLOCK].into_boxed_slice()],
@@ -305,30 +337,36 @@ fn peak(buffer: &[f32]) -> f32 {
     buffer.iter().fold(0.0f32, |m, s| m.max(s.abs()))
 }
 
-/// Add the audio clips heard from tick `from` on to `left` and `right`, one
-/// frame every `per_frame` ticks. Files play at their own speed, so the read
-/// position follows the song's tempo rather than stretching.
-fn mix_audio(plan: &AudioPlan, from: f64, per_frame: f64, bpm: f64, left: &mut [f32], right: &mut [f32]) {
+/// Add the audio clips heard from tick `from` on to `left` and `right`, at
+/// `rate` frames per second. Files play at their own speed, so the read
+/// position follows song time on the tempo map rather than stretching.
+/// Clips fade at their own edges and at `edges`, where playback starts and
+/// jumps.
+fn mix_audio(plan: &AudioPlan, tempo: &TempoMap, from: f64, rate: f64, edges: Range<f64>, left: &mut [f32], right: &mut [f32]) {
+    let seconds = tempo.seconds_at(from);
+    let per_frame = seconds_to_ticks(1.0 / rate, tempo.bpm_at(from));
     let to = from + per_frame * left.len() as f64;
     let fade = per_frame * DECLICK_FRAMES;
     for clip in plan.clips.iter().take_while(|c| (c.start as f64) < to) {
         let sample = &*clip.sample;
-        let frames_per_tick = sample.sample_rate * 60.0 / (bpm * f64::from(TICKS_PER_BEAT));
         let (start, end) = (clip.start as f64, clip.end as f64);
         if end <= from {
             continue;
         }
+        // Song time of the file's first frame.
+        let zero = tempo.seconds_at(start - clip.offset as f64);
+        let (heard_from, heard_to) = (start.max(edges.start), end.min(edges.end));
         let first = ((start - from) / per_frame).ceil().max(0.0) as usize;
         let last = (((end - from) / per_frame).ceil().max(0.0) as usize).min(left.len());
         for frame in first..last {
             let tick = from + per_frame * frame as f64;
-            let position = (tick - start + clip.offset as f64) * frames_per_tick;
+            let position = (seconds + frame as f64 / rate - zero) * sample.sample_rate;
             let index = position as usize;
             if index + 1 >= sample.left.len() {
                 break;
             }
             let t = (position - index as f64) as f32;
-            let gain = ((tick - start).min(end - tick) / fade).min(1.0) as f32;
+            let gain = ((tick - heard_from).min(heard_to - tick) / fade).clamp(0.0, 1.0) as f32;
             left[frame] += (sample.left[index] + (sample.left[index + 1] - sample.left[index]) * t) * gain;
             right[frame] += (sample.right[index] + (sample.right[index + 1] - sample.right[index]) * t) * gain;
         }
@@ -375,6 +413,7 @@ impl Engine {
                     if let Some(old) = self.midi.replace(input) { self.discard(Garbage::MidiInput(old)); }
                 }
                 Command::Song(song) => {
+                    self.release_ended_notes(&song);
                     if let Some(old) = self.song.replace(song) {
                         self.discard(Garbage::Song(old));
                     }
@@ -382,8 +421,9 @@ impl Engine {
                 Command::Mix { target, value } => {
                     if let Some(mut song) = self.song.take() {
                         self.apply_target(&mut song, target, value);
-                        for plan in &mut song.automation {
-                            if plan.target == target { plan.last = f32::NAN; }
+                        for plan in song.automation.iter_mut().filter(|p| p.target == target) {
+                            plan.base = Some(value);
+                            plan.last = f32::NAN;
                         }
                         self.song = Some(song);
                     }
@@ -408,7 +448,7 @@ impl Engine {
                         self.discard(Garbage::Node(node));
                     }
                 }
-                Command::Play => self.playing = true,
+                Command::Play => self.start_playing(),
                 Command::Stop => {
                     self.playing = false;
                     self.silence();
@@ -418,6 +458,8 @@ impl Engine {
                     // position, as stopping does.
                     self.silence();
                     self.position = tick.max(0.0);
+                    self.run_start = self.position;
+                    self.run_frame = Some(0);
                     self.frames = self.ticks_to_frames(self.position);
                 }
                 Command::Param { node, id, value } => self.push_event(node, EventKind::Param { id, value }),
@@ -435,6 +477,47 @@ impl Engine {
         }
     }
 
+    /// Release the sounding sequencer notes that `song` does not end, such
+    /// as notes deleted or shortened while they play. Other notes end at
+    /// their note-off in `song`.
+    fn release_ended_notes(&mut self, song: &Song) {
+        let from = self.position - self.ticks_per_frame() / 2.0;
+        for node in &mut self.nodes {
+            let mut sequenced = node.sequenced;
+            while sequenced != 0 {
+                let key = sequenced.trailing_zeros() as u8;
+                sequenced &= sequenced - 1;
+                let ends = song.channels.iter().filter(|c| c.node == node.key).any(|channel| {
+                    let first = channel.events.partition_point(|e| (e.tick as f64) < from);
+                    channel.events[first..].iter().find(|e| e.key == key).is_some_and(|e| e.velocity == 0.0)
+                });
+                if !ends {
+                    node.push(Event { offset: 0, kind: EventKind::NoteOff { key } });
+                }
+            }
+        }
+    }
+
+    /// Start playback, returning automated targets to their values outside
+    /// clips as FL Studio does when the song starts.
+    fn start_playing(&mut self) {
+        if self.playing {
+            return;
+        }
+        self.playing = true;
+        self.run_start = self.position;
+        self.run_frame = Some(0);
+        let Some(mut song) = self.song.take() else { return };
+        for index in 0..song.automation.len() {
+            let plan = &mut song.automation[index];
+            let Some(base) = plan.base else { continue };
+            plan.last = base;
+            let target = plan.target;
+            self.apply_target(&mut song, target, base);
+        }
+        self.song = Some(song);
+    }
+
     /// Release held notes and cut voices and reverb and delay tails.
     fn silence(&mut self) {
         self.release_all(0);
@@ -444,7 +527,7 @@ impl Engine {
     }
 
     fn bpm(&self) -> f64 {
-        self.song.as_ref().map(|s| s.bpm).unwrap_or(120.0)
+        self.song.as_ref().map_or(120.0, |s| s.tempo.bpm_at(self.position))
     }
 
     fn ticks_per_frame(&self) -> f64 {
@@ -452,18 +535,33 @@ impl Engine {
     }
 
     fn ticks_to_frames(&self, ticks: f64) -> i64 {
-        (ticks / self.ticks_per_frame()) as i64
+        let seconds = self.song.as_ref().map_or(0.0, |s| s.tempo.seconds_at(ticks));
+        (seconds * self.sample_rate) as i64
+    }
+
+    /// The tick `frames` after the position, following the tempo map, which
+    /// may change tempo inside the block.
+    fn tick_after(&self, frames: usize) -> f64 {
+        let Some(song) = &self.song else { return self.position };
+        song.tempo.tick_at(song.tempo.seconds_at(self.position) + frames as f64 / self.sample_rate)
+    }
+
+    fn loop_range(&self) -> Option<(f64, f64)> {
+        let (start, end) = self.song.as_ref()?.loop_range?;
+        (end > start).then_some((start as f64, end as f64))
     }
 
     /// The wrap in the next `frames` of playback, when the frame nearest the
     /// loop end falls inside them. Notes and audio both wrap at that frame.
     fn loop_wrap(&self, frames: usize) -> Option<LoopWrap> {
-        let (start, end) = self.song.as_ref()?.loop_range?;
-        if end <= start {
-            return None;
+        let (start, end) = self.loop_range()?;
+        let per_frame = self.ticks_per_frame();
+        // A playhead past the loop end, after a seek or a loop edit, wraps
+        // at once without playing what it skipped.
+        if self.position - end > per_frame / 2.0 {
+            return Some(LoopWrap { frame: 0, start, end: self.position });
         }
-        let (start, end) = (start as f64, end as f64);
-        let frame = ((end - self.position) / self.ticks_per_frame()).round().max(0.0);
+        let frame = ((end - self.position) / per_frame).round().max(0.0);
         (frame < frames as f64).then_some(LoopWrap { frame: frame as usize, start, end })
     }
 
@@ -477,13 +575,21 @@ impl Engine {
     /// `heard`, in nanoseconds, and publish that pairing for recording.
     pub fn render_live(&mut self, left: &mut [f32], right: &mut [f32], heard: u64) {
         self.handle_commands();
-        self.shared.clock.publish(ClockReading {
-            tick: self.position,
+        let start = self.position;
+        self.render_commanded(left, right);
+        let mut reading = ClockReading {
+            tick: start,
             nanos: heard,
             ticks_per_second: self.ticks_per_frame() * self.sample_rate,
             playing: self.playing,
-        });
-        self.render_commanded(left, right);
+            run: self.run_heard,
+        };
+        // A run that starts in this buffer anchors the clock where it starts.
+        if let Some(frame) = self.run_frame.take() {
+            self.run_heard = heard + (frame as f64 * 1e9 / self.sample_rate).round() as u64;
+            reading = ClockReading { tick: self.run_start, nanos: self.run_heard, run: self.run_heard, ..reading };
+        }
+        self.shared.clock.publish(reading);
     }
 
     fn render_commanded(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -514,19 +620,21 @@ impl Engine {
     fn render_block(&mut self, left: &mut [f32], right: &mut [f32], offset: usize) {
         let frames = left.len();
         let wrap = if self.playing {
-            // Automation goes first because it can change the tempo.
             self.apply_automation();
             let wrap = self.loop_wrap(frames);
             self.schedule_notes(frames, wrap);
+            if let Some(wrap) = wrap {
+                self.run_frame = Some(offset + wrap.frame);
+            }
             wrap
         } else {
             None
         };
         let transport = self.transport();
-        let per_frame = self.ticks_per_frame();
         // Audio plays from the position until frame `split`, then from the
-        // loop start.
-        let (split, wrapped) = wrap.map_or((frames, 0.0), |wrap| (wrap.frame, wrap.start));
+        // loop start. It fades out where it jumps and in where it lands.
+        let loop_end = self.loop_range().map_or(f64::INFINITY, |(_, end)| end);
+        let (split, wrapped, jump) = wrap.map_or((frames, 0.0, loop_end), |wrap| (wrap.frame, wrap.start, wrap.end));
         let Some(mut song) = self.song.take() else {
             left.fill(0.0);
             right.fill(0.0);
@@ -562,8 +670,8 @@ impl Engine {
             if let Some(audio) = channel.audio.as_ref().filter(|_| self.playing) {
                 let (before_l, after_l) = scratch_l.split_at_mut(split);
                 let (before_r, after_r) = scratch_r.split_at_mut(split);
-                mix_audio(audio, self.position, per_frame, song.bpm, before_l, before_r);
-                mix_audio(audio, wrapped, per_frame, song.bpm, after_l, after_r);
+                mix_audio(audio, &song.tempo, self.position, self.sample_rate, self.run_start..jump, before_l, before_r);
+                mix_audio(audio, &song.tempo, wrapped, self.sample_rate, wrapped..loop_end, after_l, after_r);
             }
             let (gl, gr) = apply_pan(channel.pan, channel.volume);
             let Some(insert) = song.inserts.get_mut(channel.insert) else { continue };
@@ -675,15 +783,14 @@ impl Engine {
                     channel.pan = pan_from_normalized(value);
                 }
             }
-            EngineTarget::Tempo => song.bpm = tempo_from_normalized(value),
         }
     }
 
     /// Queue note events that start in this block, wrapping at the loop end.
     fn schedule_notes(&mut self, frames: usize, wrap: Option<LoopWrap>) {
-        let per_frame = self.ticks_per_frame();
         let start = self.position;
-        let end = start + per_frame * frames as f64;
+        let end = self.tick_after(frames);
+        let per_frame = (end - start) / frames as f64;
         let frames = frames as u32;
         let Some(wrap) = wrap else {
             self.collect_notes(start, end, 0..frames, per_frame);
@@ -710,17 +817,21 @@ impl Engine {
             for event in channel.events[first..].iter().take_while(|e| (e.tick as f64) < high) {
                 let frame = (frames.start + ((event.tick as f64 - from) / per_frame).round().max(0.0) as u32).min(last_frame);
                 node.push(Event { offset: frame, kind: EventKind::note(event.key, event.velocity) });
+                if event.velocity > 0.0 {
+                    node.sequenced |= 1 << event.key;
+                }
             }
         }
     }
 
     fn advance(&mut self, frames: usize, wrap: Option<LoopWrap>) {
-        let ticks = self.ticks_per_frame() * frames as f64;
+        let ticks = self.tick_after(frames) - self.position;
         self.position += ticks;
         self.record_position += ticks;
         self.frames += frames as i64;
         if let Some(wrap) = wrap {
             self.position = wrap.start + (self.position - wrap.end);
+            self.run_start = wrap.start;
             self.frames = self.ticks_to_frames(self.position);
         }
     }
@@ -757,9 +868,10 @@ impl Engine {
     pub fn start_offline(&mut self, start: Ticks) {
         self.handle_commands();
         self.silence();
+        self.playing = false;
         self.position = start as f64;
         self.frames = self.ticks_to_frames(self.position);
-        self.playing = true;
+        self.start_playing();
     }
 
     pub fn stop_offline(&mut self) {

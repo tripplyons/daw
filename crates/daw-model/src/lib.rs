@@ -3,6 +3,7 @@
 pub mod automation;
 pub mod layout;
 pub mod project;
+pub mod tempo;
 pub mod time;
 
 pub use project::*;

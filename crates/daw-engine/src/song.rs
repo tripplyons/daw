@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use daw_model::automation::Envelope;
+use daw_model::automation::Segment;
+use daw_model::tempo::TempoMap;
 use daw_model::time::{TimeSignature, Ticks};
 use daw_model::{ClipSource, Project, Source, Target};
 
@@ -73,37 +74,28 @@ pub enum EngineTarget {
     InsertPan(usize),
     ChannelVolume(usize),
     ChannelPan(usize),
-    Tempo,
-}
-
-pub struct Segment {
-    pub start: Ticks,
-    pub end: Ticks,
-    pub offset: Ticks,
-    /// Loop length of the automation clip; the envelope repeats past it.
-    pub length: Ticks,
-    pub envelope: Envelope,
 }
 
 pub struct AutomationPlan {
     pub target: EngineTarget,
     /// Sorted by start, non-overlapping as far as the playlist allows.
     pub segments: Vec<Segment>,
+    /// The target's value outside its clips when playback starts, as FL
+    /// Studio restores it. `None` for plugin parameters, whose values live
+    /// in the plugin.
+    pub base: Option<f32>,
     /// Last value applied, to skip redundant parameter events.
     pub last: f32,
 }
 
 impl AutomationPlan {
     pub fn value_at(&self, tick: f64) -> Option<f32> {
-        let segment = self.segments.iter().rev().find(|s| (s.start as f64) <= tick && tick < s.end as f64)?;
-        let local = tick - segment.start as f64 + segment.offset as f64;
-        let local = if segment.length > 0 { local % segment.length as f64 } else { local };
-        segment.envelope.value_at(local)
+        self.segments.iter().rev().find(|s| (s.start as f64) <= tick && tick < s.end as f64)?.value_at(tick)
     }
 }
 
 pub struct Song {
-    pub bpm: f64,
+    pub tempo: TempoMap,
     pub signature: TimeSignature,
     pub loop_range: Option<(Ticks, Ticks)>,
     pub channels: Vec<ChannelPlan>,
@@ -167,7 +159,6 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
         }
     };
 
-    let mut automation: Vec<AutomationPlan> = Vec::new();
     let mut audio_clips = Vec::new();
     let loop_range = match mode {
         PlayMode::Pattern(id) => {
@@ -188,21 +179,7 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
                             push_notes(pattern, clip.start, clip.offset, clip.length);
                         }
                     }
-                    ClipSource::Automation(id) => {
-                        let Some(source) = project.automation_clip(id) else { continue };
-                        let Some(target) = engine_target(project, source.target) else { continue };
-                        let segment = Segment {
-                            start: clip.start,
-                            end: clip.end(),
-                            offset: clip.offset,
-                            length: source.length,
-                            envelope: source.envelope.clone(),
-                        };
-                        match automation.iter_mut().find(|a| a.target == target) {
-                            Some(plan) => plan.segments.push(segment),
-                            None => automation.push(AutomationPlan { target, segments: vec![segment], last: f32::NAN }),
-                        }
-                    }
+                    ClipSource::Automation(_) => {}
                     ClipSource::Audio(id) => {
                         let Some(index) = channel_index(id) else { continue };
                         let Some(Source::Audio { path }) = project.channel(id).map(|c| &c.source) else { continue };
@@ -214,9 +191,10 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
             project.playlist.loop_range
         }
     };
-    for plan in &mut automation {
-        plan.segments.sort_by_key(|s| s.start);
-    }
+    let (automation, tempo) = match mode {
+        PlayMode::Pattern(_) => (Vec::new(), TempoMap::new(project.bpm, &[])),
+        PlayMode::Song => (automation_plans(project), project.tempo_map()),
+    };
     for (index, clip) in audio_clips {
         if let Some(audio) = &mut channels[index].audio {
             audio.clips.push(clip);
@@ -272,11 +250,26 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
         }
     }
 
-    Song { bpm: project.bpm, signature: project.signature, loop_range, channels, inserts, order, automation }
+    Song { tempo, signature: project.signature, loop_range, channels, inserts, order, automation }
 }
 
-/// Where `target` lives in a plan compiled from `project`, or `None` when its
-/// channel or insert is gone.
+/// One plan per automated target. Tempo automation plays through the
+/// song's tempo map instead.
+fn automation_plans(project: &Project) -> Vec<AutomationPlan> {
+    let mut plans: Vec<AutomationPlan> = Vec::new();
+    for (target, segment) in project.automation_segments(|t| t != Target::Tempo) {
+        let Some(engine) = engine_target(project, target) else { continue };
+        match plans.iter_mut().find(|p| p.target == engine) {
+            Some(plan) => plan.segments.push(segment),
+            None => plans.push(AutomationPlan { target: engine, segments: vec![segment], base: project.target_value(target), last: f32::NAN }),
+        }
+    }
+    plans
+}
+
+/// Where `target` lives in a plan compiled from `project`. `None` when its
+/// channel or insert is gone, and for the tempo, which the song's tempo map
+/// sets.
 pub fn engine_target(project: &Project, target: Target) -> Option<EngineTarget> {
     let insert = |id| project.mixer.inserts.iter().position(|i| i.id == id);
     let channel = |id| project.channels.iter().position(|c| c.id == id);
@@ -287,6 +280,6 @@ pub fn engine_target(project: &Project, target: Target) -> Option<EngineTarget> 
         Target::ChannelVolume(id) => EngineTarget::ChannelVolume(channel(id)?),
         Target::ChannelPan(id) => EngineTarget::ChannelPan(channel(id)?),
         Target::SynthCutoff(id) => EngineTarget::Node { node: id.0, param: crate::synth::PARAM_CUTOFF },
-        Target::Tempo => EngineTarget::Tempo,
+        Target::Tempo => return None,
     })
 }

@@ -186,6 +186,27 @@ impl Envelope {
     }
 }
 
+/// One automation clip placed on the playlist.
+#[derive(Debug, Clone)]
+pub struct Segment {
+    pub start: Ticks,
+    pub end: Ticks,
+    pub offset: Ticks,
+    /// Loop length of the automation clip; the envelope repeats past it.
+    pub length: Ticks,
+    pub envelope: Envelope,
+}
+
+impl Segment {
+    /// The clip's value at song tick `tick`, which the caller has checked
+    /// lies inside the clip.
+    pub fn value_at(&self, tick: f64) -> Option<f32> {
+        let local = tick - self.start as f64 + self.offset as f64;
+        let local = if self.length > 0 { local % self.length as f64 } else { local };
+        self.envelope.value_at(local)
+    }
+}
+
 /// Value snapping choices for the automation editor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ValueSnap {

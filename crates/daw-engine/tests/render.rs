@@ -194,6 +194,49 @@ fn loop_notes_restart_on_the_frame_nearest_the_loop_end() {
 }
 
 #[test]
+fn the_clock_marks_when_each_run_of_playback_is_heard() {
+    let project = unity_project();
+    let pattern = project.patterns[0].id;
+    let (mut engine, handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    let (mut left, mut right) = (vec![0.0; 512], vec![0.0; 512]);
+    let heard = |frame: u64| 1_000_000_000 + frame * 1_000_000_000 / 48_000;
+    engine.render_live(&mut left, &mut right, heard(0));
+    let start = handle.shared.clock().unwrap();
+    assert_eq!((start.tick, start.nanos, start.run), (0.0, heard(0), heard(0)));
+    // The one-bar pattern loops two seconds in, in the buffer from frame
+    // 95_744.
+    for buffer in 1..187 {
+        engine.render_live(&mut left, &mut right, heard(buffer * 512));
+        assert_eq!(handle.shared.clock().unwrap().run, heard(0), "buffer {buffer}");
+    }
+    engine.render_live(&mut left, &mut right, heard(187 * 512));
+    let wrapped = handle.shared.clock().unwrap();
+    assert_eq!((wrapped.tick, wrapped.nanos), (0.0, wrapped.run));
+    assert!(wrapped.run.abs_diff(heard(96_000)) <= 1, "{} vs {}", wrapped.run, heard(96_000));
+}
+
+#[test]
+fn notes_follow_tempo_automation() {
+    let mut project = unity_project();
+    let channel = project.channels[0].id;
+    let pattern = project.patterns[0].id;
+    let beat = TICKS_PER_BEAT as u64;
+    for start in [0, beat * 3] {
+        project.pattern_mut(pattern).unwrap().notes_mut(channel).push(Note { start, length: 120, key: 60, velocity: 1.0 });
+    }
+    project.add_clip(0, 0, ClipSource::Pattern(pattern));
+    let tempo = project.add_automation("tempo", Target::Tempo, daw_model::automation::tempo_to_normalized(60.0));
+    let clip = project.add_clip(1, beat, ClipSource::Automation(tempo));
+    project.playlist.clips.iter_mut().find(|c| c.id == clip).unwrap().length = beat;
+    let (mut engine, _handle, _) = engine_with_probe(&project, PlayMode::Song, false);
+    let signal = render(&mut engine, FRAMES_PER_BEAT * 6);
+    // One beat at 120 bpm, then two at about 60, held after the tempo clip.
+    let second = (project.tempo_map().seconds_at(beat as f64 * 3.0) * SAMPLE_RATE).round() as usize;
+    assert!(second.abs_diff(FRAMES_PER_BEAT * 5) < 2, "{second}");
+    assert_eq!(onsets(&signal), vec![0, second]);
+}
+
+#[test]
 fn song_mode_places_clips_and_trims_notes() {
     let mut project = unity_project();
     let channel = project.channels[0].id;
@@ -246,6 +289,67 @@ fn loop_wrap_releases_held_notes() {
     render(&mut engine, FRAMES_PER_BEAT * 5);
     let log = log.lock().unwrap();
     assert!(log.contains(&EventKind::NoteOff { key: 70 }), "{log:?}");
+}
+
+#[test]
+fn seeking_past_the_loop_end_wraps_without_playing_the_skipped_notes() {
+    let mut project = unity_project();
+    let channel = project.channels[0].id;
+    let pattern = project.patterns[0].id;
+    project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    let (mut engine, mut handle, log) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    render(&mut engine, 128);
+    assert!(handle.send(Command::Seek(project.signature.ticks_per_bar() as f64 * 8.0)).is_ok());
+    log.lock().unwrap().clear();
+    let signal = render(&mut engine, FRAMES_PER_BEAT * 2);
+    assert_eq!(onsets(&signal), vec![0]);
+    let log = log.lock().unwrap();
+    assert_eq!(log.iter().filter(|e| matches!(e, EventKind::NoteOn { .. })).count(), 1, "{log:?}");
+}
+
+#[test]
+fn song_edits_release_sounding_notes_they_remove() {
+    let mut project = unity_project();
+    let channel = project.channels[0].id;
+    let pattern = project.patterns[0].id;
+    let beat = TICKS_PER_BEAT as u64;
+    project.pattern_mut(pattern).unwrap().notes_mut(channel).push(Note { start: 0, length: beat * 4, key: 70, velocity: 1.0 });
+    project.add_clip(0, 0, ClipSource::Pattern(pattern));
+    let (mut engine, mut handle, log) = engine_with_probe(&project, PlayMode::Song, false);
+    render(&mut engine, FRAMES_PER_BEAT);
+    let publish = |handle: &mut EngineHandle, project: &Project| {
+        assert!(handle.send(Command::Song(Box::new(compile(project, PlayMode::Song, daw_engine::MAX_BLOCK, &HashMap::new())))).is_ok());
+    };
+    // An edit that keeps the note lets it sound on.
+    publish(&mut handle, &project);
+    render(&mut engine, 128);
+    assert!(!log.lock().unwrap().contains(&EventKind::NoteOff { key: 70 }));
+    project.pattern_mut(pattern).unwrap().notes_mut(channel).clear();
+    publish(&mut handle, &project);
+    render(&mut engine, 128);
+    assert!(log.lock().unwrap().contains(&EventKind::NoteOff { key: 70 }));
+}
+
+#[test]
+fn starting_playback_restores_automated_values_outside_clips() {
+    let mut project = unity_project();
+    let channel = project.channels[0].id;
+    project.channel_mut(channel).unwrap().source = Source::Synth(daw_model::SynthParams { cutoff: 0.25, ..Default::default() });
+    let automation = project.add_automation("cutoff", Target::SynthCutoff(channel), 1.0);
+    let beat = TICKS_PER_BEAT as u64;
+    let clip = project.add_clip(0, beat, ClipSource::Automation(automation));
+    project.playlist.clips.iter_mut().find(|c| c.id == clip).unwrap().length = beat;
+    let (mut engine, mut handle, _) = engine_with_probe(&project, PlayMode::Song, true);
+    let signal = render(&mut engine, FRAMES_PER_BEAT * 3);
+    // The project value before the clip, the clip's value in it, and the
+    // clip's last value held after it.
+    assert_eq!(signal[FRAMES_PER_BEAT / 2], 0.25);
+    assert_eq!(signal[FRAMES_PER_BEAT * 3 / 2], 1.0);
+    assert_eq!(signal[FRAMES_PER_BEAT * 5 / 2], 1.0);
+    for command in [Command::Stop, Command::Seek(beat as f64 * 3.0), Command::Play] {
+        assert!(handle.send(command).is_ok());
+    }
+    assert_eq!(render(&mut engine, 128)[0], 0.25);
 }
 
 #[test]
@@ -443,9 +547,44 @@ fn audio_wraps_on_the_frame_nearest_the_loop_end() {
     project.playlist.loop_range = Some((0, beat));
     let mut engine = engine_with_ramp(&project);
     let signal = render(&mut engine, 23_000);
-    // The ramp is near its loop-end value, then restarts faded in from silence.
-    assert!(signal[22_676] > 0.2, "before the wrap: {}", signal[22_676]);
+    // The ramp fades out into the loop end, then restarts faded in from
+    // silence.
+    assert!(signal[22_600] > 0.2, "before the wrap: {}", signal[22_600]);
+    assert!(signal[22_676] < 0.01, "faded out: {}", signal[22_676]);
     assert_eq!(signal[22_677], 0.0, "at the wrap");
+}
+
+#[test]
+fn audio_fades_in_where_playback_starts_inside_a_clip() {
+    let (mut project, channel) = audio_project();
+    let beat = TICKS_PER_BEAT as u64;
+    project.add_audio_clip(0, 0, channel, beat * 2);
+    let mut engine = engine_with_ramp(&project);
+    engine.start_offline(beat / 2);
+    let signal = render(&mut engine, 1000);
+    assert_eq!(signal[0], 0.0);
+    // Half a beat is a quarter second, 6000 frames into the 24 kHz file.
+    let expected = (6000.0 + 500.0 / 2.0) / 48_000.0;
+    assert!((signal[500] - expected).abs() < 1e-4, "{} vs {expected}", signal[500]);
+}
+
+#[test]
+fn audio_clips_keep_their_own_rate_through_tempo_changes() {
+    let (mut project, channel) = audio_project();
+    let beat = TICKS_PER_BEAT as u64;
+    project.add_audio_clip(0, 0, channel, beat * 4);
+    let tempo = project.add_automation("tempo", Target::Tempo, daw_model::automation::tempo_to_normalized(60.0));
+    let clip = project.add_clip(1, beat, ClipSource::Automation(tempo));
+    project.playlist.clips.iter_mut().find(|c| c.id == clip).unwrap().length = beat;
+    let mut engine = engine_with_ramp(&project);
+    let signal = render(&mut engine, FRAMES_PER_BEAT * 3);
+    // The tempo halves after the first beat, at frame 24_000, and holds
+    // after the tempo clip, but the file still plays at half a file frame per
+    // output frame.
+    for frame in [1000, 23_990, 24_010, 40_000, 71_000] {
+        let expected = frame as f32 / 2.0 / 48_000.0;
+        assert!((signal[frame] - expected).abs() < 1e-4, "frame {frame}: {} vs {expected}", signal[frame]);
+    }
 }
 
 #[test]
