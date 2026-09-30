@@ -44,6 +44,8 @@ pub struct State {
     resizing: Option<Edge>,
     clipboard: Vec<Clip>,
     pub stretch_mode: bool,
+    /// Slider preview; audio is prepared only when the drag ends.
+    pub pitch_edit: Option<(Vec<ClipId>, f32)>,
 }
 
 /// A clip edge. Dragging the start trims the clip's beginning and keeps its
@@ -67,6 +69,7 @@ impl Default for State {
             resizing: None,
             clipboard: Vec::new(),
             stretch_mode: false,
+            pitch_edit: None,
         }
     }
 }
@@ -77,6 +80,7 @@ pub enum Message {
     Consolidate,
     Reverse,
     AudioPitch(f32),
+    AudioPitchDone,
     AudioStretch(f64),
     StretchMode,
     MuteSelection,
@@ -179,9 +183,31 @@ pub fn update(app: &mut App, message: Message) {
             }
             app.edited();
         }
-        Message::Reverse | Message::AudioPitch(_) | Message::AudioStretch(_) => {
-            if let Message::AudioPitch(value) = message
-                && (!value.is_finite() || !(-48.0..=48.0).contains(&value)) { return; }
+        Message::AudioPitch(value) => {
+            if !value.is_finite() || !(-48.0..=48.0).contains(&value) { return; }
+            match &mut app.playlist.pitch_edit {
+                Some((_, pitch)) => *pitch = value,
+                None => {
+                    let selected: Vec<_> = app.project.playlist.clips.iter()
+                        .filter(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_)))
+                        .map(|c| c.id).collect();
+                    if !selected.is_empty() { app.playlist.pitch_edit = Some((selected, value)); }
+                }
+            }
+        }
+        Message::AudioPitchDone => {
+            let Some((selected, pitch)) = app.playlist.pitch_edit.take() else { return };
+            if !app.project.playlist.clips.iter().any(|c| selected.contains(&c.id)
+                && matches!(c.source, ClipSource::Audio(_)) && c.audio.semitones != pitch) { return; }
+            app.checkpoint();
+            for clip in &mut app.project.playlist.clips {
+                if selected.contains(&clip.id) && matches!(clip.source, ClipSource::Audio(_)) {
+                    clip.audio.semitones = pitch;
+                }
+            }
+            app.edited();
+        }
+        Message::Reverse | Message::AudioStretch(_) => {
             if let Message::AudioStretch(value) = message
                 && (!value.is_finite() || !(0.125..=8.0).contains(&value)) { return; }
             app.begin_edit();
@@ -189,7 +215,6 @@ pub fn update(app: &mut App, message: Message) {
                 if !app.playlist.selected.contains(&clip.id) || !matches!(clip.source, ClipSource::Audio(_)) { continue; }
                 match message {
                     Message::Reverse => clip.audio.reverse = !clip.audio.reverse,
-                    Message::AudioPitch(value) => clip.audio.semitones = value,
                     Message::AudioStretch(value) => {
                         let ratio = value / clip.audio.stretch;
                         clip.length = (clip.length as f64 * ratio).round().max(1.0) as Ticks;
@@ -200,7 +225,7 @@ pub fn update(app: &mut App, message: Message) {
                 }
             }
             app.edited();
-            if !matches!(message, Message::AudioPitch(_)) { let _ = app.update(AppMessage::EndEdit); }
+            let _ = app.update(AppMessage::EndEdit);
         }
         Message::View(view) => app.playlist.time = view,
         Message::ZoomTracks { steps, y } => {
@@ -531,10 +556,12 @@ pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
     let canvas = Canvas::new(Arrangement { app }).width(Length::Fill).height(Length::Fill);
     let selected = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_)));
     let Some(clip) = selected else { return canvas.into() };
+    let semitones = app.playlist.pitch_edit.as_ref().filter(|(ids, _)| ids.contains(&clip.id))
+        .map_or(clip.audio.semitones, |(_, pitch)| *pitch);
     let pitch = row![
-        label("audio pitch"), slider(-48.0..=48.0, clip.audio.semitones, |p| Message::AudioPitch(p).into())
-            .step(1.0_f32).on_release(AppMessage::EndEdit).width(120).style(theme::fader),
-        label(format!("{} st", clip.audio.semitones)),
+        label("audio pitch"), slider(-48.0..=48.0, semitones, |p| Message::AudioPitch(p).into())
+            .step(1.0_f32).on_release(Message::AudioPitchDone.into()).width(120).style(theme::fader),
+        label(format!("{semitones} st")),
     ].spacing(6).align_y(iced::Alignment::Center);
     let options = row![
         label("duration"), pick(vec![0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0], Some(clip.audio.stretch), |s| Message::AudioStretch(s).into()),

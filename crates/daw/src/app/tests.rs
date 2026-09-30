@@ -804,6 +804,70 @@ fn song_midi_recording_creates_and_grows_one_take() {
 }
 
 #[test]
+fn audio_pitch_prepares_only_the_released_value_and_undoes_once() {
+    let dir = std::env::temp_dir().join(format!("daw-pitch-drag-{}", crate::project_files::stamp()));
+    std::fs::create_dir(&dir).unwrap();
+    let wav = dir.join("clip.wav");
+    write_wav(&wav, 48_000);
+    let mut app = app();
+    app.import_audio(&wav, 0).unwrap();
+    let first = app.project.playlist.clips[0].id;
+    let ClipSource::Audio(channel) = app.project.playlist.clips[0].source else { panic!("audio clip") };
+    let second = app.project.add_audio_clip(0, 1920, channel, 1920);
+    let third = app.project.add_audio_clip(0, 3840, channel, 1920);
+    app.playlist.selected = vec![first, second];
+    app.dirty = false;
+    let (revision, undo) = (app.revision, app.undo.len());
+    let daw_model::Source::Audio { path } = &app.project.channel(channel).unwrap().source else { panic!("audio source") };
+    let path = path.clone();
+    let shifted = |pitch| daw_engine::audio::cache_key(&path, daw_model::AudioEdit { semitones: pitch, ..Default::default() });
+    for pitch in [1.0, 4.0, 7.0] {
+        let _ = app.update(list::Message::AudioPitch(pitch).into());
+        assert_eq!(app.playlist.pitch_edit, Some((vec![first, second], pitch)));
+        assert!(app.project.playlist.clips.iter().all(|c| c.audio.semitones == 0.0));
+        assert!(app.session.waveform(&shifted(pitch)).is_none());
+        assert_eq!((app.revision, app.undo.len(), app.dirty), (revision, undo, false));
+    }
+    // An unrelated refresh during the drag must still use the committed pitch.
+    app.refresh();
+    assert!(app.session.waveform(&shifted(7.0)).is_none());
+    app.playlist.selected = vec![third];
+    let _ = app.update(list::Message::AudioPitchDone.into());
+    assert!(app.playlist.pitch_edit.is_none());
+    assert_eq!(app.project.playlist.clips.iter().map(|c| c.audio.semitones).collect::<Vec<_>>(), vec![7.0, 7.0, 0.0]);
+    assert!(app.session.waveform(&shifted(7.0)).is_some());
+    assert!(app.session.waveform(&shifted(1.0)).is_none());
+    assert!(app.session.waveform(&shifted(4.0)).is_none());
+    assert_eq!((app.revision, app.undo.len(), app.dirty), (revision + 1, undo + 1, true));
+
+    app.playlist.selected = vec![first, second];
+    let _ = app.update(list::Message::AudioPitch(2.0).into());
+    let _ = app.update(list::Message::AudioPitch(7.0).into());
+    let _ = app.update(list::Message::AudioPitchDone.into());
+    let _ = app.update(list::Message::AudioPitchDone.into());
+    assert_eq!((app.revision, app.undo.len()), (revision + 1, undo + 1));
+
+    let _ = app.update(list::Message::AudioPitch(12.0).into());
+    let _ = app.update(Message::Action(Action::Undo));
+    assert!(app.playlist.pitch_edit.is_none());
+    assert!(app.project.playlist.clips.iter().all(|c| c.audio.semitones == 0.0));
+    let _ = app.update(list::Message::AudioPitchDone.into());
+    assert_eq!((app.revision, app.undo.len()), (revision + 2, undo));
+    let _ = app.update(list::Message::AudioPitch(2.0).into());
+    let _ = app.update(Message::Key(keyboard::Event::KeyReleased {
+        key: Key::Named(keyboard::key::Named::ArrowUp),
+        modified_key: Key::Named(keyboard::key::Named::ArrowUp),
+        physical_key: Physical::Code(Code::ArrowUp),
+        location: Location::Standard,
+        modifiers: Modifiers::default(),
+    }, true));
+    assert!(app.playlist.pitch_edit.is_none());
+    assert_eq!(app.project.playlist.clips[0].audio.semitones, 2.0);
+    assert!(app.session.waveform(&shifted(2.0)).is_some());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn audio_edits_scale_trim_offsets_and_undo_together() {
     let dir = std::env::temp_dir().join(format!("daw-edits-{}", crate::project_files::stamp()));
     std::fs::create_dir(&dir).unwrap();
@@ -821,7 +885,7 @@ fn audio_edits_scale_trim_offsets_and_undo_together() {
     let _ = app.update(list::Message::Reverse.into());
     assert!(app.project.playlist.clips[0].audio.reverse);
     let _ = app.update(list::Message::AudioPitch(12.0).into());
-    let _ = app.update(Message::EndEdit);
+    let _ = app.update(list::Message::AudioPitchDone.into());
     for _ in 0..3 { let _ = app.update(Message::Action(Action::Undo)); }
     let restored = &app.project.playlist.clips[0];
     assert_eq!((restored.length, restored.offset, restored.audio), (100, 20, daw_model::AudioEdit::default()));
@@ -845,7 +909,7 @@ fn stretch_mode_resizes_audio_and_split_keeps_the_edits() {
     assert_eq!((app.project.playlist.clips[0].length, app.project.playlist.clips[0].audio.stretch), (3840, 2.0));
     let _ = app.update(list::Message::Reverse.into());
     let _ = app.update(list::Message::AudioPitch(7.0).into());
-    let _ = app.update(Message::EndEdit);
+    let _ = app.update(list::Message::AudioPitchDone.into());
     let _ = app.update(list::Message::Split(id, 1920.0).into());
     let [left, right] = &app.project.playlist.clips[..] else { panic!("split clips") };
     assert_eq!(left.audio, right.audio);

@@ -368,6 +368,7 @@ impl App {
             self.mode = PlayMode::Pattern(self.selected_pattern);
         }
         self.piano_roll.selected.clear();
+        self.playlist.pitch_edit = None;
         self.playlist.selected.retain(|id| self.project.playlist.clips.iter().any(|c| c.id == *id));
     }
 
@@ -508,6 +509,9 @@ impl App {
         match message {
             Message::Tick => self.tick(),
             Message::Key(event, typing) => {
+                if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
+                    playlist::update(self, playlist::Message::AudioPitchDone);
+                }
                 if self.settings.capturing.is_some() {
                     settings::key(self, &event);
                     return Task::none();
@@ -1153,6 +1157,8 @@ impl App {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::MouseMoved(position)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
+            // Wheel steps do not emit the slider's release message.
+            iced::Event::Mouse(mouse::Event::WheelScrolled { .. }) => Some(playlist::Message::AudioPitchDone.into()),
             _ => None,
         });
         // Presses are listened to raw so a click focuses its tile even when a
