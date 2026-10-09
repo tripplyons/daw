@@ -12,12 +12,13 @@ use daw_model::time::{Grid, Ticks};
 use daw_model::{ChannelId, Note};
 use iced::keyboard::{Key, Modifiers, key::Named};
 use iced::widget::canvas::Canvas;
-use iced::widget::row;
+use iced::widget::{pick_list, row};
 use iced::{Element, Length};
 
 use super::timeline::{self, RULER_HEIGHT, TimeView};
 use super::pick;
 use crate::app::{App, Message as AppMessage};
+use crate::theme;
 
 mod roll;
 use roll::Roll;
@@ -383,12 +384,24 @@ impl std::fmt::Display for ChannelChoice {
     }
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
+/// The channel whose notes the piano roll edits.
+pub fn channel_picker(app: &App, width: f32) -> Element<'_, AppMessage> {
     let channels: Vec<ChannelChoice> =
         app.project.channels.iter().map(|c| ChannelChoice { id: c.id, name: c.name.clone() }).collect();
     let selected = channels.iter().find(|c| Some(c.id) == app.selected_channel).cloned();
+    let picker = pick_list(channels, selected, |c: ChannelChoice| Message::Channel(c.id).into())
+        .placeholder("channel")
+        .text_size(theme::SMALL)
+        .width(width)
+        .padding([2, 6])
+        .style(theme::pick)
+        .menu_style(theme::menu);
+    super::help(picker, "Channel to edit")
+}
+
+pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     row![
-        pick(channels, selected, |c: ChannelChoice| Message::Channel(c.id).into()),
+        channel_picker(app, 150.0),
         super::labeled("snap", pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into())),
     ]
     .spacing(4)

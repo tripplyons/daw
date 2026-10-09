@@ -376,6 +376,25 @@ fn piano_roll_add_move_resize_and_keys() {
 }
 
 #[test]
+fn piano_roll_edits_the_picked_channel() {
+    let mut app = app();
+    let first = app.selected_channel.unwrap();
+    let _ = app.update(crate::panels::channel_rack::Message::AddSynth.into());
+    let second = app.selected_channel.unwrap();
+    let _ = app.update(roll::Message::Channel(first).into());
+    let _ = app.update(roll::Message::Add { start: 0, key: 60 }.into());
+    let _ = app.update(roll::Message::End.into());
+    let _ = app.update(roll::Message::Channel(second).into());
+    assert_eq!(app.selected_channel, Some(second));
+    assert!(app.piano_roll.selected.is_empty());
+    let _ = app.update(roll::Message::Add { start: 480, key: 64 }.into());
+    let _ = app.update(roll::Message::End.into());
+    let pattern = app.project.pattern(app.selected_pattern).unwrap();
+    assert_eq!(pattern.notes(first).iter().map(|n| n.key).collect::<Vec<_>>(), vec![60]);
+    assert_eq!(pattern.notes(second).iter().map(|n| n.key).collect::<Vec<_>>(), vec![64]);
+}
+
+#[test]
 fn each_pattern_sets_its_own_length_and_can_shrink() {
     let mut app = app();
     let bar = app.project.signature.ticks_per_bar();

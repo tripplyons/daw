@@ -174,10 +174,13 @@ impl App {
                 if width >= 64.0 { tools = tools.push(panels::tool("+ synth", channel_rack::Message::AddSynth.into())); }
                 if width >= 134.0 { tools = tools.push(panels::tool("+ sample", channel_rack::Message::AddSampler.into())); }
             }
-            Panel::PianoRoll if width >= 95.0 => tools = tools.push(row![
-                panels::label("snap"),
-                panels::pick(daw_model::time::Grid::CHOICES.to_vec(), Some(self.project.grid), |g| piano_roll::Message::Grid(g).into()),
-            ].spacing(4).align_y(iced::Alignment::Center)),
+            Panel::PianoRoll => {
+                if width >= 90.0 { tools = tools.push(piano_roll::channel_picker(self, 90.0)); }
+                if width >= 190.0 { tools = tools.push(row![
+                    panels::label("snap"),
+                    panels::pick(daw_model::time::Grid::CHOICES.to_vec(), Some(self.project.grid), |g| piano_roll::Message::Grid(g).into()),
+                ].spacing(4).align_y(iced::Alignment::Center)); }
+            }
             Panel::Mixer if width >= 70.0 => tools = tools.push(panels::tool("+ insert", mixer::Message::AddInsert.into())),
             Panel::Automation if width >= 132.0 => {
                 use automation::Tool;
