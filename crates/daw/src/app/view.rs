@@ -247,6 +247,7 @@ impl App {
             panels::action(self, "MIDI", Action::ToggleMidiRecord, Some(self.midi.recording)),
             panels::action(self, "audio", Action::ToggleAudioRecord, Some(self.session.recording_armed())),
             divider(), panels::action(self, "bind automation", Action::ToggleBind, Some(self.bind_mode)),
+            divider(), panels::action(self, &format!("keyboard C{}", i16::from(self.computer_keyboard.base) / 12 - 1), Action::ToggleComputerKeyboard, Some(self.computer_keyboard.enabled)),
         ].spacing(4).align_y(iced::Alignment::Center);
         let scan = match self.scan {
             Some(Progress { done, total }) if total > 0 => format!("scanning plugins {done}/{total}"),

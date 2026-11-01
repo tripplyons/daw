@@ -104,6 +104,12 @@ Open settings (Cmd+comma), choose a MIDI input, and select an instrument channel
 
 Click "MIDI" in the recording row or press Cmd+Shift+R to arm recording, then play. Pattern mode records into the current pattern. Song mode creates a "MIDI take" pattern and playlist clip at the start marker or loop start, growing the take as needed. Pitch, velocity, start, and duration are recorded. Notes crossing a loop boundary are split; holding a key across several passes fills one loop. Stop or disarm to finish held notes.
 
+### Computer keyboard input
+
+Click "keyboard C4" in the transport or press Cmd+Shift+M (Ctrl+Shift+M on Windows/Linux) to enable computer-keyboard notes. Select an instrument, then use **A W S E D F T G Y H U J K** for a chromatic octave, starting at middle C (MIDI 60). Hold several keys to play chords. Z/X lower or raise the octave; the transport shows the current starting octave. The toggle shortcut is configurable in settings.
+
+This mode starts off and uses physical QWERTY key positions in the main window. Mapped bare-letter keys play notes instead of panel commands while enabled. Text entry and modified shortcuts still work. Notes retain their original instrument and pitch until release, even if you change the selected channel or octave. Disabling the mode or leaving the window releases held computer notes. Use the existing MIDI recording controls to record them, just as with a MIDI device.
+
 ## Renaming
 
 Right-click a channel name, a mixer strip, or a playlist track name to open a menu with rename and delete; channels also have preview. Right-click the pattern picker in the top bar or the clip picker in the automation editor to rename a pattern or automation clip. Enter or clicking away saves the name, Escape cancels, and Cmd+Z undoes it. Right-click a playlist clip for open, duplicate, make unique, consolidate, mute, and delete actions. Right-clicking a selected clip keeps the selection so these actions can edit several clips. Shift+F10 opens the selected item's menu. Use Up/Down and Enter to choose menu entries, or Escape to dismiss.
@@ -174,6 +180,7 @@ Cmd is the primary shortcut modifier on macOS. On Windows and Linux, Ctrl replac
 | Cmd+R | Record automation |
 | Cmd+Shift+A | Arm audio recording from the microphone |
 | Cmd+Shift+R | Arm MIDI note recording |
+| Cmd+Shift+M | Toggle computer-keyboard notes |
 | Cmd+U in playlist | Make selected clips unique |
 | Cmd+Shift+C in playlist | Consolidate selection to audio |
 | M in playlist | Mute or unmute selected clips |

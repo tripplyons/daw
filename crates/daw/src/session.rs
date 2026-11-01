@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use daw_engine::input::{Recorder, Take};
+#[cfg(not(test))]
 use daw_engine::output;
 #[cfg(test)]
 use daw_engine::output::Stem;
@@ -57,12 +58,18 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Self {
+        #[cfg(test)]
+        let sample_rate = 48_000.0;
+        #[cfg(not(test))]
         let (sample_rate, rate_error) = match output::default_sample_rate() {
             Ok(rate) => (rate, None),
             Err(error) => (48_000.0, Some(error.to_string())),
         };
         let (engine, handle) = daw_engine::create(sample_rate);
         let engine = Arc::new(Mutex::new(engine));
+        #[cfg(test)]
+        let (stream, audio_error) = (None, None::<String>);
+        #[cfg(not(test))]
         let (stream, audio_error) = match rate_error {
             Some(error) => (None, Some(error)),
             None => match output::start(engine.clone()) {
@@ -501,6 +508,16 @@ impl Session {
     pub fn renderer(&self, project: &Project) -> Result<crate::render::Renderer, String> {
         let parameters = self.controllers.keys().map(|&id| (id, self.current_parameters(id))).collect();
         crate::render::Renderer::new(project, self.samples.clone(), parameters, self.sample_rate())
+    }
+
+    /// Advance the test engine without an audio device and return its peak.
+    #[cfg(test)]
+    pub fn test_render(&mut self, frames: usize) -> f32 {
+        let mut peak = 0.0_f32;
+        self.engine.lock().unwrap().render_offline(frames, |left, right| {
+            for sample in left.iter().chain(right) { peak = peak.max(sample.abs()); }
+        });
+        peak
     }
 
     /// Synchronous adapter for audio comparisons.

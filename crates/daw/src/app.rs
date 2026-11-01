@@ -23,6 +23,7 @@ use crate::session::Session;
 
 pub mod audio;
 mod closing;
+mod computer_keyboard;
 mod history;
 mod rendering;
 mod saving;
@@ -47,6 +48,8 @@ pub enum Message {
     RetryAudio,
     CancelRender,
     Key(keyboard::Event, bool),
+    PluginKey(keyboard::Event),
+    WindowUnfocused,
     WindowResized(Size),
     MouseMoved(Point),
     MousePressed,
@@ -116,6 +119,7 @@ pub struct App {
     pub path: Option<PathBuf>,
     pub session: Session,
     pub midi: crate::midi::State,
+    pub computer_keyboard: computer_keyboard::State,
     pub last_autosave: Instant,
     pub backup_key: String,
     revision: u64,
@@ -182,6 +186,7 @@ impl App {
             path: None,
             session: Session::new(),
             midi: crate::midi::State::default(),
+            computer_keyboard: computer_keyboard::State::default(),
             last_autosave: Instant::now(),
             backup_key: crate::project_files::stamp(),
             revision: 0,
@@ -237,11 +242,14 @@ impl App {
         if let Some(path) = STARTUP_PROJECT.get().cloned().flatten() {
             app.open(path);
         }
-        if let Err(error) = app.midi.rescan() { app.set_status(format!("MIDI scan failed: {error}")); }
-        if let Some(name) = app.config.midi_input.clone() {
-            match app.midi.ports.iter().find(|p| p.name == name).cloned() {
-                Some(port) => { app.connect_midi(port); }
-                None => app.set_status(format!("MIDI input {name} unavailable; select an input in settings")),
+        #[cfg(not(test))]
+        {
+            if let Err(error) = app.midi.rescan() { app.set_status(format!("MIDI scan failed: {error}")); }
+            if let Some(name) = app.config.midi_input.clone() {
+                match app.midi.ports.iter().find(|p| p.name == name).cloned() {
+                    Some(port) => { app.connect_midi(port); }
+                    None => app.set_status(format!("MIDI input {name} unavailable; select an input in settings")),
+                }
             }
         }
         #[cfg(target_os = "macos")]
@@ -411,6 +419,49 @@ impl App {
         layout.set_panel(focused, panel);
     }
 
+    /// Plugin windows forward presses only. Share shortcut and panel dispatch,
+    /// but accept musical typing only from the main window's complete events.
+    fn key_event(&mut self, event: keyboard::Event, typing: bool, main_window: bool) -> Task<Message> {
+        if main_window && matches!(&event, keyboard::Event::KeyReleased { .. })
+            && self.computer_key(&event, typing) { return Task::none(); }
+        if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
+            playlist::update(self, playlist::Message::AudioPitchDone);
+            self.finish_edit();
+        }
+        if self.settings.capturing.is_some() {
+            settings::key(self, &event);
+            return Task::none();
+        }
+        if self.menu.is_some()
+            && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. } = &event
+        {
+            self.menu = None;
+            return Task::none();
+        }
+        if self.menu.as_ref().is_some_and(|m| m.rename.is_none())
+            && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(key), .. } = &event
+        {
+            use keyboard::key::Named;
+            let message = match key {
+                Named::ArrowDown => Some(menu::Message::Move(1)),
+                Named::ArrowUp => Some(menu::Message::Move(-1)),
+                Named::Enter => Some(menu::Message::Activate),
+                _ => None,
+            };
+            if let Some(message) = message { return menu::update(self, message); }
+        }
+        if let Some(action) = self.keymap.action(&event, typing) {
+            return self.update(Message::Action(action));
+        }
+        if main_window && self.computer_key(&event, typing) { return Task::none(); }
+        if let keyboard::Event::KeyPressed { key, modifiers, .. } = &event
+            && !typing
+        {
+            self.panel_key(key, *modifiers);
+        }
+        Task::none()
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
@@ -431,42 +482,9 @@ impl App {
             Message::CancelAudio => self.session.cancel_audio(),
             Message::RetryAudio => { self.refresh(); if self.session.audio_progress().is_some() { self.set_status("processing audio"); } }
             Message::CancelRender => self.rendering.cancel(),
-            Message::Key(event, typing) => {
-                if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
-                    playlist::update(self, playlist::Message::AudioPitchDone);
-                    self.finish_edit();
-                }
-                if self.settings.capturing.is_some() {
-                    settings::key(self, &event);
-                    return Task::none();
-                }
-                if self.menu.is_some()
-                    && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. } = &event
-                {
-                    self.menu = None;
-                    return Task::none();
-                }
-                if self.menu.as_ref().is_some_and(|m| m.rename.is_none())
-                    && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(key), .. } = &event
-                {
-                    use keyboard::key::Named;
-                    let message = match key {
-                        Named::ArrowDown => Some(menu::Message::Move(1)),
-                        Named::ArrowUp => Some(menu::Message::Move(-1)),
-                        Named::Enter => Some(menu::Message::Activate),
-                        _ => None,
-                    };
-                    if let Some(message) = message { return menu::update(self, message); }
-                }
-                if let Some(action) = self.keymap.action(&event, typing) {
-                    return self.update(Message::Action(action));
-                }
-                if let keyboard::Event::KeyPressed { key, modifiers, .. } = &event
-                    && !typing
-                {
-                    self.panel_key(key, *modifiers);
-                }
-            }
+            Message::PluginKey(event) => return self.key_event(event, false, false),
+            Message::WindowUnfocused => self.release_computer_keys(),
+            Message::Key(event, typing) => return self.key_event(event, typing, true),
             Message::WindowResized(size) => self.window = size,
             Message::MouseMoved(point) => {
                 self.cursor = point;
@@ -799,6 +817,7 @@ impl App {
             }
             Action::ToggleRecord => self.record = !self.record,
             Action::ToggleMidiRecord => self.toggle_midi_recording(),
+            Action::ToggleComputerKeyboard => self.toggle_computer_keyboard(),
             Action::ToggleAudioRecord => self.toggle_audio_recording(),
             Action::ImportAudio => return Task::perform(dialogs::open("wav", &["wav", "wave"], None), Message::ImportAudio),
             Action::Delete => {
@@ -912,6 +931,7 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let events = event::listen_with(|event, status, _| match event {
             iced::Event::Keyboard(event) => Some(Message::Key(event, status == event::Status::Captured)),
+            iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
             iced::Event::Window(window::Event::Opened { size, .. }) => Some(Message::WindowResized(size)),
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
@@ -962,7 +982,7 @@ fn opened_files() -> impl Stream<Item = Message> {
 
 fn plugin_keys() -> impl Stream<Item = Message> {
     let receiver = PLUGIN_KEYS.lock().unwrap().take();
-    stream::iter(receiver).flatten().map(|event| Message::Key(event, false))
+    stream::iter(receiver).flatten().map(Message::PluginKey)
 }
 
 /// Ask where to save the project, then send the answer as `then`.

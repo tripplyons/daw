@@ -198,6 +198,7 @@ impl App {
     }
 
     pub fn finish_midi(&mut self) {
+        self.release_computer_keys();
         let elapsed = self.session.shared().record_position();
         let held = std::mem::take(&mut self.midi.held);
         for held in held.into_values() {

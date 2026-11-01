@@ -26,6 +26,7 @@ pub enum Action {
     ToggleRecord,
     ToggleAudioRecord,
     ToggleMidiRecord,
+    ToggleComputerKeyboard,
     ImportAudio,
     ToggleMode,
     PlayPause,
@@ -94,6 +95,7 @@ pub const BINDINGS: &[Binding] = &[
     bind("toggle-record", "record automation", "automation", Action::ToggleRecord, &["cmd+r"]),
     bind("toggle-audio-record", "record audio", "transport", Action::ToggleAudioRecord, &["cmd+shift+a"]),
     bind("toggle-midi-record", "record MIDI notes", "transport", Action::ToggleMidiRecord, &["cmd+shift+r"]),
+    bind("computer-keyboard", "computer keyboard notes", "transport", Action::ToggleComputerKeyboard, &["cmd+shift+m"]),
     bind("pack", "package project", "file", Action::Pack, &[]),
     bind("recover", "recover backup", "file", Action::Recover, &[]),
     bind("delete", "delete selected", "edit", Action::Delete, &["delete", "forwarddelete"]),
@@ -417,7 +419,7 @@ mod tests {
             ("cycle-panel", "cmd+p"), ("panel-tools", "cmd+t"), ("zoom", "cmd+f"),
             ("toggle-mode", "tab"), ("toggle-bind", "cmd+shift+g"),
             ("toggle-record", "cmd+r"), ("toggle-audio-record", "cmd+shift+a"),
-            ("toggle-midi-record", "cmd+shift+r"), ("save", "cmd+s"),
+            ("toggle-midi-record", "cmd+shift+r"), ("computer-keyboard", "cmd+shift+m"), ("save", "cmd+s"),
         ] {
             assert_eq!(keymap.chords(id), &[default_chord(text).unwrap()], "{id}");
         }

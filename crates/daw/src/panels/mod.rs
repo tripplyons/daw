@@ -77,6 +77,7 @@ pub fn action_hint(app: &App, action: Action) -> String {
         Action::PlayPause => "Play or pause; pause returns to the start marker",
         Action::Stop => "Stop and rewind to the loop or song start",
         Action::ToggleRecord => "Record parameter movements as automation",
+        Action::ToggleComputerKeyboard => "Computer keyboard: A W S E D F T G Y H U J K play notes; Z/X change octave",
         Action::ToggleBind => "Move a parameter to bind it to an automation clip",
         _ => binding.label,
     };
