@@ -34,7 +34,7 @@ Panel headers keep common actions visible. "More" opens the full toolset, includ
 
 ## Build with Bazel
 
-The repo also builds with [Bazel](https://bazel.build) through [rules_rust](https://github.com/bazelbuild/rules_rust). `.bazelversion` pins Bazel 9.2.0; install it with [Bazelisk](https://github.com/bazelbuild/bazelisk) or Homebrew (`brew install bazel`).
+The repo also builds with [Bazel](https://bazel.build) through [rules_rust](https://github.com/bazelbuild/rules_rust). `.bazelversion` pins Bazel 9.3.1; install it with [Bazelisk](https://github.com/bazelbuild/bazelisk) or Homebrew (`brew install bazel`).
 
 ```sh
 bazel run -c opt //crates/daw
