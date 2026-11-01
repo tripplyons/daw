@@ -4,7 +4,8 @@
 //! (`<exe> --scan-vst3 <path>` / `<exe> --scan-au <id>`), so a plugin that
 //! crashes or hangs while loading is recorded as failed instead of taking
 //! down the app. Results are cached by path and modification time (VST3) or
-//! component version (AU); only new or changed plugins are probed again.
+//! component version (AU). Startup probes only new or changed plugins;
+//! explicit rescans also retry failed entries.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
@@ -23,6 +24,15 @@ use crate::au;
 const MARKER: &str = "@@daw-scan@@";
 const TIMEOUT: Duration = Duration::from_secs(45);
 const WORKERS: usize = 8;
+const OUTPUT_LIMIT: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    /// Reuse unchanged successes and failures at startup.
+    Changed,
+    /// Also probe unchanged failures after an explicit rescan request.
+    RetryFailed,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Failure {
@@ -139,10 +149,7 @@ struct Job {
 
 /// Scan installed plugins, reusing cached results for unchanged ones.
 /// `exe` is a binary that handles the `--scan-*` arguments via [`run_child`].
-pub fn scan(exe: &Path, cache_file: &Path, progress: impl Fn(Progress) + Sync) -> Catalog {
-    let mut cache = load_cache(cache_file);
-    let cached: HashMap<String, Entry> = cache.entries.drain(..).map(|e| (e.key.clone(), e)).collect();
-
+pub fn scan(exe: &Path, cache_file: &Path, mode: ScanMode, progress: impl Fn(Progress) + Sync) -> Catalog {
     let mut jobs = Vec::new();
     for bundle in vst3_dirs().iter().flat_map(|d| find_vst3_bundles(d)) {
         let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -165,11 +172,18 @@ pub fn scan(exe: &Path, cache_file: &Path, progress: impl Fn(Progress) + Sync) -
         });
     }
 
+    scan_jobs(exe, cache_file, mode, jobs, progress)
+}
+
+fn scan_jobs(exe: &Path, cache_file: &Path, mode: ScanMode, jobs: Vec<Job>, progress: impl Fn(Progress) + Sync) -> Catalog {
+    let mut cache = load_cache(cache_file);
+    let cached: HashMap<String, Entry> = cache.entries.drain(..).map(|e| (e.key.clone(), e)).collect();
     let mut entries = Vec::new();
     let mut pending = VecDeque::new();
     for job in jobs {
         match cached.get(&job.key) {
-            Some(entry) if entry.fingerprint == job.fingerprint => entries.push(entry.clone()),
+            Some(entry) if entry.fingerprint == job.fingerprint
+                && (entry.result.is_ok() || mode == ScanMode::Changed) => entries.push(entry.clone()),
             _ => pending.push_back(job),
         }
     }
@@ -240,16 +254,19 @@ fn run_probe(exe: &Path, flag: &str, key: &str) -> Result<Vec<PluginInfo>, Strin
         .args([flag, key])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not start scanner: {e}"))?;
-    // Read stdout on a thread so a chatty plugin cannot fill the pipe and stall.
+    // Drain both pipes concurrently so a chatty plugin cannot stall the child.
+    // Bound diagnostics, but preserve full catalogs from multi-class VST3 bundles.
     let mut stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
     let reader = std::thread::spawn(move || {
         let mut text = String::new();
         let _ = stdout.read_to_string(&mut text);
         text
     });
+    let errors = std::thread::spawn(move || read_output(stderr));
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -260,19 +277,46 @@ fn run_probe(exe: &Path, flag: &str, key: &str) -> Result<Vec<PluginInfo>, Strin
                 return Err(format!("timed out after {}s", TIMEOUT.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
         }
     };
     let output = reader.join().unwrap_or_default();
+    let stderr = errors.join().unwrap_or_default();
     let payload = output.lines().find_map(|line| line.strip_prefix(MARKER));
     match payload {
         Some(payload) => ron::from_str::<Result<Vec<PluginInfo>, String>>(payload).map_err(|e| format!("bad scanner output: {e}"))?,
-        None if status.success() => Err("scanner produced no result".into()),
-        None => Err(match status.code() {
-            Some(code) => format!("scanner exited with code {code}"),
-            None => "plugin crashed while loading".into(),
-        }),
+        None => {
+            let reason = if status.success() { "scanner produced no result".into() } else {
+                match status.code() {
+                    Some(code) => format!("scanner exited with code {code}"),
+                    None => "plugin crashed while loading".into(),
+                }
+            };
+            let detail = stderr.trim();
+            Err(if detail.is_empty() { reason } else { format!("{reason}: {detail}") })
+        }
     }
+}
+
+fn read_output(mut pipe: impl Read) -> String {
+    let mut tail = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                tail.extend_from_slice(&buffer[..count]);
+                if tail.len() > OUTPUT_LIMIT { tail.drain(..tail.len() - OUTPUT_LIMIT); }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&tail).into_owned()
 }
 
 /// Handle scanner arguments in a child process. Returns `None` when the
@@ -305,6 +349,9 @@ fn probe_au(id: &str) -> Result<Vec<PluginInfo>, String> {
     crate::load(&info.plugin, &[], 48_000.0, 512).map_err(|e| e.to_string())?;
     Ok(vec![info])
 }
+
+#[cfg(all(test, unix))]
+mod regression;
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,7 @@ use daw_engine::song::PlayMode;
 use daw_model::layout::{Axis, Layout, Panel, Rect, TileId};
 use daw_model::time::Ticks;
 use daw_model::{ChannelId, ClipSource, InsertId, InstanceId, PatternId, Project, Target};
-use daw_plugins::scan::{Catalog, Progress};
+use daw_plugins::scan::{Catalog, Progress, ScanMode};
 use iced::futures::channel::mpsc::{self, UnboundedReceiver};
 use iced::futures::{Stream, StreamExt, stream};
 use iced::{Point, Size, Subscription, Task, event, keyboard, mouse, window};
@@ -262,7 +262,7 @@ impl App {
         if let Some(workspace) = std::env::var("DAW_WORKSPACE").ok().and_then(|w| w.parse::<usize>().ok()) {
             app.project.workspaces.active = workspace.saturating_sub(1).min(8);
         }
-        (app, scan_task())
+        (app, scan_task(ScanMode::Changed))
     }
 
     pub fn title(&self) -> String {
@@ -581,7 +581,7 @@ impl App {
             Message::Rescan => {
                 if self.scan.is_none() {
                     self.scan = Some(Progress { done: 0, total: 0 });
-                    return scan_task();
+                    return scan_task(ScanMode::RetryFailed);
                 }
             }
             Message::EndEdit => {
@@ -990,17 +990,27 @@ fn save_as(then: fn(Option<PathBuf>) -> Message) -> Task<Message> {
     Task::perform(dialogs::save("project", &["dawproj"], "untitled.dawproj"), then)
 }
 
-fn scan_task() -> Task<Message> {
-    let (sender, receiver) = mpsc::unbounded();
-    std::thread::spawn(move || {
+fn scan_task(mode: ScanMode) -> Task<Message> {
+    scan_task_with(move |sender| {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("daw"));
         let progress_sender = sender.clone();
-        let catalog = daw_plugins::scan::scan(&exe, &daw_plugins::scan::cache_path(), move |p| {
+        daw_plugins::scan::scan(&exe, &daw_plugins::scan::cache_path(), mode, move |p| {
             let _ = progress_sender.unbounded_send(Message::ScanProgress(p));
+        })
+    })
+}
+
+/// Defer discovery and child processes until the runtime polls this task.
+/// Constructing or discarding a task, as unit tests do, must have no side effects.
+fn scan_task_with(scan: impl FnOnce(mpsc::UnboundedSender<Message>) -> Catalog + Send + 'static) -> Task<Message> {
+    Task::stream(stream::once(async move {
+        let (sender, receiver) = mpsc::unbounded();
+        std::thread::spawn(move || {
+            let catalog = scan(sender.clone());
+            let _ = sender.unbounded_send(Message::ScanDone(catalog));
         });
-        let _ = sender.unbounded_send(Message::ScanDone(catalog));
-    });
-    Task::stream(receiver)
+        receiver
+    }).flatten())
 }
 
 #[cfg(test)]

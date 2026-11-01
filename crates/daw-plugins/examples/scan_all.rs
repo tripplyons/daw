@@ -11,7 +11,7 @@ fn main() {
         let _ = std::fs::remove_file(&cache);
     }
     let started = std::time::Instant::now();
-    let catalog = daw_plugins::scan::scan(&exe, &cache, |p| {
+    let catalog = daw_plugins::scan::scan(&exe, &cache, daw_plugins::scan::ScanMode::RetryFailed, |p| {
         if p.done % 50 == 0 || p.done == p.total {
             eprintln!("{}/{}", p.done, p.total);
         }

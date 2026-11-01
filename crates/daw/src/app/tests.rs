@@ -1,6 +1,7 @@
 //! Drives `App::update` the way the UI does and checks the project.
 
 mod computer_keyboard;
+mod scan_tasks;
 
 use daw_engine::output::BitDepth;
 use daw_model::automation::{Shape, TimeSnap, ValueSnap};

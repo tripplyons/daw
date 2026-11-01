@@ -193,7 +193,7 @@ fn execute(command: Command) -> Result<String, String> {
         Command::Plugins { scan, json } => {
             let catalog = if scan {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                scan::scan(&exe, &scan::cache_path(), |_| {})
+                scan::scan(&exe, &scan::cache_path(), scan::ScanMode::RetryFailed, |_| {})
             } else {
                 scan::cached(&scan::cache_path())
             };

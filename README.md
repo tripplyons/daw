@@ -68,7 +68,7 @@ On startup the app scans the standard plugin folders:
 
 A Linux VST3 bundle needs a binary for your CPU, such as `Contents/x86_64-linux/` or `Contents/aarch64-linux/`. A project with Audio Units still opens on Linux; those plugins show a load error.
 
-Each plugin is scanned in a separate process, so a plugin that crashes or hangs during the scan is listed as failed instead of closing the app. Results are cached in `~/Library/Application Support/daw/plugins.ron` on macOS and `~/.local/share/daw/plugins.ron` on Linux; later scans only probe new or updated plugins. The browser panel's "rescan" button scans again.
+Each plugin is scanned in a separate process, so a plugin that crashes or hangs during the scan is listed as failed instead of closing the app. Results are cached in `~/Library/Application Support/daw/plugins.ron` on macOS and `~/.local/share/daw/plugins.ron` on Linux; later scans only probe new or updated plugins. The browser panel's "rescan" button and `daw plugins --scan` also retry failed plugins, while keeping successful results for unchanged plugins cached. Startup retains cached failures so broken plugins are not probed on every launch.
 
 Click a plugin in the browser panel to use it: an instrument gets a new channel in the channel rack, and an effect goes on the selected mixer insert.
 
