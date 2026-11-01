@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Key chords per action id, e.g. `"focus-left": ["alt+h", "alt+left"]`.
+    /// Key chords per action id, e.g. `"focus-left": ["cmd+left"]`.
     pub keys: BTreeMap<String, Vec<String>>,
     pub autosave_minutes: u64,
     pub midi_input: Option<String>,

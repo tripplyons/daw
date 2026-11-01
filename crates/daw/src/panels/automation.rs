@@ -672,8 +672,9 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 
 pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
     if app.automation.clip.and_then(|id| app.project.automation_clip(id)).is_none() {
-        let hint = "no clip open. Right click a control and choose automate, pick a last touched \
-                    parameter above, or turn on bind (Alt+A) and move any parameter.";
+        let command = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        let hint = format!("no clip open. Right click a control and choose automate, pick a last touched \
+                    parameter above, or turn on bind ({command}+Shift+G) and move any parameter.");
         return iced::widget::container(label(hint)).padding(8).into();
     }
     Canvas::new(Editor { app }).width(Length::Fill).height(Length::Fill).into()

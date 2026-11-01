@@ -1,6 +1,5 @@
-//! Configurable key bindings. Chords use physical keys because Alt changes the
-//! typed character on macOS. Alt is the default tiling modifier so Cmd stays
-//! free for app commands.
+//! Configurable key bindings matched by physical position. Defaults use Cmd
+//! on macOS and Ctrl on Windows and Linux; saved custom chords stay literal.
 
 use std::collections::BTreeMap;
 
@@ -60,40 +59,40 @@ const fn bind(id: &'static str, label: &'static str, group: &'static str, action
 use Direction::{Down, Left, Right, Up};
 
 pub const BINDINGS: &[Binding] = &[
-    bind("focus-left", "focus left", "tiling", Action::Focus(Left), &["alt+h", "alt+left"]),
-    bind("focus-down", "focus down", "tiling", Action::Focus(Down), &["alt+j", "alt+down"]),
-    bind("focus-up", "focus up", "tiling", Action::Focus(Up), &["alt+k", "alt+up"]),
-    bind("focus-right", "focus right", "tiling", Action::Focus(Right), &["alt+l", "alt+right"]),
-    bind("swap-left", "move tile left", "tiling", Action::Swap(Left), &["alt+shift+h", "alt+shift+left"]),
-    bind("swap-down", "move tile down", "tiling", Action::Swap(Down), &["alt+shift+j", "alt+shift+down"]),
-    bind("swap-up", "move tile up", "tiling", Action::Swap(Up), &["alt+shift+k", "alt+shift+up"]),
-    bind("swap-right", "move tile right", "tiling", Action::Swap(Right), &["alt+shift+l", "alt+shift+right"]),
-    bind("resize-left", "resize left", "tiling", Action::Resize(Left), &["ctrl+alt+h", "ctrl+alt+left"]),
-    bind("resize-down", "resize down", "tiling", Action::Resize(Down), &["ctrl+alt+j", "ctrl+alt+down"]),
-    bind("resize-up", "resize up", "tiling", Action::Resize(Up), &["ctrl+alt+k", "ctrl+alt+up"]),
-    bind("resize-right", "resize right", "tiling", Action::Resize(Right), &["ctrl+alt+l", "ctrl+alt+right"]),
-    bind("split", "split tile", "tiling", Action::Split, &["alt+enter"]),
-    bind("split-stacked", "next split stacked", "tiling", Action::SplitAxis(Axis::Vertical), &["alt+v"]),
-    bind("split-side", "next split side by side", "tiling", Action::SplitAxis(Axis::Horizontal), &["alt+b"]),
-    bind("close", "close tile", "tiling", Action::Close, &["alt+q"]),
-    bind("cycle-panel", "change panel", "tiling", Action::CyclePanel, &["alt+space"]),
-    bind("panel-tools", "panel tools", "tiling", Action::PanelTools, &["alt+t"]),
-    bind("zoom", "focus mode", "tiling", Action::Zoom, &["alt+f"]),
-    bind("workspace-1", "workspace 1", "workspaces", Action::Workspace(0), &["alt+1"]),
-    bind("workspace-2", "workspace 2", "workspaces", Action::Workspace(1), &["alt+2"]),
-    bind("workspace-3", "workspace 3", "workspaces", Action::Workspace(2), &["alt+3"]),
-    bind("workspace-4", "workspace 4", "workspaces", Action::Workspace(3), &["alt+4"]),
-    bind("workspace-5", "workspace 5", "workspaces", Action::Workspace(4), &["alt+5"]),
-    bind("workspace-6", "workspace 6", "workspaces", Action::Workspace(5), &["alt+6"]),
-    bind("workspace-7", "workspace 7", "workspaces", Action::Workspace(6), &["alt+7"]),
-    bind("workspace-8", "workspace 8", "workspaces", Action::Workspace(7), &["alt+8"]),
-    bind("workspace-9", "workspace 9", "workspaces", Action::Workspace(8), &["alt+9"]),
+    bind("focus-left", "focus left", "tiling", Action::Focus(Left), &["cmd+left"]),
+    bind("focus-down", "focus down", "tiling", Action::Focus(Down), &["cmd+down"]),
+    bind("focus-up", "focus up", "tiling", Action::Focus(Up), &["cmd+up"]),
+    bind("focus-right", "focus right", "tiling", Action::Focus(Right), &["cmd+right"]),
+    bind("swap-left", "move tile left", "tiling", Action::Swap(Left), &["cmd+shift+left"]),
+    bind("swap-down", "move tile down", "tiling", Action::Swap(Down), &["cmd+shift+down"]),
+    bind("swap-up", "move tile up", "tiling", Action::Swap(Up), &["cmd+shift+up"]),
+    bind("swap-right", "move tile right", "tiling", Action::Swap(Right), &["cmd+shift+right"]),
+    bind("resize-left", "resize left", "tiling", Action::Resize(Left), &["cmd+shift+h"]),
+    bind("resize-down", "resize down", "tiling", Action::Resize(Down), &["cmd+shift+j"]),
+    bind("resize-up", "resize up", "tiling", Action::Resize(Up), &["cmd+shift+k"]),
+    bind("resize-right", "resize right", "tiling", Action::Resize(Right), &["cmd+shift+l"]),
+    bind("split", "split tile", "tiling", Action::Split, &["cmd+enter"]),
+    bind("split-stacked", "next split stacked", "tiling", Action::SplitAxis(Axis::Vertical), &["cmd+shift+b"]),
+    bind("split-side", "next split side by side", "tiling", Action::SplitAxis(Axis::Horizontal), &["cmd+b"]),
+    bind("close", "close tile", "tiling", Action::Close, &["cmd+w"]),
+    bind("cycle-panel", "change panel", "tiling", Action::CyclePanel, &["cmd+p"]),
+    bind("panel-tools", "panel tools", "tiling", Action::PanelTools, &["cmd+t"]),
+    bind("zoom", "focus mode", "tiling", Action::Zoom, &["cmd+f"]),
+    bind("workspace-1", "workspace 1", "workspaces", Action::Workspace(0), &["cmd+1"]),
+    bind("workspace-2", "workspace 2", "workspaces", Action::Workspace(1), &["cmd+2"]),
+    bind("workspace-3", "workspace 3", "workspaces", Action::Workspace(2), &["cmd+3"]),
+    bind("workspace-4", "workspace 4", "workspaces", Action::Workspace(3), &["cmd+4"]),
+    bind("workspace-5", "workspace 5", "workspaces", Action::Workspace(4), &["cmd+5"]),
+    bind("workspace-6", "workspace 6", "workspaces", Action::Workspace(5), &["cmd+6"]),
+    bind("workspace-7", "workspace 7", "workspaces", Action::Workspace(6), &["cmd+7"]),
+    bind("workspace-8", "workspace 8", "workspaces", Action::Workspace(7), &["cmd+8"]),
+    bind("workspace-9", "workspace 9", "workspaces", Action::Workspace(8), &["cmd+9"]),
     bind("play-pause", "play or pause", "transport", Action::PlayPause, &["space"]),
     bind("stop", "stop and rewind", "transport", Action::Stop, &["escape"]),
-    bind("toggle-mode", "pattern or song mode", "transport", Action::ToggleMode, &["alt+s"]),
-    bind("toggle-bind", "bind mode", "automation", Action::ToggleBind, &["alt+a"]),
-    bind("toggle-record", "record automation", "automation", Action::ToggleRecord, &["alt+r"]),
-    bind("toggle-audio-record", "record audio", "transport", Action::ToggleAudioRecord, &["alt+shift+r"]),
+    bind("toggle-mode", "pattern or song mode", "transport", Action::ToggleMode, &["tab"]),
+    bind("toggle-bind", "bind mode", "automation", Action::ToggleBind, &["cmd+shift+g"]),
+    bind("toggle-record", "record automation", "automation", Action::ToggleRecord, &["cmd+r"]),
+    bind("toggle-audio-record", "record audio", "transport", Action::ToggleAudioRecord, &["cmd+shift+a"]),
     bind("toggle-midi-record", "record MIDI notes", "transport", Action::ToggleMidiRecord, &["cmd+shift+r"]),
     bind("pack", "package project", "file", Action::Pack, &[]),
     bind("recover", "recover backup", "file", Action::Recover, &[]),
@@ -239,7 +238,7 @@ fn binding(id: &str) -> Option<&'static Binding> {
 }
 
 /// Parse a default chord. Defaults are written with Cmd, which is Ctrl on
-/// Linux; saved chords keep whatever the user picked.
+/// Windows and Linux; saved chords keep whatever the user picked.
 fn default_chord(text: &str) -> Option<Chord> {
     let mut chord = Chord::parse(text)?;
     if cfg!(not(target_os = "macos")) && chord.cmd {
@@ -351,9 +350,9 @@ pub fn label(id: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn linux_defaults_use_control_for_app_commands() {
+    fn non_mac_defaults_use_control_for_app_commands() {
         let mut keymap = Keymap::default();
         assert_eq!(keymap.chords("undo"), &[Chord::parse("ctrl+z").unwrap()]);
         keymap.remove("undo", Chord::parse("ctrl+z").unwrap());
@@ -379,16 +378,75 @@ mod tests {
     #[test]
     fn assign_moves_chord_and_config_round_trips() {
         let mut keymap = Keymap::default();
-        let chord = Chord::parse("alt+h").unwrap();
+        let chord = default_chord("cmd+left").unwrap();
         assert_eq!(keymap.assign("zoom", chord), Some("focus-left"));
-        assert_eq!(keymap.chords("focus-left"), &[Chord::parse("alt+left").unwrap()]);
+        assert!(keymap.chords("focus-left").is_empty());
         assert!(!keymap.is_default("zoom"));
         let (loaded, warnings) = Keymap::from_config(&keymap.to_config());
         assert!(warnings.is_empty());
         assert_eq!(loaded, keymap);
         keymap.reset("focus-left");
         assert!(keymap.is_default("focus-left"));
-        assert_eq!(keymap.chords("zoom"), &[Chord::parse("alt+f").unwrap()]);
+        assert_eq!(keymap.chords("zoom"), &[default_chord("cmd+f").unwrap()]);
+    }
+
+    #[test]
+    fn defaults_use_primary_modifier_without_conflicts() {
+        let keymap = Keymap::default();
+        let mut seen = Vec::new();
+        for binding in BINDINGS {
+            for &chord in keymap.chords(binding.id) {
+                assert!(!chord.alt, "{} still uses Alt", binding.id);
+                assert!(!seen.contains(&chord), "duplicate default {chord}");
+                seen.push(chord);
+                if chord.cmd || chord.ctrl {
+                    assert_eq!(chord.cmd, cfg!(target_os = "macos"));
+                    assert_eq!(chord.ctrl, cfg!(not(target_os = "macos")));
+                }
+            }
+        }
+        for (id, text) in [
+            ("focus-left", "cmd+left"), ("focus-down", "cmd+down"),
+            ("focus-up", "cmd+up"), ("focus-right", "cmd+right"),
+            ("swap-left", "cmd+shift+left"), ("swap-down", "cmd+shift+down"),
+            ("swap-up", "cmd+shift+up"), ("swap-right", "cmd+shift+right"),
+            ("resize-left", "cmd+shift+h"), ("resize-down", "cmd+shift+j"),
+            ("resize-up", "cmd+shift+k"), ("resize-right", "cmd+shift+l"),
+            ("split", "cmd+enter"), ("split-stacked", "cmd+shift+b"),
+            ("split-side", "cmd+b"), ("close", "cmd+w"),
+            ("cycle-panel", "cmd+p"), ("panel-tools", "cmd+t"), ("zoom", "cmd+f"),
+            ("toggle-mode", "tab"), ("toggle-bind", "cmd+shift+g"),
+            ("toggle-record", "cmd+r"), ("toggle-audio-record", "cmd+shift+a"),
+            ("toggle-midi-record", "cmd+shift+r"), ("save", "cmd+s"),
+        ] {
+            assert_eq!(keymap.chords(id), &[default_chord(text).unwrap()], "{id}");
+        }
+        for i in 1..=9 {
+            assert_eq!(keymap.chords(&format!("workspace-{i}")),
+                &[default_chord(&format!("cmd+{i}")).unwrap()]);
+        }
+        // These chords belong to panel editing or the OS, not global actions.
+        for text in ["cmd+a", "cmd+c", "cmd+v", "cmd+h", "cmd+q", "cmd+space", "cmd+shift+c"] {
+            assert!(!seen.contains(&default_chord(text).unwrap()), "{text}");
+        }
+    }
+
+    #[test]
+    fn saved_custom_alt_bindings_and_unbound_actions_are_preserved() {
+        let mut config = BTreeMap::new();
+        config.insert("focus-left".into(), vec!["alt+h".into(), "alt+left".into()]);
+        config.insert("toggle-mode".into(), vec!["alt+s".into()]);
+        config.insert("toggle-record".into(), vec![]);
+        let (keymap, warnings) = Keymap::from_config(&config);
+        assert!(warnings.is_empty());
+        assert_eq!(keymap.chords("focus-left"), &[Chord::parse("alt+h").unwrap(), Chord::parse("alt+left").unwrap()]);
+        assert_eq!(keymap.chords("toggle-mode"), &[Chord::parse("alt+s").unwrap()]);
+        assert!(keymap.chords("toggle-record").is_empty());
+        assert!(keymap.is_default("zoom"));
+        let saved = keymap.to_config();
+        for (id, chords) in config {
+            assert_eq!(saved[&id], chords);
+        }
     }
 
     #[test]

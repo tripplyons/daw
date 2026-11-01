@@ -77,7 +77,7 @@ Click a plugin in the browser panel to use it: an instrument gets a new channel 
 Audio clips play part of a WAV file at its own speed, without following tempo changes. Each file gets an audio channel in the channel rack, which sets its volume, pan, and mixer insert; double-click an audio clip to select its channel.
 
 - Import: press Cmd+I, click "+ audio" in the playlist toolbar, or drop WAV files on the window. The clip starts at the song start marker on the first free track.
-- Record: press Alt+Shift+R or click "audio" in the recording row to arm the default input device, then play in song mode. Each stretch of playback becomes a take, written to the recordings folder and placed on the first free track. Saving the project embeds the take in the project file. Input latency is compensated. Click "audio" again to disarm. The app asks for microphone access the first time.
+- Record: press Cmd+Shift+A or click "audio" in the recording row to arm the default input device, then play in song mode. Each stretch of playback becomes a take, written to the recordings folder and placed on the first free track. Saving the project embeds the take in the project file. Input latency is compensated. Click "audio" again to disarm. The app asks for microphone access the first time.
 - Edit: drag a clip's left or right edge to trim it, Alt-click to split it, and Cmd+C, Cmd+V, and Cmd+D to copy, paste, and duplicate it. After an import or a take, the playlist brush is that file, so a click places the whole file again.
 
 A take recorded over a loop keeps going past the loop end as one clip.
@@ -86,7 +86,7 @@ Plugin parameter drags create one undo step in both the parameter panel and nati
 
 Select audio clips to show their pitch, duration, and reverse controls below the playlist. Pitch shifts keep the duration; duration changes keep the pitch. Type semitones and cents, or an exact duration ratio, then press Enter or click "set". Reset buttons restore pitch, cents, or the duration ratio. The pitch slider moves in cents. Turn on "stretch" in the playlist toolbar to stretch an audio clip by dragging its edge. Pitch and stretch drags show a preview and queue background processing on release. The progress bar has a cancel button. Cancelling keeps the edit in the project; click "retry audio processing" to finish it. Undo restores a cached version immediately when available. With stretch off, edge drags trim the file. These edits stay in the project and leave the source WAV unchanged. Recent processed versions are reused by undo and redo. Inactive cached audio is limited to 256 MiB and 64 entries; the current project's audio stays available.
 
-Select pattern or audio clips and click "consolidate", or press Cmd+Alt+C in the playlist, to render the selection to a stereo WAV on a free track. The render runs in the background with progress and cancellation. The originals are muted after it finishes and retained for undo. Editing the project during consolidation discards the result so it cannot replace a changed selection. Insert effects and routing are rendered into the file; master effects and master gain remain live. Settings has separate export and consolidation tails from 0 to 120 seconds. These values are saved in the project. A consolidated clip includes its chosen tail. Ranged renders stop new notes and clips at the range end, then render the effect tail.
+Select pattern or audio clips and click "consolidate", or press Cmd+Shift+C in the playlist, to render the selection to a stereo WAV on a free track. The render runs in the background with progress and cancellation. The originals are muted after it finishes and retained for undo. Editing the project during consolidation discards the result so it cannot replace a changed selection. Insert effects and routing are rendered into the file; master effects and master gain remain live. Settings has separate export and consolidation tails from 0 to 120 seconds. These values are saved in the project. A consolidated clip includes its chosen tail. Ranged renders stop new notes and clips at the range end, then render the effect tail.
 
 ## Patterns and unique clips
 
@@ -153,29 +153,29 @@ The symlink keeps the skill in step with the repository; copy the folder instead
 
 ## Default keys
 
-Alt is the tiling modifier. Keys match by physical position, so they work on any keyboard layout. On Linux, Ctrl replaces Cmd everywhere in this README. If your window manager already uses an Alt shortcut, rebind it there or in the settings page.
+Cmd is the primary shortcut modifier on macOS. On Windows and Linux, Ctrl replaces Cmd everywhere in this README. Keys match by physical position, so they work on any keyboard layout. Saved custom bindings are unchanged; reset bindings in settings to use the new defaults.
 
 | Keys | Action |
 | --- | --- |
-| Alt+H/J/K/L or Alt+arrows | Move focus between tiles |
-| Alt+Shift+H/J/K/L | Move the focused tile |
-| Ctrl+Alt+H/J/K/L | Resize the focused tile |
-| Alt+Enter | Split the focused tile |
-| Alt+V / Alt+B | Next split stacked / side by side |
-| Alt+Space | Change the focused tile's panel |
-| Alt+T | Open the focused panel's tools |
-| Alt+F | Focus mode (one tile fills the window) |
-| Alt+Q | Close the focused tile |
-| Alt+1 to Alt+9 | Switch workspace |
+| Cmd+arrows | Move focus between tiles |
+| Cmd+Shift+arrows | Move the focused tile |
+| Cmd+Shift+H/J/K/L | Resize the focused tile |
+| Cmd+Enter | Split the focused tile |
+| Cmd+Shift+B / Cmd+B | Next split stacked / side by side |
+| Cmd+P | Change the focused tile's panel |
+| Cmd+T | Open the focused panel's tools |
+| Cmd+F | Focus mode (one tile fills the window) |
+| Cmd+W | Close the focused tile |
+| Cmd+1 to Cmd+9 | Switch workspace |
 | Space | Play or pause |
 | Escape | Stop and rewind |
-| Alt+S | Switch between pattern and song mode |
-| Alt+A | Bind mode: the next control you touch gets an automation clip |
-| Alt+R | Record automation |
-| Alt+Shift+R | Arm audio recording from the microphone |
+| Tab | Switch between pattern and song mode |
+| Cmd+Shift+G | Bind mode: the next control you touch gets an automation clip |
+| Cmd+R | Record automation |
+| Cmd+Shift+A | Arm audio recording from the microphone |
 | Cmd+Shift+R | Arm MIDI note recording |
 | Cmd+U in playlist | Make selected clips unique |
-| Cmd+Alt+C in playlist | Consolidate selection to audio |
+| Cmd+Shift+C in playlist | Consolidate selection to audio |
 | M in playlist | Mute or unmute selected clips |
 | Delete | Delete the selection in the focused panel |
 | Shift+F10 | Open the selected item's menu |

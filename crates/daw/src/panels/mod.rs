@@ -91,8 +91,8 @@ pub fn hint(message: &Message) -> Option<&'static str> {
             "Give selected clips independent sources (Cmd+U)"
         } else { "Give selected clips independent sources (Ctrl+U)" }),
         Message::Playlist(playlist::Message::Consolidate) => Some(if cfg!(target_os = "macos") {
-            "Render selected pattern or audio clips to WAV (Cmd+Alt+C)"
-        } else { "Render selected pattern or audio clips to WAV (Ctrl+Alt+C)" }),
+            "Render selected pattern or audio clips to WAV (Cmd+Shift+C)"
+        } else { "Render selected pattern or audio clips to WAV (Ctrl+Shift+C)" }),
         Message::Playlist(playlist::Message::Duplicate) => Some(if cfg!(target_os = "macos") {
             "Duplicate the selection after its last clip (Cmd+D)"
         } else { "Duplicate the selection after its last clip (Ctrl+D)" }),

@@ -578,7 +578,7 @@ pub fn delete_selected(app: &mut App) -> bool {
 pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
     match key {
         Key::Character(c) if modifiers.command() && c.as_str() == "u" => update(app, Message::MakeUnique),
-        Key::Character(c) if modifiers.command() && modifiers.alt() && c.as_str() == "c" => update(app, Message::Consolidate),
+        Key::Character(c) if modifiers == (Modifiers::COMMAND | Modifiers::SHIFT) && c.eq_ignore_ascii_case("c") => update(app, Message::Consolidate),
         Key::Character(c) if modifiers.is_empty() && c.as_str() == "m" => update(app, Message::MuteSelection),
         Key::Character(c) if modifiers.command() && c.as_str() == "a" => {
             app.playlist.selected = app.project.playlist.clips.iter().map(|c| c.id).collect();

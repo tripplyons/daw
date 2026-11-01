@@ -220,7 +220,7 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         list = list.push(row![text(*action).size(theme::SMALL).width(180), label(*combo)].spacing(6));
     }
     let command = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
-    let note = format!("Keys match by position, so Alt chords work on any layout. Panel keys (Delete, arrows, \
+    let note = format!("Keys match by physical position on any layout. Panel keys (Delete, arrows, \
                 {command}+A/C/V/D, 1-6 in automation, Q in the piano roll) apply when no binding matches.");
     list = list.push(container(label(note)).padding([8, 0]));
     super::scroll(list, true, false).height(Length::Fill).into()

@@ -545,19 +545,74 @@ fn playlist_place_move_duplicate_and_loop() {
 fn tiling_actions_through_keys() {
     let mut app = app();
     let tiles = app.layout().leaves().len();
-    let alt = Modifiers::ALT;
-    let _ = app.update(press(Code::KeyV, char_key("√"), alt));
-    let _ = app.update(press(Code::Enter, Key::Named(keyboard::key::Named::Enter), alt));
+    let primary = Modifiers::COMMAND;
+    let _ = app.update(press(Code::KeyB, char_key("B"), primary | Modifiers::SHIFT));
+    let _ = app.update(press(Code::Enter, Key::Named(keyboard::key::Named::Enter), primary));
     assert_eq!(app.layout().leaves().len(), tiles + 1);
     assert_eq!(app.focused_panel(), Panel::Mixer, "first panel not on screen");
-    let _ = app.update(press(Code::KeyF, char_key("ƒ"), alt));
+    let _ = app.update(press(Code::KeyF, char_key("f"), primary));
     assert!(app.layout().zoomed);
-    let _ = app.update(press(Code::KeyF, char_key("ƒ"), alt));
-    let _ = app.update(press(Code::KeyQ, char_key("œ"), alt));
+    let _ = app.update(press(Code::KeyF, char_key("f"), primary));
+    let _ = app.update(press(Code::KeyW, char_key("w"), primary));
     assert_eq!(app.layout().leaves().len(), tiles);
-    let _ = app.update(press(Code::Digit3, char_key("£"), alt));
+    let _ = app.update(press(Code::Digit3, char_key("3"), primary));
     assert_eq!(app.project.workspaces.active, 2);
     assert_eq!(app.split_axis, Axis::Vertical);
+}
+
+#[test]
+fn tab_switches_playback_mode_but_leaves_text_input_alone() {
+    let mut app = app();
+    let original = app.mode;
+    let tab = || press(Code::Tab, Key::Named(keyboard::key::Named::Tab), Modifiers::empty());
+    let _ = app.update(tab());
+    assert_ne!(app.mode, original);
+    let _ = app.update(tab());
+    assert_eq!(app.mode, original);
+
+    let Message::Key(event, _) = tab() else { unreachable!() };
+    let _ = app.update(Message::Key(event, true));
+    assert_eq!(app.mode, original, "captured Tab belongs to the focused widget");
+    let _ = app.update(press(Code::Tab, Key::Named(keyboard::key::Named::Tab), Modifiers::SHIFT));
+    assert_eq!(app.mode, original, "Shift+Tab is not playback switching");
+    let _ = app.update(press(Code::KeyS, char_key("ß"), Modifiers::ALT));
+    assert_eq!(app.mode, original, "the old Alt+S default is removed");
+}
+
+#[test]
+fn primary_recording_keys_keep_midi_and_automation_separate() {
+    let mut app = app();
+    let primary = Modifiers::COMMAND;
+    let _ = app.update(press(Code::KeyR, char_key("r"), primary));
+    assert!(app.record);
+    assert!(!app.midi.recording);
+    let _ = app.update(press(Code::KeyR, char_key("R"), primary | Modifiers::SHIFT));
+    assert!(app.record);
+    assert!(app.midi.recording);
+}
+
+#[test]
+fn playlist_consolidation_uses_primary_shift_c_without_replacing_copy() {
+    let mut app = app();
+    *app.layout_mut() = daw_model::layout::Layout::single(Panel::Playlist);
+    let primary = Modifiers::COMMAND;
+    // No selected clips: dispatch reaches validation without starting a render.
+    for text in ["c", "C"] {
+        app.status.clear();
+        let _ = app.update(press(Code::KeyC, char_key(text), primary | Modifiers::SHIFT));
+        assert_eq!(app.status, "consolidation failed: select pattern or audio clips first");
+    }
+
+    let clip = app.project.add_clip(0, 0, ClipSource::Pattern(app.selected_pattern));
+    app.playlist.selected = vec![clip];
+    let _ = app.update(press(Code::KeyC, char_key("c"), primary));
+    let _ = app.update(press(Code::KeyV, char_key("v"), primary));
+    assert_eq!(app.project.playlist.clips.len(), 2);
+    assert!(app.project.playlist.clips.iter().all(|c| c.source == ClipSource::Pattern(app.selected_pattern)));
+    app.status = "unchanged".into();
+    let _ = app.update(press(Code::KeyC, char_key("c"), primary | Modifiers::ALT));
+    assert_eq!(app.status, "unchanged", "the old chord no longer starts consolidation");
+    assert!(!app.rendering.busy());
 }
 
 #[test]
@@ -600,20 +655,22 @@ fn settings_capture_rebinds_and_saves() {
 
     let _ = app.update(crate::panels::settings::Message::Capture("zoom").into());
     // Modifier keys alone wait for the rest of the chord.
-    let _ = app.update(press(Code::AltLeft, Key::Named(keyboard::key::Named::Alt), Modifiers::ALT));
+    let primary_key = if cfg!(target_os = "macos") { Code::SuperLeft } else { Code::ControlLeft };
+    let _ = app.update(press(primary_key, Key::Unidentified, Modifiers::COMMAND));
     assert_eq!(app.settings.capturing, Some("zoom"));
-    let _ = app.update(press(Code::KeyH, char_key("˙"), Modifiers::ALT));
+    let _ = app.update(press(Code::ArrowLeft, Key::Named(keyboard::key::Named::ArrowLeft), Modifiers::COMMAND));
     assert_eq!(app.settings.capturing, None);
     assert!(app.status.contains("moved from focus left"), "{}", app.status);
 
     // The new chord now zooms instead of moving focus.
-    let _ = app.update(press(Code::KeyH, char_key("˙"), Modifiers::ALT));
+    let _ = app.update(press(Code::ArrowLeft, Key::Named(keyboard::key::Named::ArrowLeft), Modifiers::COMMAND));
     assert!(app.layout().zoomed);
 
     let saved = std::fs::read_to_string(&app.config_path).unwrap();
     let config: crate::config::Config = serde_json::from_str(&saved).unwrap();
-    assert_eq!(config.keys["zoom"], vec!["alt+f", "alt+h"]);
-    assert_eq!(config.keys["focus-left"], vec!["alt+left"]);
+    let primary = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    assert_eq!(config.keys["zoom"], vec![format!("{primary}+f"), format!("{primary}+left")]);
+    assert!(config.keys["focus-left"].is_empty());
 
     // Escape cancels a capture without binding anything.
     let _ = app.update(crate::panels::settings::Message::Capture("undo").into());
