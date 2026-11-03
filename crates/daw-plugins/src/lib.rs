@@ -11,7 +11,7 @@ mod window;
 mod window;
 
 #[cfg(target_os = "macos")]
-pub use window::{KeyPress, set_unhandled_keys};
+pub use window::{KeyPress, set_editor_keys, set_unhandled_keys};
 
 use daw_engine::Processor;
 use daw_model::{PluginFormat, PluginRef};

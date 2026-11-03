@@ -167,6 +167,15 @@ pub fn plugin_key_event(press: daw_plugins::KeyPress) -> Option<Event> {
     for (on, modifier) in [(press.cmd, Modifiers::LOGO), (press.ctrl, Modifiers::CTRL), (press.alt, Modifiers::ALT), (press.shift, Modifiers::SHIFT)] {
         modifiers.set(modifier, on);
     }
+    if press.released {
+        return Some(Event::KeyReleased {
+            key: Key::Unidentified,
+            modified_key: Key::Unidentified,
+            physical_key: Physical::Code(code),
+            location: Location::Standard,
+            modifiers,
+        });
+    }
     Some(Event::KeyPressed {
         key: Key::Unidentified,
         modified_key: Key::Unidentified,

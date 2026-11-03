@@ -4,11 +4,11 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSBackingStoreType, NSEvent, NSEventModifierFlags, NSView, NSWindow, NSWindowStyleMask};
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2_app_kit::{NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSText, NSView, NSWindow, NSWindowStyleMask};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
-/// A key press that the plugin editor did not handle.
+/// A physical key event from a plugin editor.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyPress {
     /// macOS virtual key code, which names a physical key position.
@@ -18,11 +18,33 @@ pub struct KeyPress {
     pub alt: bool,
     pub shift: bool,
     pub repeat: bool,
+    pub released: bool,
 }
 
 type KeyHandler = Box<dyn Fn(KeyPress) -> bool>;
+type EditorKeyHandler = Box<dyn Fn(Option<KeyPress>, bool) -> bool>;
+
+/// Intercept musical typing before plugin views handle it. None signals focus
+/// loss; typing identifies an editable native text responder.
+pub fn set_editor_keys(handler: impl Fn(Option<KeyPress>, bool) -> bool + 'static) {
+    EDITOR_KEYS.with(|h| *h.borrow_mut() = Some(Box::new(handler)));
+}
+
+fn key_press(event: &NSEvent) -> KeyPress {
+    let flags = event.modifierFlags();
+    KeyPress {
+        key_code: event.keyCode(),
+        cmd: flags.contains(NSEventModifierFlags::Command),
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        repeat: event.isARepeat(),
+        released: event.r#type() == NSEventType::KeyUp,
+    }
+}
 
 thread_local! {
+    static EDITOR_KEYS: RefCell<Option<EditorKeyHandler>> = const { RefCell::new(None) };
     static UNHANDLED_KEYS: RefCell<Option<KeyHandler>> = const { RefCell::new(None) };
 }
 
@@ -42,19 +64,33 @@ define_class!(
     struct KeyWindow;
 
     impl KeyWindow {
+        #[unsafe(method(sendEvent:))]
+        fn send_event(&self, event: &NSEvent) {
+            if matches!(event.r#type(), NSEventType::KeyDown | NSEventType::KeyUp) {
+                let typing = self.firstResponder().is_some_and(|responder| {
+                    responder.isKindOfClass(NSText::class())
+                        && unsafe { msg_send![&*responder, isEditable] }
+                });
+                let used = EDITOR_KEYS.with(|h| h.borrow().as_ref()
+                    .is_some_and(|handler| handler(Some(key_press(event)), typing)));
+                if used { return; }
+            }
+            let _: () = unsafe { msg_send![super(self), sendEvent: event] };
+        }
+
+        #[unsafe(method(resignKeyWindow))]
+        fn resign_key_window(&self) {
+            EDITOR_KEYS.with(|h| {
+                if let Some(handler) = h.borrow().as_ref() { handler(None, false); }
+            });
+            let _: () = unsafe { msg_send![super(self), resignKeyWindow] };
+        }
+
         /// The end of the responder chain: views pass keys up to here when
         /// they do not use them.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            let flags = event.modifierFlags();
-            let press = KeyPress {
-                key_code: event.keyCode(),
-                cmd: flags.contains(NSEventModifierFlags::Command),
-                ctrl: flags.contains(NSEventModifierFlags::Control),
-                alt: flags.contains(NSEventModifierFlags::Option),
-                shift: flags.contains(NSEventModifierFlags::Shift),
-                repeat: event.isARepeat(),
-            };
+            let press = key_press(event);
             let used = UNHANDLED_KEYS.with(|h| h.borrow().as_ref().is_some_and(|handler| handler(press)));
             if !used {
                 let _: () = unsafe { msg_send![super(self), keyDown: event] };

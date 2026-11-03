@@ -148,7 +148,7 @@ fn computer_keyboard_octaves_are_bounded_and_repeat_safe() {
 }
 
 #[test]
-fn computer_keyboard_uses_configurable_toggle_and_not_plugin_editor_presses() {
+fn computer_keyboard_uses_configurable_toggle_and_plugin_editor_notes() {
     let mut app = app();
     let _ = app.update(press(Code::KeyM, Key::Unidentified, Modifiers::COMMAND | Modifiers::SHIFT));
     assert!(app.computer_keyboard.enabled);
@@ -162,10 +162,42 @@ fn computer_keyboard_uses_configurable_toggle_and_not_plugin_editor_presses() {
 
     let mut app = recording_app();
     let channel = app.selected_channel.unwrap();
+    let mut config = app.keymap.to_config();
+    config.insert("computer-keyboard".into(), vec!["a".into()]);
+    app.keymap = crate::keys::Keymap::from_config(&config).0;
     let Message::Key(event, _) = down(Code::KeyA) else { unreachable!() };
-    let _ = app.update(Message::PluginKey(event));
-    let _ = app.update(up(Code::KeyA, false));
-    assert!(notes(&app, channel).is_empty());
+    let _ = app.update(Message::PluginNote(event));
+    assert!(app.computer_keyboard.enabled);
+    let Message::Key(release, _) = up(Code::KeyA, false) else { unreachable!() };
+    let _ = app.update(Message::PluginNote(release));
+    assert_eq!(notes(&app, channel).len(), 1);
+}
+
+#[test]
+fn plugin_keyboard_releases_on_focus_loss_disable_and_key_up() {
+    for release in [up(Code::KeyA, false), Message::WindowUnfocused, Message::Action(Action::ToggleComputerKeyboard)] {
+        let mut app = recording_app();
+        let channel = app.selected_channel.unwrap();
+        let Message::Key(mut event, _) = down(Code::KeyA) else { unreachable!() };
+        let _ = app.update(Message::PluginNote(event.clone()));
+        if let keyboard::Event::KeyPressed { repeat, .. } = &mut event { *repeat = true; }
+        let _ = app.update(Message::PluginNote(event));
+        app.session.test_render(4800);
+        let release = match release {
+            Message::Key(event, _) => Message::PluginNote(event),
+            message => message,
+        };
+        let _ = app.update(release);
+        assert_eq!(notes(&app, channel).len(), 1);
+        assert!(notes(&app, channel)[0].length > 1);
+        let Message::Key(event, _) = up(Code::KeyA, false) else { unreachable!() };
+        let _ = app.update(Message::PluginNote(event));
+        assert_eq!(notes(&app, channel).len(), 1);
+    }
+    let mut app = app();
+    let Message::Key(event, _) = down(Code::KeyA) else { unreachable!() };
+    let _ = app.update(Message::PluginNote(event));
+    assert_eq!(app.session.test_render(4800), 0.0);
 }
 
 #[test]

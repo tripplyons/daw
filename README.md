@@ -106,7 +106,7 @@ Click "MIDI" in the recording row or press Cmd+Shift+R to arm recording, then pl
 
 ### Computer keyboard input
 
-Click "keyboard C4" in the transport or press Cmd+Shift+M (Ctrl+Shift+M on Windows/Linux) to enable computer-keyboard notes. Select an instrument, then use **A W S E D F T G Y H U J K** for a chromatic octave, starting at middle C (MIDI 60). Hold several keys to play chords. Z/X lower or raise the octave; the transport shows the current starting octave. The toggle shortcut is configurable in settings.
+Click "keyboard C4" in the transport or press Cmd+Shift+M (Ctrl+Shift+M on Windows/Linux) to enable computer-keyboard notes. Select an instrument, then use **A W S E D F T G Y H U J K** for a chromatic octave, starting at middle C (MIDI 60). Hold several keys to play chords. Z/X lower or raise the octave; the transport shows the current starting octave. The toggle shortcut is configurable in settings. On macOS, notes and octave keys also work while a plugin editor is focused. While enabled, these keys take priority over plugin controls, except in editable native text fields. Custom plugin text controls may require turning keyboard mode off to type. Leaving or closing the editor releases held notes.
 
 This mode starts off and uses physical QWERTY key positions in the main window. Mapped bare-letter keys play notes instead of panel commands while enabled. Text entry and modified shortcuts still work. Notes retain their original instrument and pitch until release, even if you change the selected channel or octave. Disabling the mode or leaving the window releases held computer notes. Use the existing MIDI recording controls to record them, just as with a MIDI device.
 

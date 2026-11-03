@@ -49,6 +49,7 @@ pub enum Message {
     CancelRender,
     Key(keyboard::Event, bool),
     PluginKey(keyboard::Event),
+    PluginNote(keyboard::Event),
     WindowUnfocused,
     WindowResized(Size),
     MouseMoved(Point),
@@ -419,10 +420,9 @@ impl App {
         layout.set_panel(focused, panel);
     }
 
-    /// Plugin windows forward presses only. Share shortcut and panel dispatch,
-    /// but accept musical typing only from the main window's complete events.
+    /// Share shortcut dispatch; plugin musical typing has its own priority path.
     fn key_event(&mut self, event: keyboard::Event, typing: bool, main_window: bool) -> Task<Message> {
-        if main_window && matches!(&event, keyboard::Event::KeyReleased { .. })
+        if matches!(&event, keyboard::Event::KeyReleased { .. })
             && self.computer_key(&event, typing) { return Task::none(); }
         if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
             playlist::update(self, playlist::Message::AudioPitchDone);
@@ -483,6 +483,7 @@ impl App {
             Message::RetryAudio => { self.refresh(); if self.session.audio_progress().is_some() { self.set_status("processing audio"); } }
             Message::CancelRender => self.rendering.cancel(),
             Message::PluginKey(event) => return self.key_event(event, false, false),
+            Message::PluginNote(event) => { self.computer_key(&event, false); }
             Message::WindowUnfocused => self.release_computer_keys(),
             Message::Key(event, typing) => return self.key_event(event, typing, true),
             Message::WindowResized(size) => self.window = size,
@@ -961,7 +962,9 @@ impl App {
 }
 
 /// Keys from plugin editor windows, waiting for the subscription to take them.
-static PLUGIN_KEYS: Mutex<Option<UnboundedReceiver<keyboard::Event>>> = Mutex::new(None);
+static PLUGIN_KEYS: Mutex<Option<UnboundedReceiver<Message>>> = Mutex::new(None);
+#[cfg(target_os = "macos")]
+static PLUGIN_KEYBOARD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Send keys that plugin editors do not use to the app's key bindings, so
 /// Space plays while a plugin window is in front. Call on the main thread.
@@ -969,9 +972,32 @@ static PLUGIN_KEYS: Mutex<Option<UnboundedReceiver<keyboard::Event>>> = Mutex::n
 fn forward_plugin_keys() {
     let (sender, receiver) = mpsc::unbounded();
     *PLUGIN_KEYS.lock().unwrap() = Some(receiver);
+    let notes = sender.clone();
+    let held = std::cell::RefCell::new(std::collections::HashSet::new());
+    daw_plugins::set_editor_keys(move |press, typing| {
+        use keyboard::{Event, Modifiers, key::{Code, Physical}};
+        let Some(press) = press else {
+            held.borrow_mut().clear();
+            let _ = notes.unbounded_send(Message::WindowUnfocused);
+            return false;
+        };
+        let Some(event) = crate::keys::plugin_key_event(press) else { return false };
+        let used = match &event {
+            Event::KeyReleased { physical_key: Physical::Code(code), .. } => held.borrow_mut().remove(code),
+            Event::KeyPressed { physical_key: Physical::Code(code), modifiers, .. }
+                if !typing && *modifiers == Modifiers::empty()
+                    && PLUGIN_KEYBOARD_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+                    && (computer_keyboard::PIANO.contains(code) || matches!(code, Code::KeyZ | Code::KeyX)) => {
+                held.borrow_mut().insert(*code);
+                true
+            }
+            _ => false,
+        };
+        used && notes.unbounded_send(Message::PluginNote(event)).is_ok()
+    });
     daw_plugins::set_unhandled_keys(move |press| {
         let Some(event) = crate::keys::plugin_key_event(press) else { return false };
-        sender.unbounded_send(event).is_ok()
+        sender.unbounded_send(Message::PluginKey(event)).is_ok()
     });
 }
 
@@ -982,7 +1008,7 @@ fn opened_files() -> impl Stream<Item = Message> {
 
 fn plugin_keys() -> impl Stream<Item = Message> {
     let receiver = PLUGIN_KEYS.lock().unwrap().take();
-    stream::iter(receiver).flatten().map(Message::PluginKey)
+    stream::iter(receiver).flatten()
 }
 
 /// Ask where to save the project, then send the answer as `then`.

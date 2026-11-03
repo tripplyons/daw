@@ -1,4 +1,4 @@
-//! Musical typing in the main window. Keep the note-on target until release.
+//! Musical typing in the main window and native plugin editors. Keep the note-on target until release.
 
 use std::collections::HashMap;
 
@@ -8,7 +8,7 @@ use iced::keyboard::{Event, Modifiers, key::{Code, Physical}};
 use super::App;
 use crate::midi::Packet;
 
-const PIANO: &[Code] = &[
+pub(super) const PIANO: &[Code] = &[
     Code::KeyA, Code::KeyW, Code::KeyS, Code::KeyE, Code::KeyD, Code::KeyF,
     Code::KeyT, Code::KeyG, Code::KeyY, Code::KeyH, Code::KeyU, Code::KeyJ, Code::KeyK,
 ];
@@ -88,6 +88,8 @@ impl App {
     pub(super) fn toggle_computer_keyboard(&mut self) {
         self.release_computer_keys();
         self.computer_keyboard.enabled = !self.computer_keyboard.enabled;
+        #[cfg(target_os = "macos")]
+        super::PLUGIN_KEYBOARD_ENABLED.store(self.computer_keyboard.enabled, std::sync::atomic::Ordering::Relaxed);
         self.set_status(if self.computer_keyboard.enabled {
             "Computer keyboard on: A W S E D F T G Y H U J K play notes; Z/X change octave"
         } else { "Computer keyboard off" });
