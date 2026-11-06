@@ -2,7 +2,7 @@
 //! piano roll messages.
 
 use daw_engine::song::PlayMode;
-use daw_model::Note;
+use daw_model::{ChannelId, Note};
 use daw_model::time::Ticks;
 use iced::keyboard::Modifiers;
 use iced::widget::canvas::{self, Frame, Geometry};
@@ -15,6 +15,10 @@ use crate::theme;
 
 const KEYS_WIDTH: f32 = 40.0;
 const EDGE: f32 = 5.0;
+/// Height of the velocity lane at the bottom of the roll.
+const LANE: f32 = 56.0;
+/// The roll shows the velocity lane only when it is at least this tall.
+const LANE_MIN_HEIGHT: f32 = 220.0;
 
 pub(super) struct Roll<'a> {
     pub(super) app: &'a App,
@@ -30,6 +34,8 @@ enum Drag {
     End,
     /// Moving the start marker in the ruler; it is set on release.
     Seek { tick: f64 },
+    /// Painting velocities in the velocity lane.
+    Velocity,
 }
 
 #[derive(Debug, Default)]
@@ -44,8 +50,14 @@ fn is_black(key: i32) -> bool {
 }
 
 fn key_name(key: i32) -> String {
-    format!("C{}", key / 12 - 1)
+    crate::cli::parse::key_name(key.clamp(0, 127) as u8)
 }
+
+const WHITE_KEY: Color = Color::from_rgb(0.66, 0.66, 0.66);
+const WHITE_KEY_HOVER: Color = Color::from_rgb(0.85, 0.85, 0.85);
+const BLACK_KEY: Color = Color::from_rgb(0.09, 0.09, 0.09);
+const BLACK_KEY_HOVER: Color = Color::from_rgb(0.26, 0.26, 0.26);
+const KEY_TEXT: Color = Color::from_rgb(0.16, 0.16, 0.16);
 
 impl Roll<'_> {
     fn state(&self) -> &State {
@@ -81,6 +93,26 @@ impl Roll<'_> {
         (KEYS_WIDTH + self.state().time.x(pattern.length as f64) - x).abs() <= EDGE + 1.0
     }
 
+    /// The channel of the other channel's note under `p`, while ghosts show.
+    fn ghost_at(&self, p: Point) -> Option<ChannelId> {
+        if !self.state().ghosts { return None; }
+        let pattern = self.app.project.pattern(self.app.selected_pattern)?;
+        pattern.lanes.iter().filter(|l| Some(l.channel) != self.app.selected_channel).find_map(|lane| {
+            lane.notes.iter().any(|n| self.note_rect(n).contains(p)).then_some(lane.channel)
+        })
+    }
+
+    /// Top of the velocity lane, if the roll is tall enough to show it.
+    fn lane_top(height: f32) -> Option<f32> {
+        (height >= LANE_MIN_HEIGHT).then_some(height - LANE)
+    }
+
+    /// The tick and velocity a point in the lane stands for.
+    fn velocity_at(&self, p: Point, height: f32) -> Message {
+        let value = ((height - 4.0 - p.y) / (LANE - 10.0)).clamp(0.01, 1.0);
+        Message::PaintVelocity { tick: self.tick_at(p.x), value }
+    }
+
     fn hit(&self, p: Point) -> Option<(usize, bool)> {
         notes(self.app).iter().enumerate().rev().find_map(|(i, n)| {
             let r = self.note_rect(n);
@@ -114,6 +146,13 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                     state.drag = Some(Drag::Seek { tick: self.tick_at(p.x) });
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
+                if let Some(top) = Self::lane_top(bounds.height)
+                    && p.y >= top
+                {
+                    if p.x < KEYS_WIDTH || *button != Button::Left { return Some(canvas::Action::capture()); }
+                    state.drag = Some(Drag::Velocity);
+                    return publish(self.velocity_at(p, bounds.height));
+                }
                 let key = self.key_at(p.y).clamp(0, 127);
                 if p.x < KEYS_WIDTH {
                     return publish(Message::Preview(key as u8));
@@ -126,6 +165,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                         state.drag = Some(Drag::Notes { tick, key });
                         publish(Message::Begin { index, resize, additive: state.modifiers.shift() })
                     }
+                    (Button::Left, None) if let Some(channel) = self.ghost_at(p) => publish(Message::Channel(channel)),
                     (Button::Left, None) if !timeline::box_select_modifier(state.modifiers) => {
                         let app = self.app;
                         let start = if state.modifiers.command() {
@@ -161,12 +201,14 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                         *tick = self.tick_at(p.x);
                         Some(canvas::Action::request_redraw())
                     }
+                    Drag::Velocity => publish(self.velocity_at(p, bounds.height)),
                 }
             }
             canvas::Event::Mouse(MouseEvent::ButtonReleased(_)) => match state.drag.take()? {
                 Drag::Notes { .. } => publish(Message::End),
                 Drag::End => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
                 Drag::Seek { tick } => publish(Message::Seek(tick)),
+                Drag::Velocity => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
                 Drag::Box { from, to, additive } => publish(Message::BoxSelect {
                     from: (self.tick_at(from.x), self.key_at(from.y)),
                     to: (self.tick_at(to.x), self.key_at(to.y)),
@@ -189,7 +231,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
         }
     }
 
-    fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
         let app = self.app;
         let roll = self.state();
         let mut frame = Frame::new(renderer, bounds.size());
@@ -197,6 +239,13 @@ impl canvas::Program<AppMessage> for Roll<'_> {
         let area = Size::new(size.width - KEYS_WIDTH, size.height - RULER_HEIGHT);
         let kh = roll.key_height;
         let bottom_key = self.key_at(size.height) - 1;
+
+        // The key under the cursor, lit across the grid and on the keyboard.
+        let lane = Self::lane_top(size.height).unwrap_or(f32::INFINITY);
+        let hovered = cursor
+            .position_in(bounds)
+            .filter(|p| p.y >= RULER_HEIGHT && p.y < lane && state.drag.is_none())
+            .map(|p| self.key_at(p.y));
 
         // Key rows.
         for key in bottom_key.max(0)..=roll.top_key.min(127) {
@@ -206,6 +255,9 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             }
             if key % 12 == 0 {
                 frame.fill_rectangle(Point::new(KEYS_WIDTH, y + kh - 1.0), Size::new(area.width, 1.0), theme::GRID_STRONG);
+            }
+            if hovered == Some(key) {
+                frame.fill_rectangle(Point::new(KEYS_WIDTH, y), Size::new(area.width, kh), Color { a: 0.05, ..theme::BRIGHT });
             }
         }
         timeline::draw_grid(&mut frame, roll.time, KEYS_WIDTH, RULER_HEIGHT, area, app.project.signature, app.project.grid);
@@ -218,10 +270,14 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             }
         }
 
-        // Other channels, dimmed in their own colors, for context.
-        if let Some(pattern) = app.project.pattern(app.selected_pattern) {
+        // Other channels, dimmed in their own colors, for context. The
+        // hovered one is brighter and named.
+        let point = cursor.position_in(bounds).filter(|p| p.x >= KEYS_WIDTH && p.y < lane && self.hit(*p).is_none());
+        let hovered_ghost = point.and_then(|p| self.ghost_at(p));
+        if roll.ghosts && let Some(pattern) = app.project.pattern(app.selected_pattern) {
             for lane in pattern.lanes.iter().filter(|l| Some(l.channel) != app.selected_channel) {
-                let ghost = theme::mix(theme::BG, theme::rgb(app.project.channel_color(lane.channel)), 0.22);
+                let amount = if hovered_ghost == Some(lane.channel) { 0.45 } else { 0.22 };
+                let ghost = theme::mix(theme::BG, theme::rgb(app.project.channel_color(lane.channel)), amount);
                 for note in &lane.notes {
                     let r = self.note_rect(note);
                     frame.fill_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 2.0), ghost);
@@ -251,17 +307,52 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             frame.stroke_rectangle(top_left, box_size, canvas::Stroke::default().with_color(theme::TEXT_DIM).with_width(1.0));
         }
 
-        // Keyboard.
-        frame.fill_rectangle(Point::new(0.0, RULER_HEIGHT), Size::new(KEYS_WIDTH, area.height), Color::from_rgb8(0x2c, 0x2c, 0x2c));
+        if let (Some(channel), Some(p)) = (hovered_ghost, point)
+            && let Some(channel) = app.project.channel(channel)
+        {
+            let name = format!("{}: click to edit", channel.name);
+            let width = name.chars().count() as f32 * 6.4 + 10.0;
+            let at = Point::new((p.x + 12.0).min(size.width - width).max(KEYS_WIDTH), (p.y - 22.0).max(RULER_HEIGHT));
+            frame.fill_rectangle(at, Size::new(width, 18.0), theme::CONTROL);
+            timeline::label(&mut frame, name, Point::new(at.x + 5.0, at.y + 2.0), theme::BRIGHT);
+        }
+
+        // Keyboard: light white keys with short black keys over them, a line
+        // where two white keys meet, C names, and the hovered key's name.
+        frame.fill_rectangle(Point::new(0.0, RULER_HEIGHT), Size::new(KEYS_WIDTH, area.height), WHITE_KEY);
         for key in bottom_key.max(0)..=roll.top_key.min(127) {
             let y = self.key_y(key);
+            let lit = hovered == Some(key);
             if is_black(key) {
-                frame.fill_rectangle(Point::new(0.0, y), Size::new(KEYS_WIDTH * 0.62, kh), theme::HEADER);
-            } else if key % 12 == 0 || key % 12 == 5 {
-                frame.fill_rectangle(Point::new(0.0, y + kh - 1.0), Size::new(KEYS_WIDTH, 1.0), theme::HEADER);
+                if lit { frame.fill_rectangle(Point::new(0.0, y), Size::new(KEYS_WIDTH, kh), WHITE_KEY_HOVER); }
+                frame.fill_rectangle(Point::new(0.0, y), Size::new(KEYS_WIDTH * 0.6, kh), if lit { BLACK_KEY_HOVER } else { BLACK_KEY });
+            } else {
+                if lit { frame.fill_rectangle(Point::new(0.0, y), Size::new(KEYS_WIDTH, kh), WHITE_KEY_HOVER); }
+                if key % 12 == 0 || key % 12 == 5 {
+                    frame.fill_rectangle(Point::new(0.0, y + kh - 1.0), Size::new(KEYS_WIDTH, 1.0), BLACK_KEY);
+                }
             }
-            if key % 12 == 0 {
-                timeline::label(&mut frame, key_name(key), Point::new(KEYS_WIDTH - 18.0, y), theme::TEXT_DIM);
+            if key % 12 == 0 || lit {
+                // Black key names sit on the black key.
+                let (x, color) = if is_black(key) { (2.0, theme::BRIGHT) } else { (KEYS_WIDTH - 22.0, KEY_TEXT) };
+                timeline::label(&mut frame, key_name(key), Point::new(x, y + (kh - theme::SMALL) / 2.0 - 1.0), color);
+            }
+        }
+
+        // Velocity lane: a stem and cap for each note of this channel, as tall
+        // as its velocity. It covers the lowest rows of the roll.
+        if let Some(top) = Self::lane_top(size.height) {
+            frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, LANE), theme::HEADER);
+            frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, 1.0), theme::LINE);
+            timeline::label(&mut frame, "vel", Point::new(6.0, top + 4.0), theme::TEXT_DIM);
+            for (index, note) in notes(app).iter().enumerate() {
+                let x = self.note_rect(note).x;
+                if x + 7.0 < KEYS_WIDTH || x > size.width { continue; }
+                let height = note.velocity * (LANE - 10.0);
+                let color = if roll.selected.contains(&index) { theme::BRIGHT } else { theme::mix(theme::HEADER, channel_color, 0.4 + 0.6 * note.velocity) };
+                let base = size.height - 4.0;
+                frame.fill_rectangle(Point::new(x, base - height), Size::new(2.0, height), color);
+                frame.fill_rectangle(Point::new(x, base - height - 1.0), Size::new(7.0, 3.0), color);
             }
         }
 
@@ -299,9 +390,12 @@ impl canvas::Program<AppMessage> for Roll<'_> {
         match (state.drag, self.hit(p)) {
             (Some(Drag::Notes { .. }), _) => mouse::Interaction::Grabbing,
             (Some(Drag::End), _) => mouse::Interaction::ResizingHorizontally,
+            (Some(Drag::Velocity), _) => mouse::Interaction::ResizingVertically,
+            _ if p.x >= KEYS_WIDTH && Self::lane_top(bounds.height).is_some_and(|top| p.y >= top) => mouse::Interaction::ResizingVertically,
             _ if p.y < RULER_HEIGHT && p.x >= KEYS_WIDTH && self.near_end(p.x) => mouse::Interaction::ResizingHorizontally,
             (_, Some((_, true))) => mouse::Interaction::ResizingHorizontally,
             (_, Some(_)) => mouse::Interaction::Grab,
+            (None, None) if self.ghost_at(p).is_some() => mouse::Interaction::Pointer,
             _ if p.x >= KEYS_WIDTH && p.y >= RULER_HEIGHT => mouse::Interaction::Crosshair,
             _ => mouse::Interaction::default(),
         }

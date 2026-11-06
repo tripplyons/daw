@@ -43,9 +43,46 @@ pub const COMPACT_WIDTH: f32 = 1000.0;
 const UNDO_LIMIT: usize = 200;
 const LAST_TOUCHED: usize = 16;
 
+/// A status message over the workspace. Errors stay until dismissed;
+/// other messages fade after a few seconds.
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub text: String,
+    pub error: bool,
+    pub action: Option<(&'static str, Message)>,
+    at: Instant,
+}
+
+impl Toast {
+    const SHOWN: Duration = Duration::from_secs(4);
+    /// Longer, so there is time to use the button.
+    const SHOWN_WITH_ACTION: Duration = Duration::from_secs(8);
+    const FADE: Duration = Duration::from_millis(400);
+
+    fn new(text: &str, action: Option<(&'static str, Message)>) -> Self {
+        // Status text is plain sentences; failures use one of these words.
+        let lower = text.to_lowercase();
+        let error = ["fail", "could not", "cannot", "error", "no audio output", "config:"].iter().any(|w| lower.contains(w));
+        Toast { text: text.to_string(), error, action, at: Instant::now() }
+    }
+
+    /// Opacity now: 1 while shown, falling to 0 over the fade. Errors stay
+    /// until dismissed or replaced.
+    pub fn opacity(&self) -> f32 {
+        if self.error { return 1.0; }
+        let shown = if self.action.is_some() { Self::SHOWN_WITH_ACTION } else { Self::SHOWN };
+        let left = shown.saturating_sub(self.at.elapsed());
+        (left.as_secs_f32() / Self::FADE.as_secs_f32()).min(1.0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
+    DismissToast,
+    /// Bring a panel into view, replacing the focused tile's panel if no tile shows it.
+    ShowPanel(Panel),
+    Palette(crate::palette::Message),
     CancelAudio,
     RetryAudio,
     CancelRender,
@@ -142,6 +179,10 @@ pub struct App {
     pub record: bool,
     pub split_axis: Axis,
     pub status: String,
+    /// The last status message, shown over the workspace until it expires.
+    pub toast: Option<Toast>,
+    /// The command palette, while open.
+    pub palette: Option<crate::palette::Palette>,
     pub window: Size,
     pub cursor: Point,
     dragging_split: Option<Vec<bool>>,
@@ -207,6 +248,8 @@ impl App {
             record: false,
             split_axis: Axis::Horizontal,
             status: String::new(),
+            toast: None,
+            palette: None,
             window: Size::new(1400.0, 860.0),
             cursor: Point::ORIGIN,
             dragging_split: None,
@@ -241,7 +284,7 @@ impl App {
         };
         app.load_config();
         if let Some(error) = &app.session.audio_error {
-            app.status = format!("no audio output: {error}");
+            app.set_status(format!("no audio output: {error}"));
         }
         app.refresh();
         if let Some(path) = STARTUP_PROJECT.get().cloned().flatten() {
@@ -306,6 +349,11 @@ impl App {
         Rect { x: 0.0, y: top, width: self.window.width, height: (self.window.height - top).max(1.0) }
     }
 
+    /// Whether a tile showing `panel` is on screen.
+    pub fn panel_visible(&self, panel: Panel) -> bool {
+        self.tile_rects().iter().any(|(tile, _)| self.layout().panel(*tile) == panel)
+    }
+
     /// Whether the window is too narrow for side-by-side tiles.
     pub fn compact(&self) -> bool {
         self.window.width < COMPACT_WIDTH && self.layout().leaves().len() > 1
@@ -334,22 +382,23 @@ impl App {
         self.config_error = (!problems.is_empty()).then(|| problems.join("; "));
         if let Some(error) = &self.config_error {
             log::warn!("config: {error}");
-            self.status = format!("config: {error}");
+            self.set_status(format!("config: {error}"));
         }
     }
 
     /// Write the key bindings to the config file and report `status`.
     pub fn save_config(&mut self, status: String) {
         self.config.keys = self.keymap.to_config();
+        crate::native_menu::refresh(self);
         match config::save(&self.config_path, &self.config) {
             Ok(()) => {
                 self.config_error = None;
-                self.status = status;
+                self.set_status(status);
             }
             Err(error) => {
                 let message = format!("could not save {}: {error}", self.config_path.display());
                 self.config_error = Some(message.clone());
-                self.status = message;
+                self.set_status(message);
             }
         }
     }
@@ -434,13 +483,22 @@ impl App {
 
     pub fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
+        self.toast = Some(Toast::new(&self.status, None));
+    }
+
+    /// Report a result with a button that follows it up, such as showing
+    /// the panel where an added plugin went.
+    pub fn set_status_with(&mut self, status: impl Into<String>, label: &'static str, action: Message) {
+        self.status = status.into();
+        self.toast = Some(Toast::new(&self.status, Some((label, action))));
     }
 
     /// Make sure a panel is visible, replacing the focused tile if needed.
     pub fn show_panel(&mut self, panel: Panel) {
+        let compact = self.compact();
         let layout = self.layout_mut();
         if let Some(tile) = layout.find_panel(panel) {
-            if layout.zoomed && layout.focused != tile {
+            if (layout.zoomed || compact) && layout.focused != tile {
                 layout.focused = tile;
             }
             return;
@@ -460,6 +518,18 @@ impl App {
         if self.settings.capturing.is_some() {
             settings::key(self, &event);
             return Task::none();
+        }
+        if self.palette.is_some()
+            && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(key), .. } = &event
+        {
+            use keyboard::key::Named;
+            let message = match key {
+                Named::Escape => Some(crate::palette::Message::Close),
+                Named::ArrowDown => Some(crate::palette::Message::Move(1)),
+                Named::ArrowUp => Some(crate::palette::Message::Move(-1)),
+                _ => None,
+            };
+            if let Some(message) = message { return crate::palette::update(self, message); }
         }
         if self.settings.open && self.menu.is_none()
             && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. } = &event
@@ -499,7 +569,14 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::DismissToast => self.toast = None,
+            Message::Palette(message) => return crate::palette::update(self, message),
+            Message::ShowPanel(panel) => {
+                self.toast = None;
+                self.show_panel(panel);
+            }
             Message::Tick => {
+                if self.toast.as_ref().is_some_and(|t| t.opacity() <= 0.0) { self.toast = None; }
                 self.tick();
                 self.poll_renders();
                 match self.session.poll_preparation(&mut self.project, self.mode) {
@@ -521,7 +598,10 @@ impl App {
             Message::PluginNote(event) => { self.computer_key(&event, false); }
             Message::WindowUnfocused => self.release_computer_keys(),
             Message::Key(event, typing) => return self.key_event(event, typing, true),
-            Message::WindowResized(size) => self.window = size,
+            Message::WindowResized(size) => {
+                self.window = size;
+                crate::native_menu::refresh(self);
+            }
             Message::MouseMoved(point) => {
                 self.cursor = point;
                 browser::moved(self, point);
@@ -873,6 +953,7 @@ impl App {
                 }
             }
             // Settings opens over the workspace and leaves the tiles alone.
+            Action::Palette => return crate::palette::open(self),
             Action::Settings => {
                 self.settings.open = !self.settings.open;
                 self.settings.capturing = None;
@@ -917,21 +998,31 @@ impl App {
             Action::Undo => {
                 self.finish_edit();
                 self.finish_plugin_edits();
-                if let Some(previous) = self.undo.pop() {
-                    let current = self.snapshot(None);
-                    self.redo.push(current);
-                    self.restore(previous);
+                match self.undo.pop() {
+                    Some(previous) => {
+                        let current = self.snapshot(None);
+                        let change = history::describe(&previous.project, &current.project);
+                        self.redo.push(current);
+                        self.set_status(change.map_or("undo".to_string(), |c| format!("undo: {c}")));
+                        self.restore(previous);
+                    }
+                    None => self.set_status("nothing to undo"),
                 }
             }
             Action::Redo => {
                 self.finish_edit();
                 self.finish_plugin_edits();
-                if let Some(next) = self.redo.pop() {
-                    let current = self.snapshot(None);
-                    self.undo.push(current);
-                    let redo = std::mem::take(&mut self.redo);
-                    self.restore(next);
-                    self.redo = redo;
+                match self.redo.pop() {
+                    Some(next) => {
+                        let current = self.snapshot(None);
+                        let change = history::describe(&current.project, &next.project);
+                        self.undo.push(current);
+                        let redo = std::mem::take(&mut self.redo);
+                        self.set_status(change.map_or("redo".to_string(), |c| format!("redo: {c}")));
+                        self.restore(next);
+                        self.redo = redo;
+                    }
+                    None => self.set_status("nothing to redo"),
                 }
             }
             Action::New => return self.guard(Pending::New),
@@ -986,7 +1077,8 @@ impl App {
         let close = window::close_requests().map(|_| Message::CloseRequested);
         let plugin_keys = Subscription::run(plugin_keys);
         let opened = Subscription::run(opened_files);
-        let mut subscriptions = vec![events, presses, tick, close, plugin_keys, opened];
+        let menu = Subscription::run(crate::native_menu::clicks);
+        let mut subscriptions = vec![events, presses, tick, close, plugin_keys, opened, menu];
         if self.screenshot.is_some() {
             let delay = std::env::var("DAW_SCREENSHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(8);
             subscriptions.push(iced::time::every(Duration::from_secs(delay)).map(|_| Message::Screenshot));

@@ -190,8 +190,27 @@ fn entries(item: Item) -> Vec<(&'static str, AppMessage)> {
     }
 }
 
-fn entry<'a>(label: &str, message: AppMessage, selected: bool) -> Element<'a, AppMessage> {
-    button(text(label.to_string()).size(theme::SMALL))
+/// The key that does what an entry does, so menus teach shortcuts. Actions
+/// follow the keymap; panel keys are fixed.
+fn shortcut(app: &App, message: &AppMessage) -> Option<String> {
+    let action = match message {
+        AppMessage::Action(action) | AppMessage::TileAction(_, action) => *action,
+        AppMessage::Playlist(playlist::Message::Duplicate) => return Some("cmd+d".into()),
+        AppMessage::Playlist(playlist::Message::MakeUnique) => return Some("cmd+u".into()),
+        AppMessage::Playlist(playlist::Message::Consolidate) => return Some("cmd+shift+c".into()),
+        AppMessage::Playlist(playlist::Message::MuteSelection) => return Some("m".into()),
+        AppMessage::Playlist(playlist::Message::DeleteSelection | playlist::Message::DeleteTrack)
+        | AppMessage::Rack(channel_rack::Message::Remove)
+        | AppMessage::Mixer(mixer::Message::DeleteInsert) => Action::Delete,
+        _ => return None,
+    };
+    let binding = crate::keys::BINDINGS.iter().find(|b| b.action == action)?;
+    app.keymap.chords(binding.id).first().map(ToString::to_string)
+}
+
+fn entry<'a>(label: &str, shortcut: Option<String>, message: AppMessage, selected: bool) -> Element<'a, AppMessage> {
+    let keys = text(shortcut.unwrap_or_default()).size(theme::SMALL).color(theme::TEXT_DIM);
+    button(iced::widget::row![text(label.to_string()).size(theme::SMALL).width(Length::Fill), keys].spacing(12))
         .on_press(message)
         .style(move |t, status| if selected { theme::toggle(true)(t, status) } else { theme::menu_entry(t, status) })
         .padding([3, 8])
@@ -220,7 +239,8 @@ pub fn view<'a>(app: &'a App, menu: &'a Menu) -> Element<'a, AppMessage> {
                 let picker = panels::labeled("panel", panels::pick(Panel::ALL.to_vec(), Some(panel), move |p| AppMessage::SetPanel(tile, p)));
                 let mut body = iced::widget::column![panels::label(format!("{panel} tools")), picker, tools, panels::label("tile")].spacing(8).padding(8);
                 for (label, message) in entries(Item::Tile(tile)) {
-                    body = body.push(entry(label, Message::Choose(Box::new(message)).into(), false));
+                    let keys = shortcut(app, &message);
+                    body = body.push(entry(label, keys, Message::Choose(Box::new(message)).into(), false));
                 }
                 return popup(app, menu, body.into(), width, 400.0);
             }
@@ -229,7 +249,7 @@ pub fn view<'a>(app: &'a App, menu: &'a Menu) -> Element<'a, AppMessage> {
             }
             let mut column = Column::new();
             let rename = name(&app.project, menu.item).is_some();
-            if rename { column = column.push(entry("rename", Message::Rename.into(), menu.selected == Some(0))); }
+            if rename { column = column.push(entry("rename", None, Message::Rename.into(), menu.selected == Some(0))); }
             let entries = entries(menu.item);
             let rows = entries.len() + usize::from(rename);
             for (index, (label, message)) in entries.into_iter().enumerate() {
@@ -237,7 +257,8 @@ pub fn view<'a>(app: &'a App, menu: &'a Menu) -> Element<'a, AppMessage> {
                     AppMessage::Action(action) | AppMessage::TileAction(_, action) => panels::action_hint(app, *action),
                     _ => panels::hint(&message).unwrap_or(label).into(),
                 };
-                column = column.push(panels::help(entry(label, Message::Choose(Box::new(message)).into(), menu.selected == Some(index + usize::from(rename))), hint));
+                let keys = shortcut(app, &message);
+                column = column.push(panels::help(entry(label, keys, Message::Choose(Box::new(message)).into(), menu.selected == Some(index + usize::from(rename))), hint));
             }
             if let Item::Channel(id) = menu.item {
                 column = column.push(swatches(app, id));

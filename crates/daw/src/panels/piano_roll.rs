@@ -39,6 +39,8 @@ pub struct State {
     drag_changed: bool,
     resizing: bool,
     clipboard: Vec<Note>,
+    /// Draw other channels' notes in the pattern behind this channel's.
+    pub ghosts: bool,
 }
 
 impl Default for State {
@@ -53,6 +55,7 @@ impl Default for State {
             drag_changed: false,
             resizing: false,
             clipboard: Vec::new(),
+            ghosts: true,
         }
     }
 }
@@ -78,8 +81,13 @@ pub enum Message {
     BoxSelect { from: (f64, i32), to: (f64, i32), additive: bool },
     Preview(u8),
     Velocity(usize, f32),
+    /// Set the velocity of this channel's notes that sound at `tick`; a
+    /// drag across the velocity lane is one undo step.
+    PaintVelocity { tick: f64, value: f32 },
     Grid(Grid),
     Channel(ChannelId),
+    /// Show or hide other channels' notes.
+    Ghosts,
     /// Drag of the end handle: move the pattern end to this tick, rounded to a bar.
     PatternEnd(f64),
     /// Click in the ruler: start pattern playback here.
@@ -277,11 +285,24 @@ pub fn update(app: &mut App, message: Message) {
             }
             app.edited();
         }
+        Message::PaintVelocity { tick, value } => {
+            let hit = |n: &Note| (n.start as f64) <= tick && tick < n.end() as f64;
+            if !notes(app).iter().any(|n| hit(n) && n.velocity != value) { return; }
+            app.begin_edit();
+            if let Some(notes) = notes_mut(app) {
+                for note in notes.iter_mut().filter(|n| hit(n)) {
+                    note.velocity = value;
+                }
+            }
+            app.set_status(format!("velocity {:.0}%", value * 100.0));
+            app.edited();
+        }
         Message::Grid(grid) => app.project.grid = grid,
         Message::Channel(id) => {
             super::channel_rack::select(app, id);
             app.piano_roll.selected.clear();
         }
+        Message::Ghosts => app.piano_roll.ghosts = !app.piano_roll.ghosts,
     }
 }
 
@@ -399,9 +420,18 @@ pub fn channel_picker(app: &App, width: f32) -> Element<'_, AppMessage> {
     super::help(picker, "Channel to edit")
 }
 
+/// The toggle for other channels' notes.
+pub fn ghosts_toggle(app: &App) -> Element<'_, AppMessage> {
+    super::help(
+        super::toggle("ghosts", app.piano_roll.ghosts, Message::Ghosts.into()),
+        "Show other channels' notes in this pattern. Click one to edit its channel.",
+    )
+}
+
 pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     row![
         channel_picker(app, 150.0),
+        ghosts_toggle(app),
         super::labeled("snap", pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into())),
     ]
     .spacing(4)

@@ -5,7 +5,7 @@ mod analyze;
 mod batch;
 mod edit;
 mod export;
-mod parse;
+pub(crate) mod parse;
 mod plugins;
 mod show;
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! Dragging a plugin onto the channel rack, a channel, or a mixer insert
 //! chooses where it goes.
 
+use daw_model::layout::Panel;
 use daw_model::{ChannelId, InsertId, PluginFormat, Source};
 use daw_plugins::{PluginInfo, PluginKind};
 use iced::widget::{column, container, mouse_area, row, text, text_input};
@@ -193,7 +194,16 @@ pub fn add(app: &mut App, info: &PluginInfo, place: Place) -> Task<AppMessage> {
         app.set_status(format!("{} failed to load: {error}", info.plugin.name));
         return Task::none();
     }
-    app.set_status(format!("added {} to {}", info.plugin.name, place_label(app, place)));
+    let status = format!("added {} to {}", info.plugin.name, place_label(app, place));
+    let panel = match place {
+        Place::Channel(_) => Panel::ChannelRack,
+        Place::Effect(_) => Panel::Mixer,
+    };
+    if app.panel_visible(panel) {
+        app.set_status(status);
+    } else {
+        app.set_status_with(status, "show", AppMessage::ShowPanel(panel));
+    }
     Task::done(AppMessage::OpenPlugin(instance))
 }
 
@@ -300,5 +310,13 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         toggle("fx", state.filter == Filter::Effects, Message::Filter(Filter::Effects).into()),
         toggle("failed", state.filter == Filter::Failed, Message::Filter(Filter::Failed).into()),
     ].spacing(2).wrap();
-    column![container(search).padding(4), container(filters).padding([0, 4]), body].spacing(4).into()
+    // Name where a click puts effects, since the mixer may not be on screen.
+    let target = (state.filter != Filter::Instruments && state.filter != Filter::Failed).then(|| {
+        let insert = app.project.insert_label(app.selected_insert);
+        super::help(
+            container(label(format!("effects go to: {insert}"))).padding([0, 6]),
+            "Clicking an effect adds it to the selected mixer insert. Select another insert in the mixer, or drag the effect onto a channel or insert.",
+        )
+    });
+    column![container(search).padding(4), container(filters).padding([0, 4])].push(target).push(body).spacing(4).into()
 }

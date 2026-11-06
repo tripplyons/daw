@@ -625,7 +625,9 @@ fn paste(app: &mut App, source: Vec<Clip>, offset: i64) {
     app.edited();
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
+/// Every pattern, automation clip, and audio file a click can place, with
+/// the current brush.
+fn brush_choices(app: &App) -> (Vec<BrushChoice>, Option<BrushChoice>) {
     let mut choices: Vec<BrushChoice> = app
         .project
         .patterns
@@ -641,6 +643,23 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     }));
     let brush = app.playlist.brush.unwrap_or(ClipSource::Pattern(app.selected_pattern));
     let current = choices.iter().find(|c| c.source == brush).cloned();
+    (choices, current)
+}
+
+/// The brush picker for the tile header, so what a click places is in sight.
+pub fn brush_picker(app: &App, width: f32) -> Element<'_, AppMessage> {
+    let (choices, current) = brush_choices(app);
+    let picker = iced::widget::pick_list(choices, current, |c: BrushChoice| Message::Brush(c).into())
+        .text_size(theme::SMALL)
+        .width(width)
+        .padding([2, 6])
+        .style(theme::pick)
+        .menu_style(theme::menu);
+    super::help(super::labeled("brush", picker.into()), "What a click on an empty part of a track places")
+}
+
+pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
+    let (choices, current) = brush_choices(app);
     let delete: Element<'_, AppMessage> = match app.playlist.selected_track {
         Some(_) => super::tool("delete track", Message::DeleteTrack.into()),
         None => label(""),

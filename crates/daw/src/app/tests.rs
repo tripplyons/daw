@@ -2010,3 +2010,71 @@ fn dragged_plugins_land_on_the_zone_under_the_cursor() {
     let _ = app.update(browser::Message::Enter(DropZone::Insert(master)).into());
     assert_eq!(browser::drop_target(&app), None);
 }
+
+#[test]
+fn undo_and_redo_say_what_they_changed() {
+    let mut app = app();
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.status, "nothing to undo");
+    let _ = app.update(channel_rack::Message::AddSynth.into());
+    let name = app.project.channels.last().unwrap().name.clone();
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.status, format!("undo: added channel {name}"));
+    let _ = app.update(Message::Action(Action::Redo));
+    assert_eq!(app.status, format!("redo: added channel {name}"));
+    let id = app.project.channels[0].id;
+    let _ = app.update(channel_rack::Message::Color(id, 0x123456).into());
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.status, format!("undo: changed channel {}", app.project.channels[0].name));
+}
+
+#[test]
+fn status_messages_show_as_toasts_and_errors_stay() {
+    let mut app = app();
+    app.set_status("saved");
+    let toast = app.toast.clone().unwrap();
+    assert!(!toast.error);
+    assert_eq!(toast.opacity(), 1.0);
+    app.set_status("could not save project.dawproj: denied");
+    assert!(app.toast.as_ref().unwrap().error, "failures stay until dismissed");
+    let _ = app.update(Message::DismissToast);
+    assert!(app.toast.is_none());
+    assert_eq!(app.status, "could not save project.dawproj: denied", "the status text itself is kept");
+}
+
+#[test]
+fn command_palette_finds_and_runs_commands() {
+    let mut app = app();
+    *app.layout_mut() = daw_model::layout::Layout::single(Panel::Playlist);
+    let _ = app.update(Message::Action(Action::Palette));
+    assert!(app.palette.is_some());
+    let first = crate::palette::matches(&app, "");
+    assert_eq!(first[0].label, "new project", "everyday commands come first");
+    let _ = app.update(crate::palette::Message::Query("show mix".into()).into());
+    let _ = app.update(crate::palette::Message::Submit.into());
+    assert!(app.palette.is_none());
+    assert!(app.panel_visible(Panel::Mixer));
+    let _ = app.update(Message::Action(Action::Palette));
+    let _ = app.update(press(Code::Escape, Key::Named(keyboard::key::Named::Escape), Modifiers::empty()));
+    assert!(app.palette.is_none(), "Escape closes the palette instead of stopping playback");
+}
+
+#[test]
+fn painting_velocities_is_one_undo_step() {
+    let mut app = app();
+    for start in [0, 480] {
+        let _ = app.update(roll::Message::Add { start, key: 60 }.into());
+        let _ = app.update(roll::Message::End.into());
+    }
+    let velocities = |app: &App| -> Vec<f32> {
+        app.project.pattern(app.selected_pattern).unwrap().notes(app.selected_channel.unwrap()).iter().map(|n| n.velocity).collect()
+    };
+    let before = velocities(&app);
+    let _ = app.update(roll::Message::PaintVelocity { tick: 10.0, value: 0.25 }.into());
+    let _ = app.update(roll::Message::PaintVelocity { tick: 490.0, value: 0.5 }.into());
+    let _ = app.update(Message::EndEdit);
+    assert_eq!(velocities(&app), vec![0.25, 0.5]);
+    assert_eq!(app.status, "velocity 50%");
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(velocities(&app), before, "one undo restores the whole stroke");
+}

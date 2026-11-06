@@ -32,6 +32,14 @@ The transport separates playback, pattern selection, recording, and file actions
 
 Panel headers keep common actions visible. "More", or a right-click on the header, opens the full toolset with the tile's focus, split, and close actions. Double-click a header to fill the window with that tile; "restore" brings the other tiles back. In a window narrower than 1000 points, one tile shows at a time and a row of tabs switches between them. Hover a control for its purpose and shortcuts. Settings has a saved UI scale from 75% to 200%.
 
+Messages such as "saved" or "undo: changed pattern chords" appear for a few seconds in the bottom-right corner. Errors stay until you close them. When the browser adds a plugin to a panel that is not on screen, the message has a "show" button that opens that panel. Above the plugin list, the browser names the mixer insert that receives new effects.
+
+On macOS, the menu bar has File, Edit, View, Transport, and Window menus that list every command with its shortcut.
+
+The playlist header has a brush picker. It chooses the pattern, automation clip, or audio clip that a click on an empty part of a track places.
+
+In the piano roll, hover the keyboard to see each key's name, and click a key to hear it. Notes from the pattern's other channels show as dim ghost notes. Hover one to see its channel, and click it to edit that channel. The "ghosts" button hides them. When the roll is at least 220 points tall, a velocity lane runs along its bottom. Drag across the lane to set the velocity of the notes at each point. One undo reverts the whole drag.
+
 ## Build with Bazel
 
 The repo also builds with [Bazel](https://bazel.build) through [rules_rust](https://github.com/bazelbuild/rules_rust). `.bazelversion` pins Bazel 9.3.1; install it with [Bazelisk](https://github.com/bazelbuild/bazelisk) or Homebrew (`brew install bazel`).
@@ -163,6 +171,7 @@ Cmd is the primary shortcut modifier on macOS. On Windows and Linux, Ctrl replac
 
 | Keys | Action |
 | --- | --- |
+| Cmd+K | Command palette: search every action and panel, use the arrow keys to pick one, then press Enter |
 | Cmd+arrows | Move focus between tiles |
 | Cmd+Shift+arrows | Move the focused tile |
 | Cmd+Shift+H/J/K/L | Resize the focused tile |
@@ -173,7 +182,7 @@ Cmd is the primary shortcut modifier on macOS. On Windows and Linux, Ctrl replac
 | Cmd+F | Focus mode (one tile fills the window) |
 | Cmd+W | Close the focused tile |
 | Cmd+1 to Cmd+9 | Switch workspace |
-| Space | Play or pause |
+| Space | Play or stop |
 | Escape | Stop and rewind |
 | Tab | Switch between pattern and song mode |
 | Cmd+Shift+G | Bind mode: the next control you touch gets an automation clip |
@@ -186,7 +195,7 @@ Cmd is the primary shortcut modifier on macOS. On Windows and Linux, Ctrl replac
 | M in playlist | Mute or unmute selected clips |
 | Delete | Delete the selection in the focused panel |
 | Shift+F10 | Open the selected item's menu |
-| Cmd+Z / Cmd+Shift+Z | Undo / redo |
+| Cmd+Z / Cmd+Shift+Z | Undo / redo; the message names what changed |
 | Cmd+N / Cmd+O / Cmd+S / Cmd+Shift+S | New / open / save / save as |
 | Cmd+E | Export WAV |
 | Cmd+I | Import a WAV file as an audio clip |

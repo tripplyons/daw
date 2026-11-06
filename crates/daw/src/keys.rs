@@ -41,6 +41,7 @@ pub enum Action {
     Pack,
     Recover,
     Settings,
+    Palette,
     Delete,
 }
 
@@ -109,6 +110,7 @@ pub const BINDINGS: &[Binding] = &[
     bind("export", "export wav", "file", Action::Export, &["cmd+e"]),
     bind("import-audio", "import audio", "file", Action::ImportAudio, &["cmd+i"]),
     bind("settings", "settings", "file", Action::Settings, &["cmd+comma"]),
+    bind("palette", "command palette", "edit", Action::Palette, &["cmd+k"]),
 ];
 
 const KEY_NAMES: &[(Code, &str)] = &[
@@ -156,6 +158,12 @@ const MAC_KEY_CODES: &[(u16, Code)] = &[
     (0x7A, Code::F1), (0x78, Code::F2), (0x63, Code::F3), (0x76, Code::F4), (0x60, Code::F5), (0x61, Code::F6),
     (0x62, Code::F7), (0x64, Code::F8), (0x65, Code::F9), (0x6D, Code::F10), (0x67, Code::F11), (0x6F, Code::F12),
 ];
+
+/// The physical key for a macOS virtual key code.
+#[cfg(target_os = "macos")]
+pub fn mac_code(key_code: u16) -> Option<Code> {
+    MAC_KEY_CODES.iter().find(|(k, _)| *k == key_code).map(|(_, code)| *code)
+}
 
 /// A key press from a plugin editor window as a key event for the app. Only
 /// the physical key is known, so panel keys that read the typed character

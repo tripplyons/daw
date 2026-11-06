@@ -32,10 +32,38 @@ impl App {
         if self.showing_jobs() { base = base.push(self.jobs()); }
         let base = base.push(tiles);
         let mut layers = stack![base];
+        if let Some(toast) = self.toast() { layers = layers.push(toast); }
         if let Some(label) = browser::drag_label(self) { layers = layers.push(label); }
         if self.settings.open { layers = layers.push(self.settings_modal()); }
+        if let Some(palette) = &self.palette { layers = layers.push(crate::palette::view(self, palette)); }
         if let Some(open) = &self.menu { layers = layers.push(menu::view(self, open)); }
         layers.into()
+    }
+
+    /// The last status message at the bottom right, fading out unless it is an error.
+    fn toast(&self) -> Option<Element<'_, Message>> {
+        let toast = self.toast.as_ref()?;
+        let alpha = toast.opacity();
+        let fade = move |color: iced::Color| iced::Color { a: color.a * alpha, ..color };
+        let mut body = row![text(toast.text.clone()).size(theme::SMALL).color(fade(if toast.error { theme::BRIGHT } else { theme::TEXT }))]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        if let Some((label, action)) = &toast.action {
+            body = body.push(panels::tool(label, action.clone()));
+        }
+        body = body.push(panels::help(panels::tool("x", Message::DismissToast), "Dismiss"));
+        let error = toast.error;
+        let card = container(body).max_width(460).padding([6, 10]).style(move |t| {
+            let mut style = theme::popup(t);
+            style.background = style.background.map(|b| match b {
+                iced::Background::Color(c) => iced::Background::Color(fade(c)),
+                other => other,
+            });
+            style.border.color = fade(if error { theme::RECORD } else { style.border.color });
+            style.border.width = style.border.width.max(1.0);
+            style
+        });
+        Some(container(card).align_right(Length::Fill).align_bottom(Length::Fill).padding(12).into())
     }
 
     /// One tab per tile, for narrow windows that show one tile at a time.
@@ -207,9 +235,10 @@ impl App {
             Panel::Browser if width >= 52.0 => tools = tools.push(panels::tool("rescan", Message::Rescan)),
             Panel::Playlist => {
                 if width >= 30.0 { tools = tools.push(panels::help(panels::tool("fit", playlist::Message::FitSong.into()), "Zoom to show the whole song")); }
-                if width >= 92.0 { tools = tools.push(panels::action(self, "+ audio", Action::ImportAudio, None)); }
-                if width >= 150.0 { tools = tools.push(panels::tool("+ track", playlist::Message::AddTrack.into())); }
-                if width >= 220.0 { tools = tools.push(panels::toggle("stretch", self.playlist.stretch_mode, playlist::Message::StretchMode.into())); }
+                if width >= 170.0 { tools = tools.push(playlist::brush_picker(self, 100.0)); }
+                if width >= 232.0 { tools = tools.push(panels::action(self, "+ audio", Action::ImportAudio, None)); }
+                if width >= 290.0 { tools = tools.push(panels::tool("+ track", playlist::Message::AddTrack.into())); }
+                if width >= 360.0 { tools = tools.push(panels::toggle("stretch", self.playlist.stretch_mode, playlist::Message::StretchMode.into())); }
             }
             Panel::ChannelRack => {
                 if width >= 64.0 { tools = tools.push(panels::tool("+ synth", channel_rack::Message::AddSynth.into())); }
@@ -221,6 +250,7 @@ impl App {
                     panels::label("snap"),
                     panels::pick(daw_model::time::Grid::CHOICES.to_vec(), Some(self.project.grid), |g| piano_roll::Message::Grid(g).into()),
                 ].spacing(4).align_y(iced::Alignment::Center)); }
+                if width >= 250.0 { tools = tools.push(piano_roll::ghosts_toggle(self)); }
             }
             Panel::Mixer if width >= 70.0 => tools = tools.push(panels::tool("+ insert", mixer::Message::AddInsert.into())),
             Panel::Automation if width >= 132.0 => {
@@ -290,9 +320,10 @@ impl App {
             divider(), panels::action(self, "bind automation", Action::ToggleBind, Some(self.bind_mode)),
             divider(), panels::action(self, &format!("keyboard C{}", i16::from(self.computer_keyboard.base) / 12 - 1), Action::ToggleComputerKeyboard, Some(self.computer_keyboard.enabled)),
         ].spacing(4).align_y(iced::Alignment::Center);
+        // Lasting states only; results and errors show as toasts.
         let scan = match self.scan {
             Some(Progress { done, total }) if total > 0 => format!("scanning plugins {done}/{total}"),
-            Some(_) => "scanning plugins".into(), None => self.status.clone(),
+            Some(_) => "scanning plugins".into(), None => String::new(),
         };
         let status = container(panels::help(
             text(scan.clone()).size(theme::SMALL).color(theme::TEXT_DIM).wrapping(iced::widget::text::Wrapping::None), scan,
