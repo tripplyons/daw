@@ -105,6 +105,8 @@ impl State {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Zoom and scroll so the whole song fits the playlist.
+    FitSong,
     SelectClip(ClipId),
     Duplicate,
     DeleteSelection,
@@ -531,6 +533,13 @@ pub fn update(app: &mut App, message: Message) {
             app.playlist.selected_track = Some(track);
             app.playlist.selected.clear();
         }
+        Message::FitSong => {
+            let width = app.panel_width(daw_model::layout::Panel::Playlist).unwrap_or(app.window.width);
+            // Leave a bar of room after the end for adding to the song.
+            let bar = app.project.signature.ticks_per_bar();
+            let length = app.project.song_length().max(bar) + bar;
+            app.playlist.time = TimeView::fit(length as f64, width - arrangement::HEADER_WIDTH);
+        }
         Message::AddTrack => {
             app.checkpoint();
             let index = app.playlist.selected_track.map(|t| t + 1).unwrap_or(app.project.playlist.tracks.len());
@@ -637,6 +646,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
         None => label(""),
     };
     row![
+        super::help(tool("fit", Message::FitSong.into()), "Zoom to show the whole song"),
         tool("unique", Message::MakeUnique.into()),
         tool("consolidate", Message::Consolidate.into()),
         toggle("stretch", app.playlist.stretch_mode, Message::StretchMode.into()),
@@ -654,6 +664,15 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 
 pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
     let canvas = Canvas::new(Arrangement { app, tempo: app.project.tempo_map() }).width(Length::Fill).height(Length::Fill);
+    if app.project.playlist.clips.is_empty() {
+        let brush = app.playlist.brush.unwrap_or(ClipSource::Pattern(app.selected_pattern));
+        let lines = vec![
+            format!("Click a track to place {}.", source_name(app, brush)),
+            "Drop WAV files on the window to import audio.".to_string(),
+        ];
+        let hint = super::empty_state("empty song", &lines, vec![super::action(app, "+ audio", Action::ImportAudio, None)]);
+        return iced::widget::stack![canvas, hint].into();
+    }
     let selected = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_)));
     let Some(clip) = selected else { return canvas.into() };
     let semitones = app.playlist.pitch_edit.as_ref().filter(|(ids, _)| ids.contains(&clip.id))

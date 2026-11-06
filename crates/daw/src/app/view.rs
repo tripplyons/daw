@@ -21,14 +21,54 @@ const HANDLE: f32 = 8.0;
 impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let layout = self.layout();
-        let tiles = if layout.zoomed { self.tile(layout.focused) } else { stack![self.node(&layout.root), self.tile_overlay()].into() };
+        let tiles = if self.compact() {
+            column![self.tile_tabs(), self.tile(layout.focused)].into()
+        } else if layout.zoomed {
+            self.tile(layout.focused)
+        } else {
+            stack![self.node(&layout.root), self.tile_overlay()].into()
+        };
         let mut base = column![self.transport()];
         if self.showing_jobs() { base = base.push(self.jobs()); }
         let base = base.push(tiles);
-        match &self.menu {
-            Some(open) => stack![base, menu::view(self, open)].into(),
-            None => base.into(),
+        let mut layers = stack![base];
+        if let Some(label) = browser::drag_label(self) { layers = layers.push(label); }
+        if self.settings.open { layers = layers.push(self.settings_modal()); }
+        if let Some(open) = &self.menu { layers = layers.push(menu::view(self, open)); }
+        layers.into()
+    }
+
+    /// One tab per tile, for narrow windows that show one tile at a time.
+    fn tile_tabs(&self) -> Element<'_, Message> {
+        let layout = self.layout();
+        let mut tabs = row![].spacing(2).align_y(iced::Alignment::Center);
+        for tile in layout.leaves() {
+            let panel = layout.panel(tile);
+            tabs = tabs.push(panels::toggle(&panel.to_string(), tile == layout.focused, Message::FocusTile(tile)));
         }
+        container(tabs).padding([0, 4]).width(Length::Fill).height(theme::HEADER_HEIGHT).center_y(theme::HEADER_HEIGHT)
+            .clip(true).style(theme::header).into()
+    }
+
+    /// Settings over a dimmed workspace. Clicking outside or Escape closes it.
+    fn settings_modal(&self) -> Element<'_, Message> {
+        let close = Message::Action(Action::Settings);
+        let backdrop = mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fill)
+            .style(|_| container::Style { background: Some(iced::Color { a: 0.55, ..iced::Color::BLACK }.into()), ..container::Style::default() }))
+            .on_press(close.clone());
+        let title = row![
+            text("settings").size(theme::TEXT_SIZE).color(theme::BRIGHT),
+            Space::new().width(Length::Fill),
+            panels::help(panels::tool("close", close), "Close settings (Escape)"),
+        ].align_y(iced::Alignment::Center).padding([4, 8]);
+        let width = (self.window.width - 80.0).clamp(200.0, 640.0);
+        let height = (self.window.height - 120.0).max(200.0);
+        let dialog = container(column![title, settings::view(self)])
+            .width(width)
+            .max_height(height)
+            .style(theme::popup);
+        let centered = container(iced::widget::opaque(dialog)).center(Length::Fill);
+        stack![backdrop, centered].into()
     }
 
     fn jobs(&self) -> Element<'_, Message> {
@@ -106,11 +146,12 @@ impl App {
         let layout = self.layout();
         let panel = layout.panel(id);
         let focused = layout.focused == id;
-        let highlight = focused && !layout.zoomed && layout.leaves().len() > 1;
+        let compact = self.compact();
+        let highlight = focused && !layout.zoomed && !compact && layout.leaves().len() > 1;
         let header = responsive(move |size| {
             let more = panels::help(
                 panels::tool("more", menu::Message::Open(menu::Item::Tools(id)).into()),
-                format!("{panel}: {}", panels::action_hint(self, Action::PanelTools)),
+                format!("{panel} tools, split, focus, and close: {}\nDouble-click the header to focus this tile", panels::action_hint(self, Action::PanelTools)),
             );
             let mut bar = row![].spacing(4).align_y(iced::Alignment::Center);
             if size.width >= 120.0 {
@@ -121,28 +162,27 @@ impl App {
                     .style(theme::pick)
                     .menu_style(theme::menu);
                 bar = bar.push(panels::help(picker, "Change this tile's panel"));
-                let extra = if size.width >= 300.0 { 72.0 } else { 0.0 };
+                let extra = if layout.zoomed && !compact { 56.0 } else { 0.0 };
                 let available = (size.width - 170.0 - extra).max(0.0);
                 bar = bar.push(container(self.primary_tools(panel, available)).width(Length::Fill));
             } else {
                 bar = bar.push(container(text(panel.to_string()).size(theme::SMALL).wrapping(iced::widget::text::Wrapping::None))
                     .width(Length::Fill).clip(true));
             }
-            bar = bar.push(more);
-            if size.width >= 300.0 {
-                let focus = panels::tool(if layout.zoomed { "restore" } else { "focus" }, Message::TileAction(id, Action::Zoom));
-                bar = bar.push(panels::help(focus, panels::action_hint(self, Action::Zoom)));
-                bar = bar.push(panels::help(
-                    panels::tool("tile", menu::Message::Open(menu::Item::Tile(id)).into()),
-                    "Split or close this tile",
-                ));
+            // While a tile fills the window, keep the way back in sight.
+            if layout.zoomed && !compact && size.width >= 120.0 {
+                let restore = panels::tool("restore", Message::TileAction(id, Action::Zoom));
+                bar = bar.push(panels::help(restore, panels::action_hint(self, Action::Zoom)));
             }
-            container(bar).padding([0, 4]).height(theme::HEADER_HEIGHT).center_y(theme::HEADER_HEIGHT)
+            bar = bar.push(more);
+            let header = container(bar).padding([0, 4]).height(theme::HEADER_HEIGHT).center_y(theme::HEADER_HEIGHT)
                 .style(move |t| {
                     let mut style = theme::header(t);
                     if highlight { style.background = Some(theme::CONTROL.into()); }
                     style
-                }).into()
+                });
+            let header = mouse_area(header).on_right_press(menu::Message::Open(menu::Item::Tools(id)).into());
+            if compact { header.into() } else { header.on_double_click(Message::TileAction(id, Action::Zoom)).into() }
         }).height(theme::HEADER_HEIGHT);
         let body = match panel {
             Panel::Browser => browser::view(self),
@@ -166,9 +206,10 @@ impl App {
         match panel {
             Panel::Browser if width >= 52.0 => tools = tools.push(panels::tool("rescan", Message::Rescan)),
             Panel::Playlist => {
-                if width >= 62.0 { tools = tools.push(panels::action(self, "+ audio", Action::ImportAudio, None)); }
-                if width >= 120.0 { tools = tools.push(panels::tool("+ track", playlist::Message::AddTrack.into())); }
-                if width >= 190.0 { tools = tools.push(panels::toggle("stretch", self.playlist.stretch_mode, playlist::Message::StretchMode.into())); }
+                if width >= 30.0 { tools = tools.push(panels::help(panels::tool("fit", playlist::Message::FitSong.into()), "Zoom to show the whole song")); }
+                if width >= 92.0 { tools = tools.push(panels::action(self, "+ audio", Action::ImportAudio, None)); }
+                if width >= 150.0 { tools = tools.push(panels::tool("+ track", playlist::Message::AddTrack.into())); }
+                if width >= 220.0 { tools = tools.push(panels::toggle("stretch", self.playlist.stretch_mode, playlist::Message::StretchMode.into())); }
             }
             Panel::ChannelRack => {
                 if width >= 64.0 { tools = tools.push(panels::tool("+ synth", channel_rack::Message::AddSynth.into())); }
@@ -221,11 +262,11 @@ impl App {
         let position = format!("{}.{}.{:02}", (beats / beats_per_bar).floor() as u32 + 1,
             (beats % beats_per_bar).floor() as u32 + 1, ((beats.fract()) * 100.0).floor() as u32);
         let mode = match self.mode { PlayMode::Song => "song", PlayMode::Pattern(_) => "pattern" };
-        let play = panels::action(self, if self.playing { "pause" } else { "play" }, Action::PlayPause, Some(self.playing));
+        let play = panels::action_sized(self, if self.playing { "stop" } else { "play" }, Action::PlayPause, Some(self.playing), 48);
         let playback = row![
             play,
             panels::action(self, "rewind", Action::Stop, None),
-            panels::action(self, mode, Action::ToggleMode, None),
+            panels::action_sized(self, mode, Action::ToggleMode, None, 64),
             panels::help(text(position).size(theme::TEXT_SIZE).font(iced::Font::MONOSPACE).width(70), "Position: bar.beat.fraction"),
             text_input("bpm", &self.bpm_text.clone().unwrap_or_else(|| format!("{}", self.project.bpm)))
                 .id("tempo").on_submit(Message::BpmDone).on_input(Message::SetBpm).size(theme::SMALL)
@@ -239,13 +280,13 @@ impl App {
         if self.window.width >= 1000.0 { files = files.push(panels::action(self, "save", Action::Save, None)); }
         if self.window.width >= 1200.0 { files = files.push(panels::action(self, "export", Action::Export, None)); }
         files = files.push(panels::help(panels::tool("file", menu::Message::Open(menu::Item::Files).into()), "New, open, save, import, and export"))
-            .push(panels::action(self, "settings", Action::Settings, None));
+            .push(panels::action(self, "settings", Action::Settings, Some(self.settings.open)));
         let top = row![playback, divider(), pattern, Space::new().width(Length::Fill), files].spacing(8).align_y(iced::Alignment::Center);
         let recording = row![
             panels::label("record"),
-            panels::action(self, "automation", Action::ToggleRecord, Some(self.record)),
-            panels::action(self, "MIDI", Action::ToggleMidiRecord, Some(self.midi.recording)),
-            panels::action(self, "audio", Action::ToggleAudioRecord, Some(self.session.recording_armed())),
+            panels::arm(self, "automation", Action::ToggleRecord, self.record),
+            panels::arm(self, "MIDI", Action::ToggleMidiRecord, self.midi.recording),
+            panels::arm(self, "audio", Action::ToggleAudioRecord, self.session.recording_armed()),
             divider(), panels::action(self, "bind automation", Action::ToggleBind, Some(self.bind_mode)),
             divider(), panels::action(self, &format!("keyboard C{}", i16::from(self.computer_keyboard.base) / 12 - 1), Action::ToggleComputerKeyboard, Some(self.computer_keyboard.enabled)),
         ].spacing(4).align_y(iced::Alignment::Center);

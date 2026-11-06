@@ -7,6 +7,7 @@ use daw_model::{ChannelId, InsertId, STEP_TICKS, Source, SynthParams, Target};
 use iced::widget::{Space, button, column, container, mouse_area, row, slider, text};
 use iced::{Element, Length, Task};
 
+use super::browser::{self, DropZone};
 use super::{InsertChoice, label, pick, tool};
 use crate::app::{App, Message as AppMessage};
 use crate::menu;
@@ -20,6 +21,8 @@ pub enum Message {
     Select(ChannelId),
     Step(ChannelId, u64),
     Mute(ChannelId),
+    /// Set a channel's color, 0xRRGGBB.
+    Color(ChannelId, u32),
     Volume(ChannelId, f32),
     Route(ChannelId, InsertId),
     Remove,
@@ -88,6 +91,13 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             }
             app.edited();
         }
+        Message::Color(id, color) => {
+            app.checkpoint();
+            if let Some(channel) = app.project.channel_mut(id) {
+                channel.color = Some(color);
+            }
+            app.edited();
+        }
         Message::Volume(id, volume) => {
             if app.project.channel(id).is_none_or(|c| c.volume == volume) { return Task::none(); }
             app.begin_edit();
@@ -152,9 +162,9 @@ pub fn toolbar(_app: &App) -> Element<'_, AppMessage> {
     .into()
 }
 
-fn step_button<'a>(on: bool, beat_shade: bool, message: AppMessage) -> Element<'a, AppMessage> {
+fn step_button<'a>(on: bool, beat_shade: bool, lit: iced::Color, message: AppMessage) -> Element<'a, AppMessage> {
     let color = match (on, beat_shade) {
-        (true, _) => theme::FILL,
+        (true, _) => lit,
         (false, true) => theme::CONTROL_HOVER,
         (false, false) => theme::CONTROL,
     };
@@ -176,11 +186,12 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
     let Some(pattern) = app.project.pattern(app.selected_pattern) else { return label("no pattern") };
     let steps = (pattern.length / STEP_TICKS).clamp(1, MAX_STEPS);
     let inserts: Vec<InsertChoice> =
-        app.project.mixer.inserts.iter().map(|i| InsertChoice { id: i.id, name: i.name.clone() }).collect();
+        app.project.mixer.inserts.iter().map(|i| InsertChoice { id: i.id, name: app.project.insert_label(i.id) }).collect();
     let mut rows = column![].spacing(2).padding(4);
     for channel in &app.project.channels {
         let id = channel.id;
         let selected = app.selected_channel == Some(id);
+        let color = theme::rgb(app.project.channel_color(id));
         // Lit like an effect button while the plugin window is showing.
         let open = matches!(channel.source, Source::Plugin(instance) if app.session.editor_open(instance));
         let name = mouse_area(
@@ -210,20 +221,21 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                 step_row = step_row.push(Space::new().width(3));
             }
             let shade = (step / 4) % 2 == 1;
-            step_row = step_row.push(step_button(pattern.step_on(id, step), shade, Message::Step(id, step).into()));
+            step_row = step_row.push(step_button(pattern.step_on(id, step), shade, color, Message::Step(id, step).into()));
         }
         let muted = channel.mute;
-        let mute = button(Space::new().width(8).height(8))
+        let swatch = container(Space::new()).width(4).height(18).style(theme::fill(if muted { theme::mix(theme::BG, color, 0.35) } else { color }));
+        let mute = button(text("m").size(10).align_x(iced::alignment::Horizontal::Center).width(Length::Fill))
             .on_press(Message::Mute(id).into())
-            .padding(4)
-            .style(move |_, _| {
-                let color = if muted { theme::FILL_DIM } else { theme::SELECTED };
-                button::Style { background: Some(color.into()), ..button::Style::default() }
-            });
+            .padding([1, 0])
+            .width(18)
+            .style(theme::toggle(muted));
         let name = super::help(name, format!("{}\nSelect channel; right-click for rename, preview, and delete", channel.name));
         let volume = super::help(volume, format!("Channel volume: {:.0}%\nRight-click to automate", channel.volume * 100.0));
         let mute = super::help(mute, if muted { "Unmute channel" } else { "Mute channel" });
-        rows = rows.push(row![mute, name, volume, route, step_row].spacing(4).align_y(iced::Alignment::Center));
+        let line = row![swatch, mute, name, volume, route, step_row].spacing(4).align_y(iced::Alignment::Center);
+        rows = rows.push(browser::zone(app, DropZone::Channel(id), line));
     }
-    super::scroll(rows, true, true).width(Length::Fill).height(Length::Fill).into()
+    let rack = super::scroll(rows, true, true).width(Length::Fill).height(Length::Fill);
+    browser::zone(app, DropZone::Rack, rack)
 }

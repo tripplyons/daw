@@ -249,6 +249,13 @@ pub fn unit(text: &str) -> Result<f32, String> {
     bounded(text, 0.0, 1.0)
 }
 
+/// A color as `#RRGGBB` or `RRGGBB`.
+pub fn color(text: &str) -> Result<u32, String> {
+    let hex = text.strip_prefix('#').unwrap_or(text);
+    if hex.len() != 6 { return Err(format!("bad color {text:?}; use #RRGGBB")); }
+    u32::from_str_radix(hex, 16).map_err(|_| format!("bad color {text:?}; use #RRGGBB"))
+}
+
 /// Pan from -1 (left) to 1 (right).
 pub fn pan(text: &str) -> Result<f32, String> {
     bounded(text, -1.0, 1.0)

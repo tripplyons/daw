@@ -14,6 +14,8 @@ use crate::theme;
 
 #[derive(Debug, Default)]
 pub struct State {
+    /// Settings is showing over the workspace.
+    pub open: bool,
     /// Action waiting for its new key chord.
     pub capturing: Option<&'static str>,
     /// Tail length being typed, before it is checked.
@@ -174,9 +176,6 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         pick(app.midi.ports.clone(), app.midi.selected.clone(), |p| Message::MidiPort(p).into()),
         row![tool("rescan inputs", Message::MidiRescan.into())],
         row![label("autosave minutes (0 = off)"), pick(vec![0u64, 1, 2, 5, 10], Some(app.config.autosave_minutes), |m| Message::Autosave(m).into())].spacing(6),
-        row![
-            tool("recover backup", AppMessage::Action(crate::keys::Action::Recover)),
-            tool("package project", AppMessage::Action(crate::keys::Action::Pack))].spacing(6),
         label("project render settings"),
         tail_row(Tail::Export, app.project.render.export_tail_seconds),
         tail_row(Tail::Consolidation, app.project.render.consolidation_tail_seconds),

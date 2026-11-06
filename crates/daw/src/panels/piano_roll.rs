@@ -411,5 +411,14 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 }
 
 pub fn view(app: &App, focused: bool) -> Element<'_, AppMessage> {
-    Canvas::new(Roll { app, focused }).width(Length::Fill).height(Length::Fill).into()
+    let canvas = Canvas::new(Roll { app, focused }).width(Length::Fill).height(Length::Fill);
+    let empty = app.project.pattern(app.selected_pattern).is_some_and(|p| p.lanes.iter().all(|l| l.notes.is_empty()));
+    let channel = app.selected_channel.and_then(|id| app.project.channel(id));
+    let Some(channel) = channel.filter(|_| empty) else { return canvas.into() };
+    let lines = vec![
+        format!("Click to draw a note for {}. Drag its right end to change its length.", channel.name),
+        "Double-click or right-click a note to delete it.".to_string(),
+    ];
+    let hint = super::empty_state("empty pattern", &lines, vec![super::action(app, "play with keyboard", crate::keys::Action::ToggleComputerKeyboard, Some(app.computer_keyboard.enabled))]);
+    iced::widget::stack![canvas, hint].into()
 }

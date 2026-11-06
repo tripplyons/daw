@@ -218,27 +218,28 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             }
         }
 
-        // Other channels as outlines for context.
+        // Other channels, dimmed in their own colors, for context.
         if let Some(pattern) = app.project.pattern(app.selected_pattern) {
             for lane in pattern.lanes.iter().filter(|l| Some(l.channel) != app.selected_channel) {
+                let ghost = theme::mix(theme::BG, theme::rgb(app.project.channel_color(lane.channel)), 0.22);
                 for note in &lane.notes {
                     let r = self.note_rect(note);
-                    frame.fill_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 2.0), theme::GRID_STRONG);
+                    frame.fill_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 2.0), ghost);
                 }
             }
         }
 
+        let channel_color = app.selected_channel.map_or(theme::FILL, |c| theme::rgb(app.project.channel_color(c)));
         for (index, note) in notes(app).iter().enumerate() {
             let r = self.note_rect(note);
             if r.x + r.width < KEYS_WIDTH {
                 continue;
             }
-            // Brightness follows velocity.
+            // The channel's color; brightness follows velocity.
             let color = if roll.selected.contains(&index) {
                 theme::SELECTED
             } else {
-                let level = 0.25 + 0.35 * note.velocity;
-                Color::from_rgb(level, level, level)
+                theme::mix(theme::BG, channel_color, 0.35 + 0.65 * note.velocity)
             };
             frame.fill_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 1.0), color);
         }

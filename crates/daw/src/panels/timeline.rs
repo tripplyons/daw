@@ -51,6 +51,16 @@ impl TimeView {
         TimeView { scale, scroll }
     }
 
+    /// Show `ticks` from the start across `width` pixels.
+    pub fn fit(ticks: f64, width: f32) -> Self {
+        let beats = (ticks / f64::from(TICKS_PER_BEAT)).max(1.0);
+        TimeView { scale: (f64::from(width.max(1.0)) / beats) as f32, scroll: 0.0 }.clamped()
+    }
+
+    fn clamped(self) -> Self {
+        TimeView { scale: self.scale.clamp(MIN_SCALE, MAX_SCALE), ..self }
+    }
+
     pub fn scroll_by_lines(self, lines: f32) -> Self {
         let scroll = (self.scroll - f64::from(lines) * 40.0 / self.px_per_tick()).max(0.0);
         TimeView { scroll, ..self }

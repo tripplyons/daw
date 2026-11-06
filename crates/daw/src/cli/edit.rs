@@ -99,6 +99,9 @@ pub enum ChannelOp {
         /// Mixer insert id.
         #[arg(long)]
         insert: Option<u64>,
+        /// Color as #RRGGBB, shown in the channel rack, playlist, piano roll, and mixer.
+        #[arg(long, value_parser = parse::color)]
+        color: Option<u32>,
         /// Synth only: sine, saw, or square.
         #[arg(long, value_parser = parse::waveform)]
         waveform: Option<Waveform>,
@@ -386,7 +389,7 @@ fn channel(project: &mut Project, op: ChannelOp, catalog: impl FnOnce() -> Catal
             };
             Ok(project.add_channel(&name, source).0.to_string())
         }
-        ChannelOp::Set { id, name, volume, pan, mute, insert, waveform, attack, release, cutoff, sample, root } => {
+        ChannelOp::Set { id, name, volume, pan, mute, insert, color, waveform, attack, release, cutoff, sample, root } => {
             if let Some(insert) = insert {
                 find_insert(project, insert)?;
             }
@@ -402,6 +405,9 @@ fn channel(project: &mut Project, op: ChannelOp, catalog: impl FnOnce() -> Catal
             }
             if let Some(mute) = mute {
                 channel.mute = mute;
+            }
+            if let Some(color) = color {
+                channel.color = Some(color);
             }
             if let Some(insert) = insert {
                 channel.insert = InsertId(insert);

@@ -1,4 +1,5 @@
-//! Grayscale dark theme. White is reserved for selection, focus, and the playhead.
+//! Grayscale dark theme. White is reserved for selection, focus, and the playhead;
+//! red marks armed recording. Channel colors tint what belongs to a channel.
 
 use iced::widget::{button, container, pick_list, slider, text_input};
 use iced::{Background, Border, Color, Theme};
@@ -22,6 +23,18 @@ pub const BRIGHT: Color = gray(0xf4);
 pub const FILL: Color = gray(0x8a);
 pub const FILL_DIM: Color = gray(0x4a);
 pub const SELECTED: Color = gray(0xe8);
+pub const RECORD: Color = Color::from_rgb8(0xd2, 0x3f, 0x3a);
+pub const RECORD_HOVER: Color = Color::from_rgb8(0xe5, 0x55, 0x4f);
+
+/// A model color, 0xRRGGBB.
+pub fn rgb(color: u32) -> Color {
+    Color::from_rgb8((color >> 16) as u8, (color >> 8) as u8, color as u8)
+}
+
+/// `a` moved toward `b` by `t`, from 0 to 1.
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color::from_rgb(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t)
+}
 
 pub const TEXT_SIZE: f32 = 12.0;
 pub const SMALL: f32 = 11.0;
@@ -67,6 +80,20 @@ pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
             match status {
                 button::Status::Hovered | button::Status::Pressed => flat(BRIGHT, BG),
                 _ => flat(SELECTED, BG),
+            }
+        } else {
+            control(theme, status)
+        }
+    }
+}
+
+/// Record-arm button: red while armed.
+pub fn record(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        if on {
+            match status {
+                button::Status::Hovered | button::Status::Pressed => flat(RECORD_HOVER, BRIGHT),
+                _ => flat(RECORD, BRIGHT),
             }
         } else {
             control(theme, status)

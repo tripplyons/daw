@@ -28,3 +28,6 @@ objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 block2 = "0.6"
 
+
+[dev-dependencies]
+iced_test = "0.14"

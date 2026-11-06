@@ -28,9 +28,9 @@ The first build takes a few minutes. Debug builds also work (`cargo run`); the w
 
 Tempo edits apply when you press Enter or leave the BPM field.
 
-The transport separates playback, pattern selection, recording, and file actions. "Pause" returns to the start marker; "rewind" stops and moves the marker to the loop start or song start. The "file" menu contains new, open, save, import, and export actions.
+The transport separates playback, pattern selection, recording, and file actions. "Stop" returns to the start marker; "rewind" stops and moves the marker to the loop start or song start. The "file" menu contains new, open, save, import, and export actions.
 
-Panel headers keep common actions visible. "More" opens the full toolset, including controls that do not fit in a narrow tile. "Focus" fills the window with that tile, and "tile" opens split and close actions. Narrow tiles keep these actions in "more". Hover a control for its purpose and shortcuts. Settings has a saved UI scale from 75% to 200%.
+Panel headers keep common actions visible. "More", or a right-click on the header, opens the full toolset with the tile's focus, split, and close actions. Double-click a header to fill the window with that tile; "restore" brings the other tiles back. In a window narrower than 1000 points, one tile shows at a time and a row of tabs switches between them. Hover a control for its purpose and shortcuts. Settings has a saved UI scale from 75% to 200%.
 
 ## Build with Bazel
 
@@ -70,7 +70,7 @@ A Linux VST3 bundle needs a binary for your CPU, such as `Contents/x86_64-linux/
 
 Each plugin is scanned in a separate process, so a plugin that crashes or hangs during the scan is listed as failed instead of closing the app. Results are cached in `~/Library/Application Support/daw/plugins.ron` on macOS and `~/.local/share/daw/plugins.ron` on Linux; later scans only probe new or updated plugins. The browser panel's "rescan" button and `daw plugins --scan` also retry failed plugins, while keeping successful results for unchanged plugins cached. Startup retains cached failures so broken plugins are not probed on every launch.
 
-Click a plugin in the browser panel to use it: an instrument gets a new channel in the channel rack, and an effect goes on the selected mixer insert.
+Click a plugin in the browser panel to use it: an instrument gets a new channel in the channel rack, and an effect goes on the selected mixer insert. Drag a plugin to choose the place instead. Drop an instrument on the channel rack for a new channel, or on a mixer insert for a new channel routed to that insert. Drop an effect on a channel to put it on that channel's insert, or on a mixer insert or its effect list.
 
 ## Audio clips
 

@@ -18,4 +18,5 @@ rust_binary(
 rust_test(
     name = "unit_test",
     crate = ":daw",
+    deps = all_crate_deps(normal_dev = True),
 )

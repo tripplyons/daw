@@ -239,10 +239,39 @@ pub fn view<'a>(app: &'a App, menu: &'a Menu) -> Element<'a, AppMessage> {
                 };
                 column = column.push(panels::help(entry(label, Message::Choose(Box::new(message)).into(), menu.selected == Some(index + usize::from(rename))), hint));
             }
-            (column.into(), rows)
+            if let Item::Channel(id) = menu.item {
+                column = column.push(swatches(app, id));
+                (column.into(), rows + 1)
+            } else {
+                (column.into(), rows)
+            }
         }
     };
     popup(app, menu, body, width, rows as f32 * ROW_HEIGHT + 2.0)
+}
+
+/// A row of channel colors; clicking one recolors the channel and closes the menu.
+fn swatches<'a>(app: &App, id: daw_model::ChannelId) -> Element<'a, AppMessage> {
+    let current = app.project.channel_color(id);
+    let mut swatches = iced::widget::row![].spacing(3).padding([4, 8]);
+    for color in daw_model::CHANNEL_COLORS {
+        let fill = theme::rgb(color);
+        let chosen = color == current;
+        let swatch = iced::widget::button(Space::new().width(14).height(14))
+            .on_press(Message::Choose(Box::new(crate::panels::channel_rack::Message::Color(id, color).into())).into())
+            .padding(0)
+            .style(move |_, status| iced::widget::button::Style {
+                background: Some(fill.into()),
+                border: iced::Border {
+                    color: if chosen || status == iced::widget::button::Status::Hovered { theme::BRIGHT } else { fill },
+                    width: if chosen { 2.0 } else { 1.0 },
+                    radius: 0.0.into(),
+                },
+                ..iced::widget::button::Style::default()
+            });
+        swatches = swatches.push(panels::help(swatch, "Channel color"));
+    }
+    swatches.into()
 }
 
 fn popup<'a>(app: &'a App, menu: &Menu, body: Element<'a, AppMessage>, width: f32, height: f32) -> Element<'a, AppMessage> {

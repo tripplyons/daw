@@ -38,6 +38,8 @@ pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::On
 pub const TRANSPORT_HEIGHT: f32 = 64.0;
 /// Height of the background job bar under the transport, while it shows.
 const JOBS_HEIGHT: f32 = 26.0;
+/// Below this window width, one tile shows at a time under a tab strip.
+pub const COMPACT_WIDTH: f32 = 1000.0;
 const UNDO_LIMIT: usize = 200;
 const LAST_TOUCHED: usize = 16;
 
@@ -57,6 +59,8 @@ pub enum Message {
     MouseReleased,
     SplitDrag(Vec<bool>),
     SetPanel(TileId, Panel),
+    /// Focus a tile; in a narrow window this shows it.
+    FocusTile(TileId),
     TileAction(TileId, Action),
     SplitTile(TileId, Axis),
     Action(Action),
@@ -290,9 +294,34 @@ impl App {
         self.session.audio_progress().is_some() || self.session.preparation_error.is_some() || self.rendering.progress().is_some()
     }
 
+    /// Width of the tile showing `panel`, if one is on screen.
+    pub fn panel_width(&self, panel: Panel) -> Option<f32> {
+        let tile = self.layout().find_panel(panel)?;
+        self.tile_rects().into_iter().find(|(id, _)| *id == tile).map(|(_, r)| r.width)
+    }
+
     fn tile_area(&self) -> Rect {
-        let top = TRANSPORT_HEIGHT + if self.showing_jobs() { JOBS_HEIGHT } else { 0.0 };
+        let tabs = if self.compact() { crate::theme::HEADER_HEIGHT } else { 0.0 };
+        let top = TRANSPORT_HEIGHT + tabs + if self.showing_jobs() { JOBS_HEIGHT } else { 0.0 };
         Rect { x: 0.0, y: top, width: self.window.width, height: (self.window.height - top).max(1.0) }
+    }
+
+    /// Whether the window is too narrow for side-by-side tiles.
+    pub fn compact(&self) -> bool {
+        self.window.width < COMPACT_WIDTH && self.layout().leaves().len() > 1
+    }
+
+    /// The tiles on screen and where they are, with gaps for split lines.
+    fn tile_rects(&self) -> Vec<(TileId, Rect)> {
+        let area = self.tile_area();
+        if self.compact() { return vec![(self.layout().focused, area)]; }
+        self.layout().rects_with_gap(area, view::GUTTER)
+    }
+
+    /// Split lines the mouse can drag; none while one tile shows.
+    fn split_handles(&self) -> Vec<daw_model::layout::Split> {
+        if self.compact() { return Vec::new(); }
+        self.layout().splits_with_gap(self.tile_area(), view::GUTTER)
     }
 
     fn load_config(&mut self) {
@@ -432,6 +461,12 @@ impl App {
             settings::key(self, &event);
             return Task::none();
         }
+        if self.settings.open && self.menu.is_none()
+            && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. } = &event
+        {
+            self.settings.open = false;
+            return Task::none();
+        }
         if self.menu.is_some()
             && let keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. } = &event
         {
@@ -489,6 +524,7 @@ impl App {
             Message::WindowResized(size) => self.window = size,
             Message::MouseMoved(point) => {
                 self.cursor = point;
+                browser::moved(self, point);
                 if let Some(path) = self.dragging_split.clone() {
                     self.drag_split(&path, point);
                 }
@@ -496,10 +532,9 @@ impl App {
             Message::MousePressed => {
                 if self.menu.is_some() { return Task::none(); }
                 let point = self.cursor;
-                let area = self.tile_area();
                 let contains = |r: Rect| point.x >= r.x && point.x < r.x + r.width && point.y >= r.y && point.y < r.y + r.height;
-                if self.layout().splits_with_gap(area, view::GUTTER).iter().any(|s| contains(view::handle_rect(s))) { return Task::none(); }
-                let hit = self.layout().rects_with_gap(area, view::GUTTER).into_iter().find(|(_, r)| contains(*r));
+                if self.split_handles().iter().any(|s| contains(view::handle_rect(s))) { return Task::none(); }
+                let hit = self.tile_rects().into_iter().find(|(_, r)| contains(*r));
                 if let Some((tile, _)) = hit {
                     self.layout_mut().focused = tile;
                 }
@@ -507,11 +542,15 @@ impl App {
             Message::MouseReleased => {
                 self.dragging_split = None;
                 self.finish_edit();
+                return browser::released(self);
             }
             Message::SplitDrag(path) => self.dragging_split = Some(path),
             Message::SetPanel(tile, panel) => {
                 self.layout_mut().set_panel(tile, panel);
                 self.layout_mut().focused = tile;
+            }
+            Message::FocusTile(tile) => {
+                if self.layout().leaves().contains(&tile) { self.layout_mut().focused = tile; }
             }
             Message::TileAction(tile, action) => {
                 if !self.layout().leaves().contains(&tile) { return Task::none(); }
@@ -739,8 +778,7 @@ impl App {
     }
 
     fn drag_split(&mut self, path: &[bool], point: Point) {
-        let area = self.tile_area();
-        let Some(split) = self.layout().splits_with_gap(area, view::GUTTER).into_iter().find(|s| s.path == path) else { return };
+        let Some(split) = self.split_handles().into_iter().find(|s| s.path == path) else { return };
         let rect = split.area;
         let ratio = match split.axis {
             Axis::Horizontal => (point.x - rect.x - view::GUTTER / 2.0) / (rect.width - view::GUTTER).max(1.0),
@@ -797,7 +835,7 @@ impl App {
                         _ => None,
                     }.unwrap_or(menu::Item::Tools(tile))
                 };
-                let rect = self.layout().rects_with_gap(self.tile_area(), view::GUTTER).into_iter().find(|(id, _)| *id == tile).unwrap().1;
+                let rect = self.tile_rects().into_iter().find(|(id, _)| *id == tile).map_or(self.tile_area(), |(_, r)| r);
                 let at = Point::new(rect.x + 8.0, rect.y + crate::theme::HEADER_HEIGHT + 2.0);
                 return menu::update(self, menu::Message::OpenAt(item, at));
             }
@@ -834,15 +872,11 @@ impl App {
                     self.set_status(format!("nothing selected to delete in {}", self.focused_panel()));
                 }
             }
+            // Settings opens over the workspace and leaves the tiles alone.
             Action::Settings => {
-                let layout = self.layout_mut();
-                match layout.find_panel(Panel::Settings) {
-                    Some(tile) => layout.focused = tile,
-                    None => {
-                        let tile = layout.focused;
-                        layout.set_panel(tile, Panel::Settings);
-                    }
-                }
+                self.settings.open = !self.settings.open;
+                self.settings.capturing = None;
+                self.menu = None;
             }
             Action::ToggleMode => {
                 self.poll_midi();

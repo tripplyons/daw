@@ -12,7 +12,7 @@ use crate::units::{gain_text, pan_text};
 
 impl App {
     pub fn target_name(&self, target: Target) -> String {
-        let insert_name = |id| self.project.mixer.insert(id).map(|i| i.name.clone()).unwrap_or_default();
+        let insert_name = |id| self.project.insert_label(id);
         let channel_name = |id| self.project.channel(id).map(|c| c.name.clone()).unwrap_or_default();
         match target {
             Target::Plugin { instance, param } => {

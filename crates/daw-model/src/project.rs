@@ -107,7 +107,15 @@ pub struct Channel {
     pub pan: f32,
     pub mute: bool,
     pub insert: InsertId,
+    /// 0xRRGGBB. Projects saved before channels had colors leave it empty;
+    /// `Project::channel_color` then picks one from the channel's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
 }
+
+/// Channel colors, assigned in turn to new channels. Each reads on the dark
+/// theme's backgrounds.
+pub const CHANNEL_COLORS: [u32; 9] = [0xE0735A, 0xE0A64F, 0xC9C452, 0x7CC36A, 0x4FB8A8, 0x5AA2E0, 0x8A7FE0, 0xC77AD6, 0xE070A0];
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Note {
@@ -510,7 +518,8 @@ impl Project {
         let id = ChannelId(self.next_id());
         let used: Vec<InsertId> = self.channels.iter().map(|c| c.insert).collect();
         let insert = self.mixer.inserts.iter().skip(1).map(|i| i.id).find(|i| !used.contains(i)).unwrap_or(MASTER);
-        self.channels.push(Channel { id, name: name.into(), source, volume: 0.8, pan: 0.0, mute: false, insert });
+        let color = Some(CHANNEL_COLORS[self.channels.len() % CHANNEL_COLORS.len()]);
+        self.channels.push(Channel { id, name: name.into(), source, volume: 0.8, pan: 0.0, mute: false, insert, color });
         id
     }
 
@@ -626,6 +635,67 @@ impl Project {
             clip.length = length.max(1);
         }
         id
+    }
+
+    /// A channel's color as 0xRRGGBB: its own, or one from its position.
+    pub fn channel_color(&self, id: ChannelId) -> u32 {
+        let Some(index) = self.channels.iter().position(|c| c.id == id) else { return 0x8A8A8A };
+        self.channels[index].color.unwrap_or(CHANNEL_COLORS[index % CHANNEL_COLORS.len()])
+    }
+
+    /// The color of the only channel feeding an insert, if one channel does.
+    pub fn insert_color(&self, id: InsertId) -> Option<u32> {
+        if id == MASTER { return None; }
+        let mut feeders = self.channels.iter().filter(|c| c.insert == id);
+        match (feeders.next(), feeders.next()) {
+            (Some(channel), None) => Some(self.channel_color(channel.id)),
+            _ => None,
+        }
+    }
+
+    /// The color a playlist clip takes from the one channel it belongs to:
+    /// a pattern's only channel with notes, an audio clip's channel, or the
+    /// channel or insert an automation clip controls.
+    pub fn clip_color(&self, source: ClipSource) -> Option<u32> {
+        match source {
+            ClipSource::Pattern(id) => {
+                let pattern = self.pattern(id)?;
+                let mut lanes = pattern.lanes.iter().filter(|l| !l.notes.is_empty());
+                match (lanes.next(), lanes.next()) {
+                    (Some(lane), None) => self.channel(lane.channel).map(|c| self.channel_color(c.id)),
+                    _ => None,
+                }
+            }
+            ClipSource::Audio(channel) => self.channel(channel).map(|c| self.channel_color(c.id)),
+            ClipSource::Automation(id) => match self.automation_clip(id)?.target {
+                Target::ChannelVolume(c) | Target::ChannelPan(c) | Target::SynthCutoff(c) => self.channel(c).map(|c| self.channel_color(c.id)),
+                Target::InsertVolume(i) | Target::InsertPan(i) => self.insert_color(i),
+                Target::Plugin { instance, .. } => {
+                    if let Some(channel) = self.channels.iter().find(|c| c.source == Source::Plugin(instance)) {
+                        return Some(self.channel_color(channel.id));
+                    }
+                    let insert = self.mixer.inserts.iter().find(|i| i.effects.contains(&instance))?;
+                    self.insert_color(insert.id)
+                }
+                Target::Tempo => None,
+            },
+        }
+    }
+
+    /// The name to show for a mixer insert. An insert that keeps its default
+    /// "insert N" name and is fed by exactly one channel shows that channel's
+    /// name, so routing reads as "kick" rather than "insert 2".
+    pub fn insert_label(&self, id: InsertId) -> String {
+        let Some(insert) = self.mixer.insert(id) else { return String::new() };
+        let default_name = insert.name.strip_prefix("insert ").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if id == MASTER || !default_name {
+            return insert.name.clone();
+        }
+        let mut feeders = self.channels.iter().filter(|c| c.insert == id);
+        match (feeders.next(), feeders.next()) {
+            (Some(channel), None) => channel.name.clone(),
+            _ => insert.name.clone(),
+        }
     }
 
     pub fn channel(&self, id: ChannelId) -> Option<&Channel> {
@@ -870,6 +940,36 @@ mod tests {
         assert!((crate::automation::tempo_from_normalized(value) - 140.0).abs() < 1e-3);
         assert_eq!(loaded.format, Project::FORMAT);
         assert_eq!(Project::from_ron(&loaded.to_ron().unwrap()).unwrap(), loaded);
+    }
+
+    #[test]
+    fn channels_get_colors_in_turn_and_old_projects_fall_back_by_position() {
+        let mut project = Project::new();
+        let first = project.channels[0].id;
+        let second = project.add_channel("bass", project.channels[0].source.clone());
+        assert_eq!(project.channels[1].color, Some(CHANNEL_COLORS[1]));
+        project.channel_mut(second).unwrap().color = Some(0x123456);
+        assert_eq!(project.channel_color(second), 0x123456);
+        project.channel_mut(first).unwrap().color = None;
+        assert_eq!(project.channel_color(first), CHANNEL_COLORS[0]);
+        let loaded = Project::from_ron(&project.to_ron().unwrap()).unwrap();
+        assert_eq!(loaded.channels[1].color, Some(0x123456));
+        assert_eq!(loaded.channels[0].color, None);
+    }
+
+    #[test]
+    fn default_named_inserts_show_their_only_channel() {
+        let mut project = Project::new();
+        let insert = project.channels[0].insert;
+        assert_eq!(project.insert_label(insert), project.channels[0].name);
+        assert_eq!(project.insert_label(MASTER), "master");
+        let other = project.channels[0].source.clone();
+        let second = project.add_channel("bass", other);
+        project.channel_mut(second).unwrap().insert = insert;
+        assert_eq!(project.insert_label(insert), project.mixer.insert(insert).unwrap().name);
+        project.channel_mut(second).unwrap().insert = MASTER;
+        project.mixer.insert_mut(insert).unwrap().name = "drums".into();
+        assert_eq!(project.insert_label(insert), "drums");
     }
 
     #[test]

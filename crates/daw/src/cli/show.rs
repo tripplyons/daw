@@ -63,11 +63,12 @@ fn overview(project: &Project) -> String {
         let mute = if channel.mute { " muted" } else { "" };
         let _ = writeln!(
             out,
-            "  {} {:?}  {source}  volume {} pan {}{mute}  -> insert {}",
+            "  {} {:?}  {source}  volume {} pan {}{mute}  color #{:06X}  -> insert {}",
             channel.id.0,
             channel.name,
             channel.volume,
             pan_text(channel.pan),
+            project.channel_color(channel.id),
             channel.insert.0
         );
     }

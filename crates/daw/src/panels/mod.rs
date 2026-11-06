@@ -12,7 +12,7 @@ pub mod timeline;
 
 use iced::widget::{button, pick_list, row, scrollable, text, tooltip};
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::{Element, mouse};
+use iced::{Element, Length, mouse};
 
 use crate::app::Message;
 use crate::app::App;
@@ -63,10 +63,27 @@ pub fn help<'a>(content: impl Into<Element<'a, Message>>, hint: impl Into<String
 
 /// Global actions use the user's current bindings in their tooltips.
 pub fn action<'a>(app: &App, label: &str, action: Action, on: Option<bool>) -> Element<'a, Message> {
+    action_sized(app, label, action, on, Length::Shrink)
+}
+
+/// An action button with a set width, for labels that change, so the
+/// controls beside it do not move.
+pub fn action_sized<'a>(app: &App, label: &str, action: Action, on: Option<bool>, width: impl Into<Length>) -> Element<'a, Message> {
+    let hint = action_hint(app, action);
+    let control = button(text(label.to_string()).size(theme::SMALL).width(Length::Fill).align_x(iced::alignment::Horizontal::Center))
+        .on_press(Message::Action(action))
+        .style(theme::toggle(on.unwrap_or(false)))
+        .padding([3, 8])
+        .width(width);
+    help(control, hint)
+}
+
+/// A record-arm toggle, red while armed.
+pub fn arm<'a>(app: &App, label: &str, action: Action, armed: bool) -> Element<'a, Message> {
     let hint = action_hint(app, action);
     let control = button(text(label.to_string()).size(theme::SMALL))
         .on_press(Message::Action(action))
-        .style(theme::toggle(on.unwrap_or(false)))
+        .style(theme::record(armed))
         .padding([3, 8]);
     help(control, hint)
 }
@@ -74,7 +91,7 @@ pub fn action<'a>(app: &App, label: &str, action: Action, on: Option<bool>) -> E
 pub fn action_hint(app: &App, action: Action) -> String {
     let Some(binding) = BINDINGS.iter().find(|b| b.action == action) else { return String::new() };
     let label = match action {
-        Action::PlayPause => "Play or pause; pause returns to the start marker",
+        Action::PlayPause => "Play or stop; stop returns to the start marker",
         Action::Stop => "Stop and rewind to the loop or song start",
         Action::ToggleRecord => "Record parameter movements as automation",
         Action::ToggleComputerKeyboard => "Computer keyboard: A W S E D F T G Y H U J K play notes; Z/X change octave",
@@ -113,6 +130,22 @@ pub fn hint(message: &Message) -> Option<&'static str> {
         Message::Rescan => Some("Scan installed plugins again"),
         _ => None,
     }
+}
+
+/// A centered hint for an empty panel: a title, a few lines on how to start,
+/// and buttons for the first steps. Clicks outside the buttons pass through
+/// to the panel below.
+pub fn empty_state<'a>(title: &str, lines: &[String], actions: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    let mut body = iced::widget::column![text(title.to_string()).size(theme::TEXT_SIZE).color(theme::BRIGHT)]
+        .spacing(6)
+        .align_x(iced::Alignment::Center);
+    for line in lines {
+        body = body.push(text(line.clone()).size(theme::SMALL).color(theme::TEXT_DIM).align_x(iced::alignment::Horizontal::Center));
+    }
+    if !actions.is_empty() {
+        body = body.push(iced::widget::Row::with_children(actions).spacing(6));
+    }
+    iced::widget::container(body.max_width(340)).padding(12).center(Length::Fill).into()
 }
 
 pub fn label<'a>(label: impl ToString) -> Element<'a, Message> {

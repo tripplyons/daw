@@ -145,8 +145,8 @@ impl Layout {
         Self { root: Node::Leaf(id), tiles: vec![Tile { id, panel }], focused: id, zoomed: false, next_id: 1 }
     }
 
-    /// Playlist on top, channel rack and piano roll below it, mixer at the bottom,
-    /// browser at the left.
+    /// Browser at the left; the playlist and a narrower automation editor on
+    /// top; the channel rack and piano roll below.
     pub fn default_workspace() -> Self {
         let mut layout = Layout::single(Panel::Playlist);
         let playlist = layout.focused;
@@ -155,7 +155,8 @@ impl Layout {
         layout.set_ratio_of(layout.focused, 0.6);
         layout.focused = playlist;
         layout.split(Axis::Horizontal, Panel::Automation);
-        layout.set_ratio_of(layout.focused, 0.7);
+        // The playlist is where songs are arranged; automation needs less room.
+        layout.set_ratio_of(layout.focused, 0.3);
         layout.focused = playlist;
         layout.root = Node::Split {
             axis: Axis::Horizontal,

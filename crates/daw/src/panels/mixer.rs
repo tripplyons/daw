@@ -6,6 +6,7 @@ use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::{Space, button, column, container, mouse_area, row, slider, text, vertical_slider};
 use iced::{Element, Length, Task, mouse};
 
+use super::browser::{self, DropZone};
 use super::{InsertChoice, label, pick, tool, toggle};
 use crate::app::{App, Message as AppMessage};
 use crate::menu;
@@ -212,20 +213,24 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         .on_right_press(AppMessage::Automate(Target::InsertPan(id)));
         let fader = super::help(fader, format!("Volume: {}\nRight-click to automate", gain_text(insert.volume)));
         let pan = super::help(pan, format!("Pan: {}\nRight-click to automate", pan_text(insert.pan)));
-        let name = button(text(insert.name.clone()).size(theme::SMALL))
+        let name = button(text(app.project.insert_label(id)).size(theme::SMALL))
             .on_press(Message::Select(id).into())
             .style(theme::plain(selected))
             .padding([1, 3])
             .width(Length::Fill);
         // Where the signal goes, when it is not straight to the master.
         let output = match app.project.mixer.output(id) {
-            Some(to) if to != daw_model::MASTER => app.project.mixer.insert(to).map(|i| format!("> {}", i.name)),
+            Some(to) if to != daw_model::MASTER => Some(format!("> {}", app.project.insert_label(to))),
             _ => None,
         };
         // About 5 px per character at size 10.
         let output: String = output.unwrap_or_default().chars().take(((STRIP_WIDTH - 6.0) / 5.0) as usize).collect();
         let output = text(output).size(10).color(theme::TEXT_DIM);
+        // The feeding channel's color, when one channel feeds this insert.
+        let stripe = app.project.insert_color(id).map_or(theme::BG, theme::rgb);
+        let stripe = container(Space::new()).width(Length::Fill).height(3).style(theme::fill(stripe));
         let strip = column![
+            stripe,
             name,
             output,
             row![meter(left), meter(right), fader].spacing(2).height(Length::Fill),
@@ -243,16 +248,15 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         .width(STRIP_WIDTH)
         .align_x(iced::Alignment::Center);
         let background = if selected { theme::HEADER } else { theme::BG };
-        strips = strips.push(
-            mouse_area(container(strip).height(Length::Fill).style(theme::fill(background)))
-                .on_press(Message::Select(id).into())
-                .on_right_press(menu::Message::Open(menu::Item::Insert(id)).into()),
-        );
+        let strip = mouse_area(container(strip).height(Length::Fill).style(theme::fill(background)))
+            .on_press(Message::Select(id).into())
+            .on_right_press(menu::Message::Open(menu::Item::Insert(id)).into());
+        strips = strips.push(browser::zone(app, DropZone::Insert(id), strip));
     }
 
     let mut chain = column![label("effects")].spacing(2).padding(4).width(190);
     if let Some(insert) = app.project.mixer.insert(app.selected_insert) {
-        chain = chain.push(text(insert.name.clone()).size(theme::TEXT_SIZE).color(theme::BRIGHT));
+        chain = chain.push(text(app.project.insert_label(insert.id)).size(theme::TEXT_SIZE).color(theme::BRIGHT));
         if insert.id != daw_model::MASTER {
             let mixer = &app.project.mixer;
             let from = insert.id;
@@ -260,7 +264,7 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
                 .inserts
                 .iter()
                 .filter(|i| mixer.can_route(from, i.id))
-                .map(|i| InsertChoice { id: i.id, name: i.name.clone() })
+                .map(|i| InsertChoice { id: i.id, name: app.project.insert_label(i.id) })
                 .collect();
             let current = mixer.output(from).and_then(|to| choices.iter().find(|c| c.id == to).cloned());
             chain = chain.push(
@@ -273,13 +277,13 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             let from = insert.id;
             let choices: Vec<InsertChoice> = app.project.mixer.inserts.iter()
                 .filter(|i| app.project.mixer.can_route(from, i.id) && !insert.sends.iter().any(|s| s.to == i.id))
-                .map(|i| InsertChoice { id: i.id, name: i.name.clone() }).collect();
+                .map(|i| InsertChoice { id: i.id, name: app.project.insert_label(i.id) }).collect();
             let audio = choices.iter().filter(|i| i.id != insert.output).cloned().collect();
             chain = chain.push(row![label("send"), pick(audio, None, move |c: InsertChoice| Message::Send(from, c.id, false).into())].spacing(4));
             chain = chain.push(row![label("sidechain"), pick(choices, None, move |c: InsertChoice| Message::Send(from, c.id, true).into())].spacing(4));
             for send in &insert.sends {
                 let to = send.to;
-                let name = app.project.mixer.insert(to).map(|i| i.name.clone()).unwrap_or_default();
+                let name = app.project.insert_label(to);
                 chain = chain.push(row![label(format!("{} {name}", if send.sidechain { "sc" } else { "send" })),
                     tool("x", Message::RemoveSend(from, to).into())].spacing(4));
                 chain = chain.push(slider(Send::LEVEL, send.level, move |v| Message::SendLevel(from, to, v).into())
@@ -304,13 +308,13 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             );
         }
         if insert.effects.is_empty() {
-            chain = chain.push(label("add effects from the browser"));
+            chain = chain.push(label("drag effects here from the browser"));
         }
     }
     row![
         mouse_area(super::scroll(strips, false, true).id(STRIPS).width(Length::Fill).height(Length::Fill))
             .on_scroll(|delta| Message::Wheel(delta).into()),
-        container(super::scroll(chain, true, false)).height(Length::Fill).style(theme::fill(theme::HEADER)),
+        browser::zone(app, DropZone::Insert(app.selected_insert), container(super::scroll(chain, true, false)).height(Length::Fill).style(theme::fill(theme::HEADER))),
     ]
     .spacing(3)
     .into()

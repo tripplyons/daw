@@ -2,6 +2,7 @@
 
 mod computer_keyboard;
 mod scan_tasks;
+mod ui_snapshots;
 
 use daw_engine::output::BitDepth;
 use daw_model::automation::{Shape, TimeSnap, ValueSnap};
@@ -653,8 +654,11 @@ fn save_open_and_export() {
 #[test]
 fn settings_capture_rebinds_and_saves() {
     let mut app = app();
+    let layout = app.layout().clone();
     let _ = app.update(Message::Action(Action::Settings));
-    assert_eq!(app.focused_panel(), Panel::Settings);
+    assert!(app.settings.open);
+    // Settings opens over the workspace without replacing a tile.
+    assert_eq!(app.layout(), &layout);
 
     let _ = app.update(crate::panels::settings::Message::Capture("zoom").into());
     // Modifier keys alone wait for the rest of the chord.
@@ -1918,4 +1922,91 @@ fn pending_consolidation_creates_no_undo_and_rejects_changed_projects() {
     assert!(app.project.playlist.clips[0].muted);
     wait_audio(&mut app);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn recoloring_a_channel_is_one_undo_step() {
+    let mut app = app();
+    let id = app.project.channels[0].id;
+    let before = app.project.channel_color(id);
+    let _ = app.update(crate::panels::channel_rack::Message::Color(id, 0x5AA2E0).into());
+    assert_eq!(app.project.channel_color(id), 0x5AA2E0);
+    assert!(app.dirty);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(app.project.channel_color(id), before);
+}
+
+#[test]
+fn fit_song_shows_the_whole_song_in_the_playlist() {
+    let mut app = app();
+    app.window = iced::Size::new(1400.0, 860.0);
+    let pattern = app.selected_pattern;
+    let bar = app.project.signature.ticks_per_bar();
+    app.project.add_clip(0, 7 * bar, ClipSource::Pattern(pattern));
+    let _ = app.update(list::Message::FitSong.into());
+    let width = app.panel_width(Panel::Playlist).unwrap();
+    let end = app.playlist.time.x((app.project.song_length() + bar) as f64);
+    assert!(end > 0.0 && end <= width, "song end at {end} of {width}");
+    assert!(end > width * 0.8, "song should fill most of the playlist: {end} of {width}");
+}
+
+#[test]
+fn narrow_windows_show_one_tile_and_switch_with_tabs() {
+    let mut app = app();
+    *app.layout_mut() = daw_model::layout::Layout::single(Panel::Playlist);
+    let right = app.layout_mut().split(Axis::Horizontal, Panel::Mixer);
+    let left = app.layout().leaves()[0];
+    app.window = Size::new(800.0, 600.0);
+    assert!(app.compact());
+    assert_eq!(app.tile_rects(), vec![(right, app.tile_area())], "only the focused tile shows");
+    assert!(app.split_handles().is_empty());
+    let _ = app.update(Message::FocusTile(left));
+    assert_eq!(app.layout().focused, left);
+    assert_eq!(app.panel_width(Panel::Playlist), Some(800.0));
+    assert_eq!(app.panel_width(Panel::Mixer), None, "hidden tiles have no width");
+    app.window = Size::new(1400.0, 860.0);
+    assert!(!app.compact());
+    assert_eq!(app.tile_rects().len(), 2);
+}
+
+#[test]
+fn dragged_plugins_land_on_the_zone_under_the_cursor() {
+    use crate::panels::browser::{self, DropZone, Place};
+    let mut app = app();
+    let plugin = |name: &str, kind| daw_plugins::PluginInfo {
+        plugin: daw_model::PluginRef { format: daw_model::PluginFormat::Vst3, id: name.into(), path: String::new(), name: name.into(), vendor: "test".into() },
+        kind,
+        category: String::new(),
+    };
+    app.catalog.plugins = vec![plugin("verb", daw_plugins::PluginKind::Effect), plugin("keys", daw_plugins::PluginKind::Instrument)];
+    let channel = app.project.channels[0].id;
+    let routed = app.project.channels[0].insert;
+    let master = daw_model::MASTER;
+    let hold = |app: &mut App, plugin: usize, zones: &[DropZone]| {
+        let _ = app.update(Message::MouseMoved(Point::new(10.0, 10.0)));
+        let _ = app.update(browser::Message::Grab(plugin).into());
+        let _ = app.update(Message::MouseMoved(Point::new(300.0, 300.0)));
+        for &zone in zones {
+            let _ = app.update(browser::Message::Enter(zone).into());
+        }
+    };
+
+    hold(&mut app, 0, &[DropZone::Channel(channel), DropZone::Rack]);
+    assert_eq!(browser::drop_target(&app), Some((DropZone::Channel(channel), Place::Effect(routed))), "an effect goes on the channel's insert");
+    let _ = app.update(browser::Message::Leave(DropZone::Channel(channel)).into());
+    assert_eq!(browser::drop_target(&app), None, "the rack takes no effects");
+    let _ = app.update(Message::MouseReleased);
+    assert!(app.browser.drag.is_none());
+    assert!(app.status.starts_with("drop verb on"), "{}", app.status);
+    assert!(app.undo.is_empty(), "a drop on nothing changes nothing");
+
+    hold(&mut app, 1, &[DropZone::Insert(master)]);
+    assert_eq!(browser::drop_target(&app), Some((DropZone::Insert(master), Place::Channel(Some(master)))));
+    hold(&mut app, 1, &[DropZone::Channel(channel), DropZone::Rack]);
+    assert_eq!(browser::drop_target(&app), Some((DropZone::Channel(channel), Place::Channel(None))));
+
+    // A press without movement is a click and is never a drop.
+    let _ = app.update(browser::Message::Grab(0).into());
+    let _ = app.update(browser::Message::Enter(DropZone::Insert(master)).into());
+    assert_eq!(browser::drop_target(&app), None);
 }

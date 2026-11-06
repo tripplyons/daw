@@ -20,7 +20,7 @@ use iced::widget::{mouse_area, row};
 use iced::{Element, Length};
 
 use super::timeline::TimeView;
-use super::{label, pick, tool, toggle};
+use super::{pick, tool, toggle};
 use crate::app::{App, Message as AppMessage};
 use crate::menu;
 
@@ -621,10 +621,8 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
     true
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
-    let state = &app.automation;
-    let clips: Vec<ClipChoice> = app.project.automation.iter().map(|a| ClipChoice { id: a.id, name: a.name.clone() }).collect();
-    let current = clips.iter().find(|c| Some(c.id) == state.clip).cloned();
+/// Recently moved parameters; choosing one opens or makes its clip.
+fn touched_picker(app: &App) -> Element<'_, AppMessage> {
     let touched: Vec<TargetChoice> = app
         .last_touched
         .iter()
@@ -633,6 +631,13 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
             name: format!("{} = {}", app.target_name(target), app.value_text(target, value)),
         })
         .collect();
+    super::pick_or(touched, None, "automate last touched", |t| Message::Bind(t).into())
+}
+
+pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
+    let state = &app.automation;
+    let clips: Vec<ClipChoice> = app.project.automation.iter().map(|a| ClipChoice { id: a.id, name: a.name.clone() }).collect();
+    let current = clips.iter().find(|c| Some(c.id) == state.clip).cloned();
     let mut time_snaps: Vec<TimeSnap> = Grid::CHOICES.iter().map(|&g| TimeSnap::Grid(g)).collect();
     time_snaps.push(TimeSnap::Points);
     let bar = app.project.signature.ticks_per_bar();
@@ -650,7 +655,7 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
     }
     row![
         clip_picker,
-        super::pick_or(touched, None, "automate last touched", |t| Message::Bind(t).into()),
+        touched_picker(app),
         toggle("edit", state.tool == Tool::Edit, Message::Tool(Tool::Edit).into()),
         toggle("draw", state.tool == Tool::Draw, Message::Tool(Tool::Draw).into()),
         toggle("line", state.tool == Tool::Line, Message::Tool(Tool::Line).into()),
@@ -672,10 +677,17 @@ pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
 
 pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
     if app.automation.clip.and_then(|id| app.project.automation_clip(id)).is_none() {
-        let command = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
-        let hint = format!("no clip open. Right click a control and choose automate, pick a last touched \
-                    parameter above, or turn on bind ({command}+Shift+G) and move any parameter.");
-        return iced::widget::container(label(hint)).padding(8).into();
+        let lines = vec![
+            "Right-click a knob or fader and choose automate.".to_string(),
+            "Or turn on bind and move any parameter.".to_string(),
+        ];
+        let mut actions = vec![super::action(app, "bind automation", crate::keys::Action::ToggleBind, Some(app.bind_mode))];
+        if !app.project.automation.is_empty() {
+            let clips: Vec<ClipChoice> = app.project.automation.iter().map(|a| ClipChoice { id: a.id, name: a.name.clone() }).collect();
+            actions.push(super::pick_or(clips, None, "open a clip", |c| Message::Clip(c).into()));
+        }
+        if !app.last_touched.is_empty() { actions.push(touched_picker(app)); }
+        return super::empty_state("no automation clip open", &lines, actions);
     }
     Canvas::new(Editor { app }).width(Length::Fill).height(Length::Fill).into()
 }

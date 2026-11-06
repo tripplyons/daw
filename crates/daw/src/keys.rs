@@ -88,7 +88,7 @@ pub const BINDINGS: &[Binding] = &[
     bind("workspace-7", "workspace 7", "workspaces", Action::Workspace(6), &["cmd+7"]),
     bind("workspace-8", "workspace 8", "workspaces", Action::Workspace(7), &["cmd+8"]),
     bind("workspace-9", "workspace 9", "workspaces", Action::Workspace(8), &["cmd+9"]),
-    bind("play-pause", "play or pause", "transport", Action::PlayPause, &["space"]),
+    bind("play-pause", "play or stop", "transport", Action::PlayPause, &["space"]),
     bind("stop", "stop and rewind", "transport", Action::Stop, &["escape"]),
     bind("toggle-mode", "pattern or song mode", "transport", Action::ToggleMode, &["tab"]),
     bind("toggle-bind", "bind mode", "automation", Action::ToggleBind, &["cmd+shift+g"]),

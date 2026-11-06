@@ -17,10 +17,10 @@ use crate::panels::timeline::{self, Clicks, RULER_HEIGHT, Wheel};
 use crate::processing::PEAK_FRAMES;
 use crate::theme;
 
-const HEADER_WIDTH: f32 = 84.0;
+pub(super) const HEADER_WIDTH: f32 = 84.0;
 const EDGE: f32 = 5.0;
 /// Left part of a track header that toggles mute.
-const MUTE_WIDTH: f32 = 14.0;
+const MUTE_WIDTH: f32 = 16.0;
 
 #[cfg(test)]
 mod tests {
@@ -108,15 +108,27 @@ impl Arrangement<'_> {
     fn draw_clip(&self, frame: &mut Frame<Renderer>, clip: &Clip, selected: bool) {
         let app = self.app;
         let r = self.clip_rect(clip);
-        let (background, content, text) = if clip.muted {
+        let tint = app.project.clip_color(clip.source).map(theme::rgb);
+        // Clips on a muted track look muted too.
+        let muted = clip.muted || app.project.playlist.tracks.get(clip.track).is_some_and(|t| t.mute);
+        let (background, content, text) = if muted {
             (if selected { theme::CONTROL_HOVER } else { theme::BG }, theme::FILL_DIM, theme::TEXT_DIM)
         } else if selected {
             (theme::SELECTED, theme::FILL_DIM, theme::BG)
+        } else if let Some(tint) = tint {
+            (theme::mix(theme::CONTROL, tint, 0.3), theme::mix(tint, theme::BRIGHT, 0.2), theme::TEXT)
         } else {
             (theme::CONTROL_ACTIVE, theme::FILL, theme::TEXT)
         };
         let body = Rectangle { x: r.x, y: r.y + 1.0, width: r.width - 1.0, height: r.height - 2.0 };
         frame.fill_rectangle(body.position(), body.size(), background);
+        // A stripe in the channel color, kept while selected or muted so the
+        // clip stays recognizable.
+        if let Some(tint) = tint {
+            let stripe = if muted { theme::mix(theme::BG, tint, 0.4) } else { tint };
+            frame.fill_rectangle(body.position(), Size::new(body.width, 2.0), stripe);
+        }
+        let plain = muted || selected;
         let inner = Rectangle { y: body.y + 13.0, height: (body.height - 15.0).max(1.0), ..body };
         let view = self.state().time;
         match clip.source {
@@ -127,6 +139,8 @@ impl Arrangement<'_> {
                 let span = f32::from(high - low + 1);
                 let length = pattern.length.max(1);
                 for lane in &pattern.lanes {
+                    // Several channels: each lane's notes in its channel color.
+                    let content = if plain || tint.is_some() { content } else { theme::rgb(app.project.channel_color(lane.channel)) };
                     for note in &lane.notes {
                         // Repeat the pattern across the clip.
                         let mut repeat = 0;
@@ -423,9 +437,11 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                 frame.fill_rectangle(Point::new(0.0, y), Size::new(HEADER_WIDTH, th - 1.0), theme::CONTROL_ACTIVE);
             }
             let color = if info.mute { theme::TEXT_FAINT } else { theme::TEXT };
-            timeline::label(&mut frame, info.name.clone(), Point::new(16.0, y + th / 2.0 - 7.0), color);
-            let dot = if info.mute { theme::FILL_DIM } else { theme::SELECTED };
-            frame.fill_rectangle(Point::new(5.0, y + th / 2.0 - 3.0), Size::new(6.0, 6.0), dot);
+            timeline::label(&mut frame, timeline::fit(&info.name, HEADER_WIDTH - MUTE_WIDTH - 6.0), Point::new(MUTE_WIDTH + 4.0, y + th / 2.0 - 7.0), color);
+            // Mute toggle, lit while muted like the channel rack's.
+            let (fill, mark) = if info.mute { (theme::SELECTED, theme::BG) } else { (theme::CONTROL_ACTIVE, theme::TEXT_DIM) };
+            frame.fill_rectangle(Point::new(3.0, y + th / 2.0 - 7.0), Size::new(MUTE_WIDTH - 2.0, 14.0), fill);
+            timeline::label(&mut frame, "m", Point::new(5.5, y + th / 2.0 - 8.0), mark);
         }
 
         timeline::draw_ruler(&mut frame, playlist.time, HEADER_WIDTH, area.width, app.project.signature);

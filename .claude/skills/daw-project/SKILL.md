@@ -100,7 +100,7 @@ $DAW batch FILE [SCRIPT]                  # script from a file or standard input
 
 $DAW edit FILE set [--name N] [--bpm B] [--signature 3/4] [--grid 1/16] [--loop 0..8bar | --no-loop]
 $DAW edit FILE channel add NAME [--synth sine|saw|square | --sampler WAV [--root KEY] | --audio WAV | --plugin NAME_OR_ID]
-$DAW edit FILE channel set ID [--name --volume 0..1 --pan -1..1 --mute --insert ID --waveform --attack --release --cutoff --sample --root]
+$DAW edit FILE channel set ID [--name --volume 0..1 --pan -1..1 --mute --insert ID --color '#RRGGBB' --waveform --attack --release --cutoff --sample --root]
 $DAW edit FILE channel remove ID
 $DAW edit FILE pattern add [--name N] [--length TIME]
 $DAW edit FILE pattern set ID [--name N] [--length TIME]
