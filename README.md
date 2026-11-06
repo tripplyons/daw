@@ -102,9 +102,15 @@ Right-click the pattern picker and choose "clone pattern" to copy its notes into
 
 ## Mixer sends and sidechains
 
-Select a mixer insert. Its effects panel has an output route, a "send" picker for parallel audio, and a "sidechain" picker for detector-only audio. Each send has a level slider and a remove button. Gain, pan, and send level changes update playback as you drag. Sends use the source insert's signal after its effects, fader, and pan. Routes that would create feedback are refused.
+Select a mixer insert. Its effects panel has an output route, a "send to" picker for parallel audio, and a "sidechain to" picker for detector audio. Each send has a level slider and a remove button. Gain, pan, and send level changes update playback as you drag. Sends use the source insert's signal after its effects, fader, and pan. Routes that would create feedback are refused.
 
-A sidechain feeds the destination plugin's first auxiliary audio input. Use an effect that supports an external sidechain and enable that input in the plugin if needed. The detector signal is separate from the destination's audible input. The source keeps its normal output route.
+A sidechain feeds the first auxiliary audio input of each effect on the destination insert. The detector signal is separate from the destination's audible input. To set one up from the effect's side, select the insert with the effect, such as a compressor on the bass, and pick the source in "sidechain from". You can also select the source and pick the destination in "sidechain to", which lists only inserts with an effect that can take a sidechain.
+
+Effects that have a sidechain input show "(sc)" after their name. After you add a sidechain, a notice names the plugin it drives and offers to open its editor, because many plugins ignore the input until their external sidechain switch is on. If no effect on the destination has a sidechain input, the panel says so in red.
+
+Mixer strips show "sc < Kick" on an insert that a sidechain drives. The source keeps its normal output route. Turn on "detector only" on the source to silence its output and audio sends, so it is heard only through its sidechains, as with a ghost kick that only drives ducking. Its strip then shows "sc > Bass" instead of its output.
+
+From the command line, `daw edit FILE send add FROM TO --sidechain` adds a sidechain and `daw edit FILE insert set FROM --detector-only true` makes the source detector only.
 
 ## Live MIDI
 

@@ -86,6 +86,11 @@ pub trait Controller {
     /// Restore processor and controller state while the host excludes audio processing.
     fn restore_state(&mut self, state: &[u8]) -> Result<(), PluginError>;
     fn has_editor(&self) -> bool;
+    /// Whether the plugin has an auxiliary audio input, which the host feeds
+    /// with an insert's sidechain signal.
+    fn has_sidechain_input(&self) -> bool {
+        false
+    }
     /// Show the editor, creating it the first time. Later calls show the same
     /// editor again, because some plugins fail to build a second one.
     fn open_editor(&mut self, title: &str) -> Result<(), PluginError>;

@@ -683,11 +683,12 @@ impl Engine {
 
         for &index in &song.order {
             self.process_insert(&mut song.inserts[index], index, &transport, offset, frames);
-            let output = song.inserts[index].output;
-            route(&mut song.inserts, index, output, 1.0, false, frames);
+            let (output, detector_only) = (song.inserts[index].output, song.inserts[index].detector_only);
+            if !detector_only { route(&mut song.inserts, index, output, 1.0, false, frames); }
             for send in 0..song.inserts[index].sends.len() {
                 let send = &song.inserts[index].sends[send];
                 let (to, level, sidechain) = (send.to, send.level, send.sidechain);
+                if detector_only && !sidechain { continue; }
                 route(&mut song.inserts, index, to, level, sidechain, frames);
             }
         }

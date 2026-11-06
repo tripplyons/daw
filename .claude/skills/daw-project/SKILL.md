@@ -53,7 +53,7 @@ Variables hold only command outputs, not environment variables, so write paths o
 
 ## Model
 
-- A project has channels (instruments), patterns (notes for any channels), automation clips (an envelope over one parameter), a playlist (tracks holding clips that place patterns and automation clips in time), and a mixer (inserts with effect chains).
+- A project has channels (instruments), patterns (notes for any channels), automation clips (an envelope over one parameter), a playlist (tracks holding clips that place patterns and automation clips in time), and a mixer (inserts with effect chains, an output route, and sends to other inserts).
 - Channels, patterns, automation clips, playlist clips, mixer inserts, and plugin instances share one id counter, so an id names exactly one thing. Read ids from `show`; never guess them. Insert 0 is the master.
 - Notes belong to a pattern and a channel. Notes and automation points have no ids: notes are matched by key and start, points by index.
 - Nothing plays in song mode until it is on the playlist. After making a pattern or automation clip, place it with `clip add`.
@@ -112,8 +112,9 @@ $DAW edit FILE clip add SOURCE TRACK START [--length TIME] [--offset TIME]
 $DAW edit FILE clip set ID [--track --start --length --offset]
 $DAW edit FILE clip remove ID
 $DAW edit FILE track add [--name N] | set INDEX [--name --mute] | remove INDEX
-$DAW edit FILE insert add [--name N] | set ID [--name --volume 0..2 --pan --mute --solo --output ID] | remove ID
+$DAW edit FILE insert add [--name N] | set ID [--name --volume 0..2 --pan --mute --solo --output ID --detector-only BOOL] | remove ID
 $DAW edit FILE effect add INSERT NAME_OR_ID | remove INSTANCE
+$DAW edit FILE send add FROM TO [--level 0..2] [--sidechain] | set FROM TO --level L | remove FROM TO
 $DAW edit FILE automation add TARGET [--name N] [--length TIME] [--value 0..1]
 $DAW edit FILE automation set ID [--name N] [--length TIME] | remove ID
 $DAW edit FILE point add AUTOMATION TIME VALUE [--shape S] [--tension T]
@@ -129,6 +130,8 @@ Behavior worth knowing:
 - `clip add` adds tracks up to the index you give. Its length defaults to the source's length, less `--offset`; for `audio:CHANNEL`, that is the WAV file's length at the tempo from START on, including tempo automation.
 - `automation add` makes two points, at 0 and at the clip's length, both at the target's current value or `--value`. Each point sets the shape of the segment that follows it. One clip per target. `point add` past the clip's end grows the clip; `point add` and `point set` print the point's index after sorting by time.
 - `--plugin` and `effect add` match an exact plugin id or a case-insensitive name. When a plugin exists in several formats, pass the id from `$DAW plugins`. If the cache is empty, run `$DAW plugins --scan` (it can take a minute).
+- `send add` copies FROM's signal (after its effects, fader, and pan) to insert TO, or replaces the send between them. Without `--sidechain` it is parallel audio, as for a reverb bus. Routes that would loop are refused.
+- `send add --sidechain` feeds the first auxiliary input of every effect on TO instead, as a detector signal that is not heard. The effect must support an external sidechain, and many also need their sidechain switch turned on: find it with `params FILE INSTANCE --find side` and set it. `insert set FROM --detector-only true` silences FROM's output and audio sends, so it is heard only through its sidechains. Use that for a ghost kick that only drives ducking.
 - INSTANCE in `params` and `presets` is a plugin instance id (as `show` prints next to plugin channels and insert effects, and `effect add` prints) or the id of a plugin channel.
 
 ## Plugin sounds and settings

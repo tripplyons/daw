@@ -708,6 +708,10 @@ impl Controller for Vst3Controller {
         self.controller().is_some()
     }
 
+    fn has_sidechain_input(&self) -> bool {
+        bus_channels(&self.instance.component, kInput as i32).get(1).is_some_and(|&(channels, _)| channels > 0)
+    }
+
     fn open_editor(&mut self, title: &str) -> Result<(), PluginError> {
         if let Some(editor) = &self.editor {
             editor.window.show();

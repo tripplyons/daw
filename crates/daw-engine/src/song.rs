@@ -55,6 +55,8 @@ pub struct InsertPlan {
     /// Index of the insert this one sums into; 0 is the master.
     pub output: usize,
     pub sends: Vec<SendPlan>,
+    /// Feed only the sidechain sends: no output route or audio sends.
+    pub detector_only: bool,
     pub side_left: Box<[f32]>,
     pub side_right: Box<[f32]>,
     pub left: Box<[f32]>,
@@ -226,6 +228,7 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
                 sends: i.sends.iter().filter(|s| mixer.can_route(i.id, s.to)).map(|s| SendPlan {
                     to: insert_index(s.to), level: s.level, sidechain: s.sidechain,
                 }).collect(),
+                detector_only: i.is_detector_only(),
                 side_left: vec![0.0; max_block].into_boxed_slice(),
                 side_right: vec![0.0; max_block].into_boxed_slice(),
                 left: vec![0.0; max_block].into_boxed_slice(),

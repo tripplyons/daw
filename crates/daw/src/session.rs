@@ -383,6 +383,12 @@ impl Session {
         Ok(true)
     }
 
+    /// Whether a loaded plugin has a sidechain input. `None` when the plugin
+    /// is not loaded, so the answer is unknown.
+    pub fn sidechain_input(&self, instance: InstanceId) -> Option<bool> {
+        self.controllers.get(&instance).map(|c| c.has_sidechain_input())
+    }
+
     pub fn editor_open(&self, instance: InstanceId) -> bool {
         self.controllers.get(&instance).is_some_and(|c| c.editor_open())
     }

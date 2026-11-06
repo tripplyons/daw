@@ -128,7 +128,7 @@ fn overview(project: &Project) -> String {
     }
     let _ = writeln!(out, "  ({} tracks)", project.playlist.tracks.len());
 
-    let _ = writeln!(out, "\nmixer (id, name, volume 0..2, pan, output, effect instances)");
+    let _ = writeln!(out, "\nmixer (id, name, volume 0..2, pan, output, sends to insert ids, effect instances)");
     for insert in &project.mixer.inserts {
         let mut flags = String::new();
         if insert.mute {
@@ -150,9 +150,18 @@ fn overview(project: &Project) -> String {
             })
             .collect();
         let effects = if effects.is_empty() { String::new() } else { format!("  effects: {}", effects.join(", ")) };
+        if insert.is_detector_only() {
+            flags.push_str(" detector-only");
+        }
+        let sends: Vec<String> = insert
+            .sends
+            .iter()
+            .map(|s| format!("{}{} level {}", if s.sidechain { "sidechain " } else { "" }, s.to.0, s.level))
+            .collect();
+        let sends = if sends.is_empty() { String::new() } else { format!("  sends: {}", sends.join(", ")) };
         let _ = writeln!(
             out,
-            "  {} {:?}  volume {} pan {}{flags}{output}{effects}",
+            "  {} {:?}  volume {} pan {}{flags}{output}{sends}{effects}",
             insert.id.0,
             insert.name,
             insert.volume,

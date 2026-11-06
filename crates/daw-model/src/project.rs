@@ -309,11 +309,21 @@ pub struct Insert {
     pub output: InsertId,
     #[serde(default)]
     pub sends: Vec<Send>,
+    /// Silence the output route and audio sends, so the insert is heard
+    /// only through its sidechain sends, as a detector source. Ignored when
+    /// the insert has no sidechain sends.
+    #[serde(default)]
+    pub detector_only: bool,
 }
 
 impl Insert {
+    /// Whether the insert is heard only through its sidechain sends.
+    pub fn is_detector_only(&self) -> bool {
+        self.detector_only && self.sends.iter().any(|s| s.sidechain)
+    }
+
     pub fn new(id: InsertId, name: &str) -> Self {
-        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new(), output: MASTER, sends: Vec::new() }
+        Self { id, name: name.into(), volume: 0.8, pan: 0.0, mute: false, solo: false, effects: Vec::new(), output: MASTER, sends: Vec::new(), detector_only: false }
     }
 }
 
@@ -357,6 +367,11 @@ impl Mixer {
             }
         }
         false
+    }
+
+    /// Inserts that send a sidechain signal to `to`, with their sends.
+    pub fn sidechain_sources(&self, to: InsertId) -> impl Iterator<Item = (&Insert, &Send)> {
+        self.inserts.iter().filter_map(move |i| Some((i, i.sends.iter().find(|s| s.sidechain && s.to == to)?)))
     }
 
     pub fn set_send(&mut self, from: InsertId, send: Send) -> bool {

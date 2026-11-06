@@ -624,6 +624,10 @@ impl Controller for AuController {
         unsafe { self.unit.providesUserInterface() }
     }
 
+    fn has_sidechain_input(&self) -> bool {
+        unsafe { self.unit.inputBusses().count() > 1 }
+    }
+
     fn open_editor(&mut self, title: &str) -> Result<(), PluginError> {
         if let Some(editor) = &self.editor {
             editor.window.show();

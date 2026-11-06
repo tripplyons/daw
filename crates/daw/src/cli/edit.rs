@@ -5,7 +5,7 @@ use daw_model::automation::{Point, Shape};
 use daw_model::time::{Grid, TimeSignature, Ticks};
 use daw_model::{
     AutomationClip, AutomationId, Channel, ChannelId, Clip, ClipId, ClipSource, Insert, InsertId, InstanceId, MASTER, Note,
-    Pattern, PatternId, Project, STEP_TICKS, Source, SynthParams, Target, Track, Waveform,
+    Pattern, PatternId, Project, STEP_TICKS, Send, Source, SynthParams, Target, Track, Waveform,
 };
 use daw_plugins::PluginKind;
 use daw_plugins::scan::Catalog;
@@ -55,6 +55,9 @@ pub enum Op {
     /// Effect plugins on mixer inserts.
     #[command(subcommand)]
     Effect(EffectOp),
+    /// Sends from one mixer insert to another: parallel audio or a sidechain.
+    #[command(subcommand)]
+    Send(SendOp),
     /// Automation clips: envelopes over one target.
     #[command(subcommand)]
     Automation(AutomationOp),
@@ -251,9 +254,38 @@ pub enum InsertOp {
         /// Insert this one sends to. Routes that would loop are refused.
         #[arg(long)]
         output: Option<u64>,
+        /// Hear the insert only through its sidechain sends: its output and
+        /// audio sends go silent. Ignored while it has no sidechain sends.
+        #[arg(long)]
+        detector_only: Option<bool>,
     },
     /// Remove an insert with its effects and automation. Its channels go to the master.
     Remove { id: u64 },
+}
+
+#[derive(Subcommand)]
+pub enum SendOp {
+    /// Send FROM's signal, after its effects, fader, and pan, to insert TO.
+    /// Replaces an existing send between the two.
+    Add {
+        from: u64,
+        to: u64,
+        /// Send gain, 0 to 2.
+        #[arg(long, default_value_t = 1.0, value_parser = |t: &str| parse::bounded(t, 0.0, 2.0))]
+        level: f32,
+        /// Feed the first auxiliary (sidechain) input of TO's effects instead
+        /// of TO's audible signal. The effect must take an external sidechain.
+        #[arg(long)]
+        sidechain: bool,
+    },
+    /// Change a send's level.
+    Set {
+        from: u64,
+        to: u64,
+        #[arg(long, value_parser = |t: &str| parse::bounded(t, 0.0, 2.0))]
+        level: f32,
+    },
+    Remove { from: u64, to: u64 },
 }
 
 #[derive(Subcommand)]
@@ -362,6 +394,7 @@ pub fn apply(project: &mut Project, op: Op, catalog: impl FnOnce() -> Catalog) -
         Op::Track(op) => track(project, op),
         Op::Insert(op) => insert(project, op),
         Op::Effect(op) => effect(project, op, catalog),
+        Op::Send(op) => send(project, op),
         Op::Automation(op) => automation(project, op),
         Op::Point(op) => point(project, op),
     }
@@ -613,7 +646,7 @@ fn insert(project: &mut Project, op: InsertOp) -> Result<String, String> {
             project.mixer.inserts.push(Insert::new(id, &name));
             Ok(id.0.to_string())
         }
-        InsertOp::Set { id, name, volume, pan, mute, solo, output } => {
+        InsertOp::Set { id, name, volume, pan, mute, solo, output, detector_only } => {
             if let Some(output) = output {
                 find_insert(project, output)?;
                 if !project.mixer.set_output(InsertId(id), InsertId(output)) {
@@ -636,6 +669,9 @@ fn insert(project: &mut Project, op: InsertOp) -> Result<String, String> {
             if let Some(solo) = solo {
                 insert.solo = solo;
             }
+            if let Some(detector_only) = detector_only {
+                insert.detector_only = detector_only;
+            }
             Ok(String::new())
         }
         InsertOp::Remove { id } => {
@@ -647,6 +683,32 @@ fn insert(project: &mut Project, op: InsertOp) -> Result<String, String> {
             Ok(String::new())
         }
     }
+}
+
+fn send(project: &mut Project, op: SendOp) -> Result<String, String> {
+    match op {
+        SendOp::Add { from, to, level, sidechain } => {
+            find_insert(project, from)?;
+            find_insert(project, to)?;
+            if !project.mixer.set_send(InsertId(from), Send { to: InsertId(to), level, sidechain }) {
+                return Err(format!("insert {from} cannot send to insert {to}: it is the master, itself, or would loop"));
+            }
+            Ok(String::new())
+        }
+        SendOp::Set { from, to, level } => {
+            find_send(project, from, to)?.level = level;
+            Ok(String::new())
+        }
+        SendOp::Remove { from, to } => {
+            find_send(project, from, to)?;
+            find_insert(project, from)?.sends.retain(|s| s.to != InsertId(to));
+            Ok(String::new())
+        }
+    }
+}
+
+fn find_send(project: &mut Project, from: u64, to: u64) -> Result<&mut Send, String> {
+    find_insert(project, from)?.sends.iter_mut().find(|s| s.to == InsertId(to)).ok_or(format!("insert {from} has no send to insert {to}"))
 }
 
 fn effect(project: &mut Project, op: EffectOp, catalog: impl FnOnce() -> Catalog) -> Result<String, String> {

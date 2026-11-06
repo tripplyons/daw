@@ -123,12 +123,36 @@ fn automation_starts_at_the_target_value_and_points_stay_sorted() {
 }
 
 #[test]
+fn sends_and_sidechains() {
+    let mut project = Project::new();
+    let [bass, kick, bus] = [1, 2, 3].map(|i| project.mixer.inserts[i].id.0);
+    edit(&mut project, &format!("send add {kick} {bus} --level 0.5")).unwrap();
+    edit(&mut project, &format!("send add {kick} {bass} --sidechain")).unwrap();
+    edit(&mut project, &format!("insert set {kick} --detector-only true")).unwrap();
+    let insert = project.mixer.insert(daw_model::InsertId(kick)).unwrap();
+    assert!(insert.is_detector_only());
+    assert_eq!(insert.sends, [
+        daw_model::Send { to: daw_model::InsertId(bus), level: 0.5, sidechain: false },
+        daw_model::Send { to: daw_model::InsertId(bass), level: 1.0, sidechain: true },
+    ]);
+    let shown = super::show::show(&project, None, None, false).unwrap();
+    assert!(shown.contains(&format!("detector-only  -> insert 0  sends: {bus} level 0.5, sidechain {bass} level 1")), "{shown}");
+    edit(&mut project, &format!("send set {kick} {bass} --level 0.25")).unwrap();
+    assert_eq!(project.mixer.insert(daw_model::InsertId(kick)).unwrap().sends[1].level, 0.25);
+    edit(&mut project, &format!("send remove {kick} {bass}")).unwrap();
+    assert!(!project.mixer.insert(daw_model::InsertId(kick)).unwrap().is_detector_only());
+    assert!(edit(&mut project, &format!("send add {kick} {bus} --level 3")).is_err());
+}
+
+#[test]
 fn edits_refuse_what_the_app_does_not_allow() {
     let mut project = Project::new();
     let [a, b] = [1, 2].map(|i| project.mixer.inserts[i].id.0);
     edit(&mut project, &format!("insert set {a} --output {b} --pan -0.5")).unwrap();
     assert_eq!(project.mixer.inserts[1].pan, -0.5);
     assert!(edit(&mut project, &format!("insert set {b} --output {a}")).unwrap_err().contains("loop"));
+    assert!(edit(&mut project, &format!("send add {b} {a}")).unwrap_err().contains("loop"));
+    assert!(edit(&mut project, &format!("send set {b} {a} --level 0.5")).unwrap_err().contains("no send"));
     assert!(edit(&mut project, "insert remove 0").is_err());
     let pattern = project.patterns[0].id.0;
     assert!(edit(&mut project, &format!("pattern remove {pattern}")).unwrap_err().contains("at least one"));

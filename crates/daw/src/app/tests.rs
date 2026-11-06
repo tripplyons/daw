@@ -166,7 +166,8 @@ fn wait_renders(app: &mut App) {
     }
 }
 
-struct TestPlugin(f32);
+/// A plugin's value, and whether it has a sidechain input.
+struct TestPlugin(f32, bool);
 
 impl daw_plugins::Controller for TestPlugin {
     fn params(&self) -> Vec<daw_plugins::ParamInfo> {
@@ -181,6 +182,7 @@ impl daw_plugins::Controller for TestPlugin {
         Ok(())
     }
     fn has_editor(&self) -> bool { false }
+    fn has_sidechain_input(&self) -> bool { self.1 }
     fn open_editor(&mut self, _: &str) -> Result<(), daw_plugins::PluginError> { Err(daw_plugins::PluginError::Load("no editor".into())) }
     fn hide_editor(&mut self) {}
     fn editor_open(&self) -> bool { false }
@@ -1250,6 +1252,38 @@ fn live_controls_keep_one_undo_step_without_recompiling_the_song() {
 }
 
 #[test]
+fn sidechains_set_up_from_the_destination_report_what_they_drive() {
+    use crate::panels::mixer;
+    let mut app = app();
+    let [source, destination] = [1, 2].map(|i| app.project.mixer.inserts[i].id);
+    let plugin = |app: &mut App, sidechain: bool| {
+        let id = app.project.add_plugin(daw_model::PluginRef {
+            format: daw_model::PluginFormat::Vst3, id: "test".into(), path: String::new(), name: "comp".into(), vendor: String::new(),
+        });
+        app.session.test_controller(id, Box::new(TestPlugin(0.0, sidechain)));
+        app.project.mixer.insert_mut(destination).unwrap().effects.push(id);
+    };
+    plugin(&mut app, false);
+    // "sidechain from" on the destination sends the source's signal there.
+    let _ = app.update(mixer::Message::Send(source, destination, true).into());
+    assert!(app.status.contains("no effect"), "{}", app.status);
+    let _ = app.update(mixer::Message::RemoveSend(source, destination).into());
+    plugin(&mut app, true);
+    let _ = app.update(mixer::Message::Send(source, destination, true).into());
+    assert!(app.status.contains("drives the sidechain of comp"), "{}", app.status);
+    assert_eq!(app.project.mixer.sidechain_sources(destination).map(|(i, _)| i.id).collect::<Vec<_>>(), [source]);
+
+    let _ = app.update(mixer::Message::DetectorOnly(source).into());
+    assert!(app.project.mixer.insert(source).unwrap().is_detector_only());
+    let _ = app.update(mixer::Message::RemoveSend(source, destination).into());
+    assert!(!app.project.mixer.insert(source).unwrap().is_detector_only(), "no sidechain left to hear it through");
+    let _ = app.update(Message::Action(Action::Undo));
+    assert!(app.project.mixer.insert(source).unwrap().is_detector_only());
+    let _ = app.update(Message::Action(Action::Undo));
+    assert!(!app.project.mixer.insert(source).unwrap().detector_only);
+}
+
+#[test]
 fn audio_stretch_drag_prepares_only_on_release_and_cancels_on_undo() {
     let dir = std::env::temp_dir().join(format!("daw-stretch-preview-{}", crate::project_files::stamp()));
     std::fs::create_dir(&dir).unwrap();
@@ -1395,7 +1429,7 @@ fn plugin_only_edits_trigger_autosave_with_current_state_during_playback() {
     let instance = app.project.add_plugin(daw_model::PluginRef {
         format: daw_model::PluginFormat::Vst3, id: "test".into(), path: String::new(), name: "test".into(), vendor: String::new(),
     });
-    app.session.test_controller(instance, Box::new(TestPlugin(0.0)));
+    app.session.test_controller(instance, Box::new(TestPlugin(0.0, false)));
     app.playing = true;
     let revision = app.revision;
     let _ = app.update(crate::panels::parameters::Message::Set(instance, 0, 0.25).into());
@@ -1680,7 +1714,7 @@ fn test_plugin(app: &mut App) -> daw_model::InstanceId {
     let id = app.project.add_plugin(daw_model::PluginRef {
         format: daw_model::PluginFormat::Vst3, id: "test".into(), path: String::new(), name: "test".into(), vendor: String::new(),
     });
-    app.session.test_controller(id, Box::new(TestPlugin(0.0)));
+    app.session.test_controller(id, Box::new(TestPlugin(0.0, false)));
     id
 }
 
