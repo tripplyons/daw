@@ -59,6 +59,10 @@ pub struct InsertPlan {
     pub detector_only: bool,
     pub side_left: Box<[f32]>,
     pub side_right: Box<[f32]>,
+    /// Post-effects, pre-fader copy. Sidechain sends tap this, so muting or
+    /// fading the source does not stop it driving a detector.
+    pub pre_left: Box<[f32]>,
+    pub pre_right: Box<[f32]>,
     pub left: Box<[f32]>,
     pub right: Box<[f32]>,
 }
@@ -231,6 +235,8 @@ pub fn compile(project: &Project, mode: PlayMode, max_block: usize, samples: &Ha
                 detector_only: i.is_detector_only(),
                 side_left: vec![0.0; max_block].into_boxed_slice(),
                 side_right: vec![0.0; max_block].into_boxed_slice(),
+                pre_left: vec![0.0; max_block].into_boxed_slice(),
+                pre_right: vec![0.0; max_block].into_boxed_slice(),
                 left: vec![0.0; max_block].into_boxed_slice(),
                 right: vec![0.0; max_block].into_boxed_slice(),
             }

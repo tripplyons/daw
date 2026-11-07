@@ -330,7 +330,10 @@ fn route(inserts: &mut [InsertPlan], from: usize, to: usize, level: f32, sidecha
         (&high[0], &mut low[to])
     };
     let (l, r) = if sidechain { (&mut target.side_left, &mut target.side_right) } else { (&mut target.left, &mut target.right) };
-    for i in 0..frames { l[i] += source.left[i] * level; r[i] += source.right[i] * level; }
+    // Sidechain sends tap the pre-fader copy: muting or fading a detector
+    // source must not silence what it is detecting.
+    let (sl, sr) = if sidechain { (&source.pre_left, &source.pre_right) } else { (&source.left, &source.right) };
+    for i in 0..frames { l[i] += sl[i] * level; r[i] += sr[i] * level; }
 }
 
 fn peak(buffer: &[f32]) -> f32 {
@@ -717,6 +720,8 @@ impl Engine {
                 node.events.clear();
             }
         }
+        insert.pre_left[..frames].copy_from_slice(l);
+        insert.pre_right[..frames].copy_from_slice(r);
         let (gl, gr) = if insert.silent { (0.0, 0.0) } else { apply_pan(insert.pan, insert.volume) };
         for i in 0..frames {
             l[i] *= gl;

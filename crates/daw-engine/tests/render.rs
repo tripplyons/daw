@@ -615,6 +615,32 @@ fn detector_only_inserts_feed_only_their_sidechains() {
 }
 
 #[test]
+fn muted_source_still_drives_its_sidechain() {
+    let mut project = unity_project();
+    let pattern = project.patterns[0].id;
+    let channel = project.channels[0].id;
+    project.pattern_mut(pattern).unwrap().toggle_step(channel, 0);
+    let [bus, source] = [1, 2].map(|i| project.mixer.inserts[i].id);
+    project.channels[0].insert = source;
+    let effect = project.add_plugin(daw_model::PluginRef {
+        format: daw_model::PluginFormat::Vst3, id: "detector".into(), path: String::new(), name: "detector".into(), vendor: String::new(),
+    });
+    project.mixer.insert_mut(bus).unwrap().effects.push(effect);
+    assert!(project.mixer.set_send(source, daw_model::Send { to: bus, level: 0.5, sidechain: true }));
+    project.mixer.insert_mut(source).unwrap().mute = true;
+
+    let (mut engine, mut handle, _) = engine_with_probe(&project, PlayMode::Pattern(pattern), false);
+    let peak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    handle.send(Command::AddNode(Node::new(effect.0, Box::new(Detector(peak.clone()))))).ok().unwrap();
+    let signal = render(&mut engine, 512);
+
+    // The muted insert is silent at the master, but its sidechain still sees
+    // the pre-fader signal.
+    assert_eq!(signal[0], 0.0);
+    assert_eq!(f32::from_bits(peak.load(std::sync::atomic::Ordering::Relaxed)), 0.5);
+}
+
+#[test]
 fn live_midi_queue_plays_without_transport_and_releases_on_disconnect() {
     let project = unity_project();
     let pattern = project.patterns[0].id;
