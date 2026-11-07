@@ -102,8 +102,9 @@ if [ "${1:-}" = "--install" ]; then
     rm -rf "$installed"
     cp -R "$app" "$installed"
     "$lsregister" -f "$installed"
-    # Only the installed copy should handle .dawproj files.
-    "$lsregister" -u "$root/$app"
+    # Only the installed copy should handle .dawproj files. Launch Services may not
+    # have seen the fresh build copy yet, and then has nothing to remove (-10814).
+    "$lsregister" -u "$root/$app" 2>/dev/null || true
     echo "installed $installed"
 else
     "$lsregister" -f "$app"
