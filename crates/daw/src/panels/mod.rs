@@ -10,82 +10,45 @@ pub mod playlist;
 pub mod settings;
 pub mod timeline;
 
-use iced::widget::{button, pick_list, row, scrollable, text, tooltip};
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::{Element, Length, mouse};
+use rune::{El, ScrollSpec, row};
 
-use crate::app::Message;
-use crate::app::App;
+use crate::app::{App, Message};
+use crate::input::ScrollDelta;
 use crate::keys::{Action, BINDINGS};
-use crate::theme;
+use crate::ui::widgets::{self, Btn, Choice, Look};
 
-/// A mixer insert in a pick list.
-#[derive(Debug, Clone, PartialEq)]
-pub struct InsertChoice {
-    pub id: daw_model::InsertId,
-    pub name: String,
+/// Small button used in toolbars, with its tooltip.
+pub fn tool(label: &str, message: Message) -> El {
+    let hint = hint(&message).unwrap_or_default();
+    Btn::new(label).help(hint).build(message)
 }
 
-impl std::fmt::Display for InsertChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name)
-    }
+/// A toolbar button without a fill until hovered.
+pub fn ghost(label: &str, message: Message) -> El {
+    let hint = hint(&message).unwrap_or_default();
+    Btn::new(label).ghost().help(hint).build(message)
 }
 
-/// Small flat button used in toolbars.
-pub fn tool<'a>(label: &str, message: Message) -> Element<'a, Message> {
-    let hint = hint(&message);
-    let control = button(text(label.to_string()).size(theme::SMALL)).on_press(message).style(theme::control).padding([3, 6]);
-    match hint {
-        Some(hint) => help(control, hint),
-        None => control.into(),
-    }
+/// Small toggle button used in toolbars: the accent while on.
+pub fn toggle(label: &str, on: bool, message: Message) -> El {
+    let hint = hint(&message).unwrap_or_default();
+    Btn::new(label).look(if on { Look::On } else { Look::Raised }).help(hint).build(message)
 }
 
-/// Small toggle button used in toolbars.
-pub fn toggle<'a>(label: &str, on: bool, message: Message) -> Element<'a, Message> {
-    let hint = hint(&message);
-    let control = button(text(label.to_string()).size(theme::SMALL)).on_press(message).style(theme::toggle(on)).padding([3, 6]);
-    match hint {
-        Some(hint) => help(control, hint),
-        None => control.into(),
-    }
-}
-
-pub fn help<'a>(content: impl Into<Element<'a, Message>>, hint: impl Into<String>) -> Element<'a, Message> {
-    tooltip(content, text(hint.into()).size(theme::SMALL), tooltip::Position::Bottom)
-        .delay(std::time::Duration::from_millis(450))
-        .gap(4)
-        .padding(6)
-        .style(theme::popup)
-        .into()
+/// A tooltip on any element.
+pub fn help(content: El, hint: impl Into<String>) -> El {
+    let hint = hint.into();
+    if hint.is_empty() { content } else { content.help(hint) }
 }
 
 /// Global actions use the user's current bindings in their tooltips.
-pub fn action<'a>(app: &App, label: &str, action: Action, on: Option<bool>) -> Element<'a, Message> {
-    action_sized(app, label, action, on, Length::Shrink)
-}
-
-/// An action button with a set width, for labels that change, so the
-/// controls beside it do not move.
-pub fn action_sized<'a>(app: &App, label: &str, action: Action, on: Option<bool>, width: impl Into<Length>) -> Element<'a, Message> {
-    let hint = action_hint(app, action);
-    let control = button(text(label.to_string()).size(theme::SMALL).width(Length::Fill).align_x(iced::alignment::Horizontal::Center))
-        .on_press(Message::Action(action))
-        .style(theme::toggle(on.unwrap_or(false)))
-        .padding([3, 8])
-        .width(width);
-    help(control, hint)
+pub fn action(app: &App, label: &str, action: Action, on: Option<bool>) -> El {
+    Btn::new(label).on(on.unwrap_or(false)).help(action_hint(app, action)).build(Message::Action(action))
 }
 
 /// A record-arm toggle, red while armed.
-pub fn arm<'a>(app: &App, label: &str, action: Action, armed: bool) -> Element<'a, Message> {
-    let hint = action_hint(app, action);
-    let control = button(text(label.to_string()).size(theme::SMALL))
-        .on_press(Message::Action(action))
-        .style(theme::record(armed))
-        .padding([3, 8]);
-    help(control, hint)
+pub fn arm(app: &App, label: &str, action: Action, armed: bool) -> El {
+    Btn::new(label).ghost().armed(armed).help(action_hint(app, action)).build(Message::Action(action))
 }
 
 pub fn action_hint(app: &App, action: Action) -> String {
@@ -99,8 +62,18 @@ pub fn action_hint(app: &App, action: Action) -> String {
         _ => binding.label,
     };
     let chords: Vec<_> = app.keymap.chords(binding.id).iter().map(ToString::to_string).collect();
-    if chords.is_empty() { return label.into(); }
+    let label = sentence(label);
+    if chords.is_empty() { return label; }
     format!("{label} ({})", chords.join(", "))
+}
+
+/// Text with its first letter capitalized, for labels written in lowercase.
+pub fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 pub fn hint(message: &Message) -> Option<&'static str> {
@@ -133,75 +106,78 @@ pub fn hint(message: &Message) -> Option<&'static str> {
 }
 
 /// A centered hint for an empty panel: a title, a few lines on how to start,
-/// and buttons for the first steps. Clicks outside the buttons pass through
-/// to the panel below.
-pub fn empty_state<'a>(title: &str, lines: &[String], actions: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-    let mut body = iced::widget::column![text(title.to_string()).size(theme::TEXT_SIZE).color(theme::BRIGHT)]
-        .spacing(6)
-        .align_x(iced::Alignment::Center);
-    for line in lines {
-        body = body.push(text(line.clone()).size(theme::SMALL).color(theme::TEXT_DIM).align_x(iced::alignment::Horizontal::Center));
-    }
-    if !actions.is_empty() {
-        body = body.push(iced::widget::Row::with_children(actions).spacing(6));
-    }
-    iced::widget::container(body.max_width(340)).padding(12).center(Length::Fill).into()
+/// and buttons for the first steps.
+pub fn empty_state(title: &str, lines: &[String], actions: Vec<El>) -> El {
+    widgets::empty_state(title, lines, actions)
 }
 
-pub fn label<'a>(label: impl ToString) -> Element<'a, Message> {
-    text(label.to_string()).size(theme::SMALL).color(theme::TEXT_DIM).into()
+pub fn label(label: impl ToString) -> El {
+    widgets::label(label.to_string())
 }
 
 /// Keep a toolbar label with its control when the row wraps.
-pub fn labeled<'a>(name: &str, control: Element<'a, Message>) -> Element<'a, Message> {
-    row![label(name), control].spacing(4).align_y(iced::Alignment::Center).into()
+pub fn labeled(name: &str, control: El) -> El {
+    widgets::labeled(name, control)
 }
 
-pub fn pick<'a, T>(options: Vec<T>, selected: Option<T>, on: impl Fn(T) -> Message + 'a) -> Element<'a, Message>
+/// A dropdown of `options`, showing `selected`. `key` names the control so
+/// the list opens under it.
+pub fn pick<T>(key: &str, options: Vec<T>, selected: Option<T>, on: impl Fn(T) -> Message) -> El
 where
-    T: ToString + PartialEq + Clone + 'a,
+    T: ToString + PartialEq + Clone,
 {
-    pick_list(options, selected, on)
-        .text_size(theme::SMALL)
-        .padding([2, 6])
-        .style(theme::pick)
-        .menu_style(theme::menu)
-        .into()
+    pick_or(key, options, selected, "Choose", on)
+}
+
+pub fn pick_or<T>(key: &str, options: Vec<T>, selected: Option<T>, placeholder: &str, on: impl Fn(T) -> Message) -> El
+where
+    T: ToString + PartialEq + Clone,
+{
+    pick_sized(key, options, selected, placeholder, 0.0, on)
+}
+
+/// A dropdown with a set width; 0 sizes it to the longest choice.
+pub fn pick_sized<T>(key: &str, options: Vec<T>, selected: Option<T>, placeholder: &str, width: f32, on: impl Fn(T) -> Message) -> El
+where
+    T: ToString + PartialEq + Clone,
+{
+    let longest = options.iter().map(|o| o.to_string().chars().count()).max().unwrap_or(0).max(placeholder.chars().count());
+    let width = if width > 0.0 { width } else { (longest as f32 * 6.6 + 34.0).clamp(56.0, 220.0) };
+    let current = selected.as_ref().map(ToString::to_string);
+    let choices = options.into_iter().map(|o| {
+        let chosen = selected.as_ref() == Some(&o);
+        Choice::new(o.to_string(), on(o), chosen)
+    }).collect();
+    widgets::select(key, current, placeholder, choices, width)
 }
 
 /// Wheel delta in lines, whatever the device reports.
-pub fn wheel_lines(delta: mouse::ScrollDelta) -> (f32, f32) {
+pub fn wheel_lines(delta: ScrollDelta) -> (f32, f32) {
     match delta {
-        mouse::ScrollDelta::Lines { x, y } => (x, y),
-        mouse::ScrollDelta::Pixels { x, y } => (x / 20.0, y / 20.0),
+        ScrollDelta::Lines { x, y } => (x, y),
+        ScrollDelta::Pixels { x, y } => (x / 20.0, y / 20.0),
     }
 }
 
-/// Scroll area with thin scrollbars. `vertical` and `horizontal` pick the axes.
-pub fn scroll<'a>(content: impl Into<Element<'a, Message>>, vertical: bool, horizontal: bool) -> scrollable::Scrollable<'a, Message> {
-    let bar = || Scrollbar::new().width(4).scroller_width(4).margin(0);
-    let direction = match (vertical, horizontal) {
-        (true, true) => Direction::Both { vertical: bar(), horizontal: bar() },
-        (false, true) => Direction::Horizontal(bar()),
-        _ => Direction::Vertical(bar()),
+/// Scroll area. `vertical` and `horizontal` pick the axes. It fills the
+/// space its parent gives it.
+pub fn scroll(content: El, vertical: bool, horizontal: bool) -> El {
+    let area = rune::col().w_full().grow(1.0).min_h(0.0).min_w(0.0).child(content);
+    let area = match (vertical, horizontal) {
+        (true, true) => area.scroll_xy(),
+        (false, true) => area.scroll_x(),
+        _ => area.scroll(ScrollSpec { stick_bottom: false }),
     };
-    scrollable(content).direction(direction).style(theme::scrollable)
+    // Content cut off at an edge fades out there instead of ending in a hard line.
+    area.scroll_edge_fade(24.0)
 }
 
-pub fn pick_or<'a, T>(options: Vec<T>, selected: Option<T>, placeholder: &str, on: impl Fn(T) -> Message + 'a) -> Element<'a, Message>
-where
-    T: ToString + PartialEq + Clone + 'a,
-{
-    pick_list(options, selected, on)
-        .placeholder(placeholder.to_string())
-        .text_size(theme::SMALL)
-        .padding([2, 6])
-        .style(theme::pick)
-        .menu_style(theme::menu)
-        .into()
+/// A row of toolbar controls that wraps when narrow.
+pub fn bar(children: Vec<El>) -> El {
+    row().gap(4.0).center_y().flex_wrap().children(children)
 }
 
-pub fn toolbar(app: &App, panel: daw_model::layout::Panel) -> Element<'_, Message> {
+pub fn toolbar(app: &App, panel: daw_model::layout::Panel) -> El {
     use daw_model::layout::Panel;
     match panel {
         Panel::Browser => browser::toolbar(app),

@@ -4,10 +4,10 @@
 use std::collections::BTreeMap;
 
 use daw_model::layout::{Axis, Direction};
-use iced::keyboard::key::{Code, Physical};
-use iced::keyboard::{Event, Modifiers};
+use crate::input::key::{Code, Physical};
+use crate::input::{Event, Modifiers};
 #[cfg(target_os = "macos")]
-use iced::keyboard::{Key, Location};
+use crate::input::{Key, Location};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -250,6 +250,14 @@ impl std::fmt::Display for Chord {
         let key = KEY_NAMES.iter().find(|(c, _)| *c == self.code).map(|(_, n)| *n).unwrap_or("?");
         f.write_str(key)
     }
+}
+
+/// A chord or chord text as shown on screen: "cmd+shift+z" → "Cmd+Shift+Z".
+pub fn pretty(keys: &str) -> String {
+    keys.split('+').map(|part| {
+        let mut chars = part.chars();
+        chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
+    }).collect::<Vec<_>>().join("+")
 }
 
 fn binding(id: &str) -> Option<&'static Binding> {

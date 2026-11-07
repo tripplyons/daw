@@ -2,19 +2,29 @@
 
 use daw_model::automation::{insert_volume_to_normalized, pan_to_normalized};
 use daw_model::{Insert, InsertId, InstanceId, Send, Target};
-use iced::widget::operation::{self, AbsoluteOffset};
-use iced::widget::{Space, button, column, container, mouse_area, row, slider, text, vertical_slider};
-use iced::{Element, Length, Task, mouse};
+use std::cell::Cell;
+
+use rune::{El, Tx, col, el, row, spacer, text};
 
 use super::browser::{self, DropZone};
-use super::{InsertChoice, label, pick, tool, toggle};
+use super::label;
 use crate::app::{App, Message as AppMessage};
+use crate::input::ScrollDelta;
 use crate::menu;
-use crate::theme;
+use crate::task::Task;
+use crate::theme::{self, C};
+use crate::ui::{self, icons, widgets::{self, Btn, Choice, Look, Slider}};
 use crate::units::{gain_text, pan_text};
 
-const STRIP_WIDTH: f32 = 58.0;
+const STRIP_WIDTH: f32 = 76.0;
 const STRIPS: &str = "mixer-strips";
+/// Width of the selected insert's pane beside the strips.
+const PANE_WIDTH: f32 = 236.0;
+
+thread_local! {
+    /// How far the strips are scrolled sideways, for wheel steps.
+    static SCROLLED: Cell<f32> = const { Cell::new(0.0) };
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -35,7 +45,7 @@ pub enum Message {
     DetectorOnly(InsertId),
     /// A wheel step the strip area did not use: plain up/down scrolling,
     /// turned into sideways scrolling since the strips only scroll sideways.
-    Wheel(mouse::ScrollDelta),
+    Wheel(ScrollDelta),
 }
 
 impl From<Message> for AppMessage {
@@ -105,7 +115,7 @@ fn report_sidechain(app: &mut App, from: InsertId, to: InsertId) {
     }
 }
 
-pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub fn update(app: &mut App, message: Message) -> Task {
     match message {
         Message::Send(from, to, sidechain) => {
             if !app.project.mixer.can_route(from, to) { app.set_status("that send would create feedback"); return Task::none(); }
@@ -165,8 +175,9 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         Message::Wheel(delta) => {
             let (dx, dy) = super::wheel_lines(delta);
             if dy.abs() > dx.abs() {
-                let x = -dy * 60.0;
-                return operation::scroll_by(STRIPS, AbsoluteOffset { x, y: 0.0 });
+                let x = (SCROLLED.get() - dy * 60.0).max(0.0);
+                SCROLLED.set(x);
+                return Task::scroll_x(STRIPS, x);
             }
         }
         Message::Output(from, to) => {
@@ -217,240 +228,172 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 }
 
 /// A label over a picker of inserts to route to or from, with a hint.
-fn route_row<'a>(name: &str, hint: &str, choices: Vec<InsertChoice>, on: impl Fn(InsertChoice) -> AppMessage + 'a) -> Element<'a, AppMessage> {
-    let placeholder = if choices.is_empty() { "none available" } else { "choose insert" };
-    let picker = iced::widget::pick_list(choices, None::<InsertChoice>, on)
-        .placeholder(placeholder)
-        .text_size(theme::SMALL)
-        .padding([2, 6])
-        .width(Length::Fill)
-        .style(theme::pick)
-        .menu_style(theme::menu);
-    super::help(column![label(name), picker].spacing(1), hint.to_string())
+fn route_row(key: &str, name: &str, hint: &str, choices: Vec<Choice>) -> El {
+    let placeholder = if choices.is_empty() { "None available" } else { "Choose insert" };
+    col().gap(4.0).w_full()
+        .child(label(name))
+        .child(widgets::select_with(key, None, placeholder, choices, PANE_WIDTH - 28.0, Some(hint.to_string())))
 }
 
 /// A send's name with a remove button, then its level slider.
-fn send_row<'a>(name: String, from: InsertId, to: InsertId, level: f32) -> Element<'a, AppMessage> {
-    column![
-        row![text(name).size(theme::SMALL).width(Length::Fill), tool("x", Message::RemoveSend(from, to).into())]
-            .spacing(4)
-            .align_y(iced::Alignment::Center),
-        super::help(
-            row![
-                label("level"),
-                slider(Send::LEVEL, level, move |v| Message::SendLevel(from, to, v).into())
-                    .step(0.01_f32)
-                    .on_release(AppMessage::EndEdit)
-                    .style(theme::fader),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center),
-            gain_text(level),
-        ),
-    ]
-    .spacing(2)
-    .into()
+fn send_row(name: String, from: InsertId, to: InsertId, level: f32) -> El {
+    col().gap(4.0).w_full().padding(8.0).radius(theme::RADIUS).fill(C.well)
+        .child(row().gap(4.0).center_y()
+            .child(text(name).font(theme::LABEL).color(C.text).single_line().truncate().grow(1.0).shrink())
+            .child(Btn::new("").icon(&icons::CLOSE).ghost().height(20.0).help("Remove").build(Message::RemoveSend(from, to))))
+        .child(row().gap(8.0).center_y()
+            .child(Slider::new(level, (*Send::LEVEL.start(), *Send::LEVEL.end())).default(1.0).width(130.0).color(C.accent).help(gain_text(level))
+                .build(move |v| Message::SendLevel(from, to, v).into()))
+            .child(text(gain_text(level)).font(theme::NUMBER).color(C.text_dim).single_line()))
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
-    let delete: Element<'_, AppMessage> = if app.selected_insert == daw_model::MASTER {
-        label("")
-    } else {
-        tool("delete insert", Message::DeleteInsert.into())
+pub fn toolbar(app: &App) -> El {
+    let mut items = vec![Btn::new("Insert").icon(&icons::PLUS).help("Add a mixer insert").build(Message::AddInsert)];
+    if app.selected_insert != daw_model::MASTER {
+        items.push(Btn::new("Delete insert").build(Message::DeleteInsert));
+    }
+    super::bar(items)
+}
+
+fn strip(app: &App, index: usize, insert: &Insert) -> El {
+    let id = insert.id;
+    let selected = app.selected_insert == id;
+    let (left, right) = app.meters.get(index).copied().unwrap_or((0.0, 0.0));
+    let color = app.project.insert_color(id).map(theme::rgb);
+    let fader = widgets::fader(insert.volume, (0.0, 2.0), 1.0, 150.0, move |v| Message::Volume(id, v).into())
+        .help(format!("Volume: {}\nDouble-click for 0 dB; right-click to automate", gain_text(insert.volume)))
+        .on_secondary_press(move |app: &mut App, _, tx: &mut Tx| ui::send(app, tx, AppMessage::Automate(Target::InsertVolume(id))));
+    let pan = Slider::new(insert.pan, (-1.0, 1.0)).bipolar().default(0.0).width(STRIP_WIDTH - 14.0).color(C.text_dim)
+        .help(format!("Pan: {}\nDouble-click to center; right-click to automate", pan_text(insert.pan)))
+        .on_secondary(AppMessage::Automate(Target::InsertPan(id)))
+        .build(move |v| Message::Pan(id, v).into());
+    // Where the signal goes, when it is not straight to the master.
+    let detector = insert.sends.iter().find(|s| s.sidechain).filter(|_| insert.is_detector_only());
+    let output = match (detector, app.project.mixer.output(id)) {
+        (Some(send), _) => format!("SC → {}", app.project.insert_label(send.to)),
+        (None, Some(to)) if to != daw_model::MASTER => format!("→ {}", app.project.insert_label(to)),
+        _ => String::new(),
     };
-    row![tool("+ insert", Message::AddInsert.into()), delete].spacing(2).wrap().into()
+    // Inserts whose signal drives a sidechain here.
+    let sources: Vec<_> = app.project.mixer.sidechain_sources(id).map(|(i, _)| i.id).collect();
+    let sidechain = match sources.as_slice() {
+        [] => String::new(),
+        [one] => format!("SC ← {}", app.project.insert_label(*one)),
+        many => format!("SC ← {}", many.len()),
+    };
+    let small = |line: String| text(line).font(theme::SMALL_TEXT).color(C.text_faint).single_line().truncate().w(STRIP_WIDTH - 10.0).align(rune::Align::Center);
+    let name = text(app.project.insert_label(id)).font(theme::LABEL).color(if selected { C.text } else { C.text_dim }).single_line().truncate().w(STRIP_WIDTH - 10.0).align(rune::Align::Center);
+    let meters = row().gap(2.0).child(widgets::meter(left, 150.0)).child(widgets::meter(right, 150.0));
+    let buttons = row().gap(3.0)
+        .child(Btn::new("M").width(28.0).height(22.0).look(if insert.mute { Look::On } else { Look::Raised }).help("Mute insert").build(Message::Mute(id)))
+        .child(Btn::new("S").width(28.0).height(22.0).look(if insert.solo { Look::On } else { Look::Raised }).help("Solo insert").build(Message::Solo(id)));
+    let body = col().w(STRIP_WIDTH).h_full().items_center().gap(6.0).pt(0.0).pb(8.0)
+        .child(el().w_full().h(3.0).fill(color.unwrap_or(rune::Color::TRANSPARENT)))
+        .child(name.mt(4.0))
+        .child(small(output))
+        .child(small(sidechain))
+        .child(spacer())
+        .child(row().gap(6.0).h(150.0).child(meters).child(fader))
+        .child(text(gain_text(insert.volume)).font(theme::NUMBER).color(C.text_dim).single_line())
+        .child(pan)
+        .child(text(pan_text(insert.pan)).font(theme::NUMBER).color(C.text_faint).single_line())
+        .child(buttons);
+    let strip = body.radius(theme::RADIUS).clip_rounded(theme::RADIUS)
+        .fill(if selected { C.raised } else { C.header })
+        .border(1.0, if selected { C.accent.alpha(0.5) } else { C.border })
+        .on_press_tx(ui::on(Message::Select(id)))
+        .on_secondary_press(move |app: &mut App, _, tx: &mut Tx| ui::send(app, tx, menu::Message::Open(menu::Item::Insert(id)).into()));
+    browser::zone(app, DropZone::Insert(id), strip)
 }
 
-fn meter<'a>(peak: f32) -> Element<'a, AppMessage> {
-    let db = if peak > 0.0 { 20.0 * peak.log10() } else { -120.0 };
-    let fraction = ((db + 60.0) / 66.0).clamp(0.0, 1.0);
-    let lit = (fraction * 1000.0).round() as u16;
-    let color = if db > 0.0 { theme::BRIGHT } else { theme::FILL };
-    let mut bar = column![].width(3).height(Length::Fill);
-    if lit < 1000 {
-        bar = bar.push(Space::new().height(Length::FillPortion(1000 - lit)));
+/// The selected insert: its routing, sends, sidechains, and effects.
+fn pane(app: &App) -> El {
+    let mut chain = col().gap(10.0).padding(14.0).w(PANE_WIDTH);
+    let Some(insert) = app.project.mixer.insert(app.selected_insert) else { return chain };
+    chain = chain.child(text(app.project.insert_label(insert.id)).font(theme::TITLE).color(C.text).single_line().truncate());
+    let mixer = &app.project.mixer;
+    let choice = |i: &Insert, message: Message| Choice::new(app.project.insert_label(i.id), message, false);
+    if insert.id != daw_model::MASTER {
+        let from = insert.id;
+        let current = mixer.output(from);
+        let choices: Vec<Choice> = mixer.inserts.iter().filter(|i| mixer.can_route(from, i.id))
+            .map(|i| Choice::new(app.project.insert_label(i.id), Message::Output(from, i.id), Some(i.id) == current))
+            .collect();
+        chain = chain.child(col().gap(4.0)
+            .child(label("Output"))
+            .child(widgets::select("mixer-output", current.map(|to| app.project.insert_label(to)), "Choose insert", choices, PANE_WIDTH - 28.0)));
+        let open = |i: &&Insert| mixer.can_route(from, i.id) && !insert.sends.iter().any(|s| s.to == i.id);
+        let audio = mixer.inserts.iter().filter(open).filter(|i| i.id != insert.output).map(|i| choice(i, Message::Send(from, i.id, false))).collect();
+        let detectors = mixer.inserts.iter().filter(open).filter(|i| sidechain_ready(app, i) != Some(false)).map(|i| choice(i, Message::Send(from, i.id, true))).collect();
+        chain = chain.child(widgets::section("Sends").mt(4.0));
+        chain = chain.child(route_row("mixer-send", "Send to", "Send a copy of this insert's audio to another insert", audio));
+        chain = chain.child(route_row("mixer-sidechain-to", "Sidechain to", "Drive the sidechain input of an effect on another insert.\nLists inserts with an effect that can take a sidechain.", detectors));
+        for send in &insert.sends {
+            let to = send.to;
+            let kind = if send.sidechain { "Sidechain" } else { "Send" };
+            chain = chain.child(send_row(format!("{kind} → {}", app.project.insert_label(to)), from, to, send.level));
+        }
+        if insert.sends.iter().any(|s| s.sidechain) {
+            chain = chain.child(panels_help(
+                Btn::new("Detector only").on(insert.detector_only).build(Message::DetectorOnly(from)),
+                "Hear this insert only through its sidechain sends.\nIts output and audio sends go silent.",
+            ));
+        }
     }
-    if lit > 0 {
-        bar = bar.push(container(Space::new()).width(3).height(Length::FillPortion(lit)).style(theme::fill(color)));
+    let to = insert.id;
+    let sources: Vec<Choice> = mixer.inserts.iter().filter(|i| mixer.can_route(i.id, to) && !i.sends.iter().any(|s| s.to == to)).map(|i| choice(i, Message::Send(i.id, to, true))).collect();
+    chain = chain.child(route_row(
+        "mixer-sidechain-from",
+        "Sidechain from",
+        "Use another insert's signal to drive the sidechain input of an effect here,\nsuch as a compressor that ducks the bass when the kick plays",
+        sources,
+    ));
+    let mut fed = false;
+    for (source, send) in mixer.sidechain_sources(to) {
+        fed = true;
+        chain = chain.child(send_row(format!("Sidechain ← {}", app.project.insert_label(source.id)), source.id, to, send.level));
     }
-    container(bar).style(theme::fill(theme::HEADER)).height(Length::Fill).into()
+    if fed && sidechain_ready(app, insert) == Some(false) {
+        chain = chain.child(text("No effect here has a sidechain input.").font(theme::SMALL_TEXT).color(C.danger).wrap());
+    }
+    chain = chain.child(widgets::section("Effects").mt(4.0));
+    for (index, &instance) in insert.effects.iter().enumerate() {
+        let name = app.project.plugin(instance).map(|p| p.plugin.name.clone()).unwrap_or_default();
+        let failed = app.session.load_errors.contains_key(&instance);
+        let name = if failed { format!("{name} (failed)") } else { name };
+        let has_sidechain = app.session.sidechain_input(instance) == Some(true);
+        let name = if has_sidechain { format!("{name} · SC") } else { name };
+        let hint = if has_sidechain { "Open or close the editor\nHas a sidechain input (SC)" } else { "Open or close the editor" };
+        chain = chain.child(row().gap(2.0).center_y().w_full()
+            .child(Btn::new(name).width(PANE_WIDTH - 28.0 - 52.0).start().look(if app.session.editor_open(instance) { Look::On } else { Look::Raised }).help(hint).build(AppMessage::TogglePlugin(instance)))
+            .child(Btn::new("").icon(&icons::UP).ghost().disabled(index == 0).help("Move up the chain").build(Message::RaiseEffect(insert.id, index)))
+            .child(Btn::new("").icon(&icons::CLOSE).ghost().help("Remove effect").build(Message::RemoveEffect(insert.id, index))));
+    }
+    if insert.effects.is_empty() {
+        chain = chain.child(text("Drag effects here from the browser.").font(theme::SMALL_TEXT).color(C.text_faint).wrap());
+    }
+    chain
 }
 
-pub fn view(app: &App) -> Element<'_, AppMessage> {
-    let mut strips = row![].spacing(1).height(Length::Fill);
+fn panels_help(content: El, hint: &str) -> El {
+    super::help(content, hint)
+}
+
+pub fn view(app: &App) -> El {
+    let mut strips = row().gap(6.0).h_full().padding(10.0);
     for (index, insert) in app.project.mixer.inserts.iter().enumerate() {
-        let id = insert.id;
-        let selected = app.selected_insert == id;
-        let (left, right) = app.meters.get(index).copied().unwrap_or((0.0, 0.0));
-        let fader = mouse_area(
-            vertical_slider(0.0..=2.0, insert.volume, move |v| Message::Volume(id, v).into())
-                .step(0.001_f32)
-                .on_release(AppMessage::EndEdit)
-                .width(12)
-                .style(theme::fader),
-        )
-        .on_right_press(AppMessage::Automate(Target::InsertVolume(id)));
-        let pan = mouse_area(
-            slider(-1.0..=1.0, insert.pan, move |v| Message::Pan(id, v).into())
-                .step(0.01_f32)
-                .on_release(AppMessage::EndEdit)
-                .height(12)
-                .style(theme::fader),
-        )
-        .on_right_press(AppMessage::Automate(Target::InsertPan(id)));
-        let fader = super::help(fader, format!("Volume: {}\nRight-click to automate", gain_text(insert.volume)));
-        let pan = super::help(pan, format!("Pan: {}\nRight-click to automate", pan_text(insert.pan)));
-        let name = button(text(app.project.insert_label(id)).size(theme::SMALL))
-            .on_press(Message::Select(id).into())
-            .style(theme::plain(selected))
-            .padding([1, 3])
-            .width(Length::Fill);
-        // Where the signal goes, when it is not straight to the master.
-        let detector = insert.sends.iter().find(|s| s.sidechain).filter(|_| insert.is_detector_only());
-        let output = match (detector, app.project.mixer.output(id)) {
-            (Some(send), _) => Some(format!("sc > {}", app.project.insert_label(send.to))),
-            (None, Some(to)) if to != daw_model::MASTER => Some(format!("> {}", app.project.insert_label(to))),
-            _ => None,
-        };
-        // Inserts whose signal drives a sidechain here.
-        let sources: Vec<_> = app.project.mixer.sidechain_sources(id).map(|(i, _)| i.id).collect();
-        let sidechain = match sources.as_slice() {
-            [] => String::new(),
-            [one] => format!("sc < {}", app.project.insert_label(*one)),
-            many => format!("sc < {}", many.len()),
-        };
-        // About 5 px per character at size 10.
-        let fit = |line: Option<String>| -> String { line.unwrap_or_default().chars().take(((STRIP_WIDTH - 6.0) / 5.0) as usize).collect() };
-        let output = text(fit(output)).size(10).color(theme::TEXT_DIM);
-        let sidechain = text(fit(Some(sidechain))).size(10).color(theme::TEXT_DIM);
-        // The feeding channel's color, when one channel feeds this insert.
-        let stripe = app.project.insert_color(id).map_or(theme::BG, theme::rgb);
-        let stripe = container(Space::new()).width(Length::Fill).height(3).style(theme::fill(stripe));
-        let strip = column![
-            stripe,
-            name,
-            output,
-            sidechain,
-            row![meter(left), meter(right), fader].spacing(2).height(Length::Fill),
-            text(gain_text(insert.volume)).size(10).color(theme::TEXT_DIM),
-            pan,
-            text(pan_text(insert.pan)).size(10).color(theme::TEXT_DIM),
-            row![
-                super::help(toggle("m", insert.mute, Message::Mute(id).into()), "Mute insert"),
-                super::help(toggle("s", insert.solo, Message::Solo(id).into()), "Solo insert"),
-            ]
-            .spacing(2),
-        ]
-        .spacing(3)
-        .padding(3)
-        .width(STRIP_WIDTH)
-        .align_x(iced::Alignment::Center);
-        let background = if selected { theme::HEADER } else { theme::BG };
-        let strip = mouse_area(container(strip).height(Length::Fill).style(theme::fill(background)))
-            .on_press(Message::Select(id).into())
-            .on_right_press(menu::Message::Open(menu::Item::Insert(id)).into());
-        strips = strips.push(browser::zone(app, DropZone::Insert(id), strip));
+        strips = strips.child(strip(app, index, insert));
     }
-
-    let mut chain = column![label("effects")].spacing(2).padding(4).width(190);
-    if let Some(insert) = app.project.mixer.insert(app.selected_insert) {
-        chain = chain.push(text(app.project.insert_label(insert.id)).size(theme::TEXT_SIZE).color(theme::BRIGHT));
-        if insert.id != daw_model::MASTER {
-            let mixer = &app.project.mixer;
-            let from = insert.id;
-            let choices: Vec<InsertChoice> = mixer
-                .inserts
-                .iter()
-                .filter(|i| mixer.can_route(from, i.id))
-                .map(|i| InsertChoice { id: i.id, name: app.project.insert_label(i.id) })
-                .collect();
-            let current = mixer.output(from).and_then(|to| choices.iter().find(|c| c.id == to).cloned());
-            chain = chain.push(
-                row![label("output"), pick(choices, current, move |c: InsertChoice| Message::Output(from, c.id).into())]
-                    .spacing(4)
-                    .align_y(iced::Alignment::Center),
-            );
-        }
-        let mixer = &app.project.mixer;
-        let choice = |i: &Insert| InsertChoice { id: i.id, name: app.project.insert_label(i.id) };
-        if insert.id != daw_model::MASTER {
-            let from = insert.id;
-            let open = |i: &&Insert| mixer.can_route(from, i.id) && !insert.sends.iter().any(|s| s.to == i.id);
-            let audio = mixer.inserts.iter().filter(open).filter(|i| i.id != insert.output).map(choice).collect();
-            let detectors = mixer.inserts.iter().filter(open).filter(|i| sidechain_ready(app, i) != Some(false)).map(choice).collect();
-            chain = chain.push(route_row(
-                "send to",
-                "Send a copy of this insert's audio to another insert",
-                audio,
-                move |c| Message::Send(from, c.id, false).into(),
-            ));
-            chain = chain.push(route_row(
-                "sidechain to",
-                "Drive the sidechain input of an effect on another insert.\nLists inserts with an effect that can take a sidechain.",
-                detectors,
-                move |c| Message::Send(from, c.id, true).into(),
-            ));
-            for send in &insert.sends {
-                let to = send.to;
-                let arrow = if send.sidechain { "sidechain" } else { "send" };
-                chain = chain.push(send_row(format!("{arrow} > {}", app.project.insert_label(to)), from, to, send.level));
-            }
-            if insert.sends.iter().any(|s| s.sidechain) {
-                chain = chain.push(super::help(
-                    toggle("detector only", insert.detector_only, Message::DetectorOnly(from).into()),
-                    "Hear this insert only through its sidechain sends.\nIts output and audio sends go silent.",
-                ));
-            }
-        }
-        let to = insert.id;
-        let sources: Vec<InsertChoice> = mixer.inserts.iter().filter(|i| mixer.can_route(i.id, to) && !i.sends.iter().any(|s| s.to == to)).map(choice).collect();
-        chain = chain.push(route_row(
-            "sidechain from",
-            "Use another insert's signal to drive the sidechain input of an effect here,\nsuch as a compressor that ducks the bass when the kick plays",
-            sources,
-            move |c| Message::Send(c.id, to, true).into(),
-        ));
-        let mut fed = false;
-        for (source, send) in mixer.sidechain_sources(to) {
-            fed = true;
-            chain = chain.push(send_row(format!("sidechain < {}", app.project.insert_label(source.id)), source.id, to, send.level));
-        }
-        if fed && sidechain_ready(app, insert) == Some(false) {
-            chain = chain.push(text("no effect here has a sidechain input").size(theme::SMALL).color(theme::RECORD));
-        }
-        for (index, &instance) in insert.effects.iter().enumerate() {
-            let name = app.project.plugin(instance).map(|p| p.plugin.name.clone()).unwrap_or_default();
-            let failed = app.session.load_errors.contains_key(&instance);
-            let name = if failed { format!("{name} (failed)") } else { name };
-            let name = if app.session.sidechain_input(instance) == Some(true) { format!("{name} (sc)") } else { name };
-            chain = chain.push(
-                row![
-                    super::help(
-                        button(text(name).size(theme::SMALL))
-                            .on_press(AppMessage::TogglePlugin(instance))
-                            .style(theme::toggle(app.session.editor_open(instance)))
-                            .padding([1, 4])
-                            .width(Length::Fill),
-                        match app.session.sidechain_input(instance) {
-                            Some(true) => "Open or close the editor\nHas a sidechain input (sc)",
-                            _ => "Open or close the editor",
-                        },
-                    ),
-                    tool("up", Message::RaiseEffect(insert.id, index).into()),
-                    tool("x", Message::RemoveEffect(insert.id, index).into()),
-                ]
-                .spacing(2),
-            );
-        }
-        if insert.effects.is_empty() {
-            chain = chain.push(label("drag effects here from the browser"));
-        }
-    }
-    row![
-        mouse_area(super::scroll(strips, false, true).id(STRIPS).width(Length::Fill).height(Length::Fill))
-            .on_scroll(|delta| Message::Wheel(delta).into()),
-        browser::zone(app, DropZone::Insert(app.selected_insert), container(super::scroll(chain, true, false)).height(Length::Fill).style(theme::fill(theme::HEADER))),
-    ]
-    .spacing(3)
-    .into()
+    let strips = super::scroll(strips, false, true)
+        .key(STRIPS)
+        .h_full()
+        .on_scroll_offset(|pos| SCROLLED.set(pos.offset[0]))
+        .on_wheel(|app: &mut App, w, tx| {
+            if w.dy.abs() <= w.dx.abs() { return false; }
+            ui::send(app, tx, Message::Wheel(ScrollDelta::Pixels { x: w.dx, y: w.dy }).into());
+            true
+        });
+    let pane = browser::zone_part(app, DropZone::Insert(app.selected_insert), "pane",
+        col().w(PANE_WIDTH).h_full().fill(C.header).border_sides([1.0, 0.0, 0.0, 0.0], C.line).child(super::scroll(pane(app), true, false)));
+    row().w_full().h_full().child(col().grow(1.0).min_w(0.0).h_full().child(strips)).child(pane)
 }

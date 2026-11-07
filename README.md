@@ -1,6 +1,6 @@
 # DAW
 
-A digital audio workstation (DAW) written in Rust with [iced](https://iced.rs). It hosts VST3 and Audio Unit plugins, arranges its panels as tiles the way an i3 or sway window manager does, and has FL Studio style patterns, a playlist, a mixer, and an automation editor.
+A digital audio workstation (DAW) written in Rust with [Rune](https://github.com/anomalyco/rune). It hosts VST3 and Audio Unit plugins, arranges its panels as tiles the way an i3 or sway window manager does, and has FL Studio style patterns, a playlist, a mixer, and an automation editor.
 
 It runs on macOS and Linux. Audio Units are macOS only. On Linux, plugin editor windows use X11, or XWayland on Wayland desktops.
 
@@ -247,7 +247,7 @@ The workspace has four crates:
 - `daw-model`: the project data (patterns, playlist, mixer, automation, layout)
 - `daw-engine`: real-time audio rendering and the built-in synth
 - `daw-plugins`: VST3 and Audio Unit scanning, loading, and editor windows
-- `daw`: the iced app
+- `daw`: the Rune app
 
 ## License
 

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use daw_model::Project;
-use iced::Task;
+use crate::task::Task;
 
 use super::{App, Message};
 
@@ -125,12 +125,12 @@ impl App {
         self.queue_save(Kind::Pack(path));
     }
 
-    pub(super) fn poll_saves(&mut self) -> Task<Message> {
+    pub(super) fn poll_saves(&mut self) -> Task {
         let tasks: Vec<_> = self.saving.poll().into_iter().map(|r| self.save_finished(r)).collect();
         Task::batch(tasks)
     }
 
-    pub(super) fn save_finished(&mut self, finished: Finished) -> Task<Message> {
+    pub(super) fn save_finished(&mut self, finished: Finished) -> Task {
         let Finished { job, result } = finished;
         if job.generation != self.saving.generation { return Task::none(); }
         let manual = matches!(&job.kind, Kind::Save(path) if self.path.as_ref() == Some(path));

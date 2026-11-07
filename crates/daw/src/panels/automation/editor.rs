@@ -5,9 +5,10 @@ use daw_engine::song::PlayMode;
 use daw_model::ClipSource;
 use daw_model::automation::{Point as EnvPoint, TimeSnap, ValueSnap, simplify};
 use daw_model::time::Ticks;
-use iced::keyboard::Modifiers;
-use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
-use iced::{Color, Point, Rectangle, Renderer, Size, Theme, mouse};
+use crate::input::Modifiers;
+use crate::ui::canvas::{self, Frame, mouse, Path, Stroke};
+use crate::input::{Point, Rectangle, Size};
+use rune::Color;
 
 use super::{Message, State, Tool, points, snap_context, ticks_per_px};
 use crate::app::{App, Message as AppMessage};
@@ -171,7 +172,7 @@ impl Editor<'_> {
         (start, end, new)
     }
 
-    fn draw_envelope(&self, frame: &mut Frame<Renderer>, envelope: &daw_model::automation::Envelope, length: f64, bounds: Rectangle, color: Color, width: f32) {
+    fn draw_envelope(&self, frame: &mut Frame, envelope: &daw_model::automation::Envelope, length: f64, bounds: Rectangle, color: Color, width: f32) {
         let right = bounds.width;
         let path = Path::new(|b| {
             let mut x = AXIS_WIDTH;
@@ -194,12 +195,12 @@ impl Editor<'_> {
     }
 }
 
-impl canvas::Program<AppMessage> for Editor<'_> {
+impl canvas::Program for Editor<'_> {
     type State = CanvasState;
 
-    fn update(&self, state: &mut CanvasState, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<AppMessage>> {
-        use iced::keyboard::Event as KeyEvent;
-        use iced::mouse::{Button, Event as MouseEvent};
+    fn update(&self, state: &mut CanvasState, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action> {
+        use crate::input::Event as KeyEvent;
+        use crate::ui::canvas::mouse::{Button, Event as MouseEvent};
         let publish = |m: Message| Some(canvas::Action::publish(AppMessage::from(m)).and_capture());
         let redraw = || Some(canvas::Action::request_redraw().and_capture());
         match event {
@@ -351,12 +352,11 @@ impl canvas::Program<AppMessage> for Editor<'_> {
         }
     }
 
-    fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &CanvasState, frame: &mut Frame, bounds: Rectangle, _cursor: mouse::Cursor) {
         let app = self.app;
         let editor = self.state();
-        let mut frame = Frame::new(renderer, bounds.size());
         let size = bounds.size();
-        let Some(clip) = editor.clip.and_then(|id| app.project.automation_clip(id)) else { return vec![] };
+        let Some(clip) = editor.clip.and_then(|id| app.project.automation_clip(id)) else { return };
         let target = clip.target;
         let area = Size::new(size.width - AXIS_WIDTH, size.height - RULER_HEIGHT);
 
@@ -384,7 +384,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
             TimeSnap::Grid(grid) => grid,
             TimeSnap::Points => app.project.grid,
         };
-        timeline::draw_grid(&mut frame, editor.time, AXIS_WIDTH, RULER_HEIGHT, area, app.project.signature, grid);
+        timeline::draw_grid(frame, editor.time, AXIS_WIDTH, RULER_HEIGHT, area, app.project.signature, grid);
 
         // Past the clip end the envelope repeats; shade it.
         let end_x = self.x(clip.length as f64).max(AXIS_WIDTH);
@@ -394,9 +394,9 @@ impl canvas::Program<AppMessage> for Editor<'_> {
 
         // Other clips on the same target, for reference.
         for other in app.project.automation.iter().filter(|a| a.target == target && a.id != clip.id) {
-            self.draw_envelope(&mut frame, &other.envelope, other.length as f64, bounds, theme::FILL_DIM, 1.0);
+            self.draw_envelope(frame, &other.envelope, other.length as f64, bounds, theme::FILL_DIM, 1.0);
         }
-        self.draw_envelope(&mut frame, &clip.envelope, clip.length as f64, bounds, theme::FILL, 1.5);
+        self.draw_envelope(frame, &clip.envelope, clip.length as f64, bounds, theme::FILL, 1.5);
 
         // Handles on curved segments.
         for index in 0..clip.envelope.points.len() {
@@ -450,7 +450,7 @@ impl canvas::Program<AppMessage> for Editor<'_> {
             });
             if let Some(instance) = instance {
                 let local = (position - instance.start as f64 + instance.offset as f64) % clip.length.max(1) as f64;
-                timeline::draw_playhead(&mut frame, editor.time, AXIS_WIDTH, size.height, local);
+                timeline::draw_playhead(frame, editor.time, AXIS_WIDTH, size.height, local);
             }
         }
 
@@ -461,10 +461,10 @@ impl canvas::Program<AppMessage> for Editor<'_> {
             let y = self.y(v, bounds);
             let text = app.value_text(target, v);
             let text = timeline::fit(&text, AXIS_WIDTH - 4.0);
-            timeline::label(&mut frame, text, Point::new(3.0, (y - 7.0).clamp(RULER_HEIGHT, size.height - 14.0)), theme::TEXT_DIM);
+            timeline::label(frame, text, Point::new(3.0, (y - 7.0).clamp(RULER_HEIGHT, size.height - 14.0)), theme::TEXT_DIM);
         }
 
-        timeline::draw_ruler(&mut frame, editor.time, AXIS_WIDTH, area.width, app.project.signature);
+        timeline::draw_ruler(frame, editor.time, AXIS_WIDTH, area.width, app.project.signature);
         // Clip end handle in the ruler; drag it to change the length.
         let end_x = self.x(clip.length as f64).round();
         if end_x >= AXIS_WIDTH && end_x < size.width {
@@ -496,9 +496,8 @@ impl canvas::Program<AppMessage> for Editor<'_> {
             let width = readout.len() as f32 * 6.5 + 8.0;
             let x = (size.width - width).max(AXIS_WIDTH);
             frame.fill_rectangle(Point::new(x, 0.0), Size::new(width, RULER_HEIGHT), theme::HEADER);
-            timeline::label(&mut frame, readout, Point::new(x + 4.0, 2.0), theme::BRIGHT);
+            timeline::label(frame, readout, Point::new(x + 4.0, 2.0), theme::BRIGHT);
         }
-        vec![frame.into_geometry()]
     }
 
     fn mouse_interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {

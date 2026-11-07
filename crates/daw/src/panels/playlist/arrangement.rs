@@ -6,9 +6,10 @@ use daw_engine::song::PlayMode;
 use daw_model::tempo::TempoMap;
 use daw_model::time::Ticks;
 use daw_model::{Clip, ClipId, ClipSource, Source};
-use iced::keyboard::Modifiers;
-use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
-use iced::{Color, Point, Rectangle, Renderer, Size, Theme, mouse};
+use crate::input::Modifiers;
+use crate::ui::canvas::{self, Frame, mouse, Path, Stroke};
+use crate::input::{Point, Rectangle, Size};
+use rune::Color;
 
 use super::{Edge, Message, State, loop_tick, source_name};
 use crate::app::{App, Message as AppMessage};
@@ -25,7 +26,7 @@ const MUTE_WIDTH: f32 = 16.0;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::widget::canvas::Program;
+    use crate::ui::canvas::{Program, Status};
 
     #[test]
     fn right_click_on_a_clip_opens_its_menu_without_removing_it() {
@@ -37,7 +38,7 @@ mod tests {
         let action = arrangement.update(&mut CanvasState::default(), &event, Rectangle::with_size(Size::new(800.0, 500.0)), cursor).unwrap();
         let (message, _, status) = action.into_inner();
         assert!(matches!(message, Some(AppMessage::Menu(menu::Message::Open(menu::Item::Clip(clicked)))) if clicked == id));
-        assert_eq!(status, iced::event::Status::Captured);
+        assert_eq!(status, Status::Captured);
         assert_eq!(app.project.playlist.clips.len(), 1);
     }
 }
@@ -105,30 +106,33 @@ impl Arrangement<'_> {
         })
     }
 
-    fn draw_clip(&self, frame: &mut Frame<Renderer>, clip: &Clip, selected: bool) {
+    fn draw_clip(&self, frame: &mut Frame, clip: &Clip, selected: bool) {
         let app = self.app;
         let r = self.clip_rect(clip);
         let tint = app.project.clip_color(clip.source).map(theme::rgb);
         // Clips on a muted track look muted too.
         let muted = clip.muted || app.project.playlist.tracks.get(clip.track).is_some_and(|t| t.mute);
-        let (background, content, text) = if muted {
-            (if selected { theme::CONTROL_HOVER } else { theme::BG }, theme::FILL_DIM, theme::TEXT_DIM)
-        } else if selected {
-            (theme::SELECTED, theme::FILL_DIM, theme::BG)
-        } else if let Some(tint) = tint {
-            (theme::mix(theme::CONTROL, tint, 0.3), theme::mix(tint, theme::BRIGHT, 0.2), theme::TEXT)
+        // A body tinted with the clip's color, a stronger band behind the name,
+        // and an accent ring while selected.
+        let base = tint.unwrap_or(theme::TEXT_FAINT);
+        let (background, band, content, text) = if muted {
+            (theme::mix(theme::BG, base, 0.08), theme::mix(theme::BG, base, 0.16), theme::FILL_DIM, theme::TEXT_FAINT)
         } else {
-            (theme::CONTROL_ACTIVE, theme::FILL, theme::TEXT)
+            (theme::mix(theme::SURFACE, base, 0.22), theme::mix(theme::SURFACE, base, 0.42), theme::mix(base, theme::TEXT, 0.25), theme::TEXT)
         };
         let body = Rectangle { x: r.x, y: r.y + 1.0, width: r.width - 1.0, height: r.height - 2.0 };
-        frame.fill_rectangle(body.position(), body.size(), background);
-        // A stripe in the channel color, kept while selected or muted so the
-        // clip stays recognizable.
-        if let Some(tint) = tint {
-            let stripe = if muted { theme::mix(theme::BG, tint, 0.4) } else { tint };
-            frame.fill_rectangle(body.position(), Size::new(body.width, 2.0), stripe);
+        let radius = 4.0;
+        if selected {
+            frame.round_rectangle(body.position(), body.size(), radius, theme::ACCENT);
+            let inset = Rectangle { x: body.x + 1.5, y: body.y + 1.5, width: body.width - 3.0, height: body.height - 3.0 };
+            frame.round_rectangle(inset.position(), inset.size(), radius - 1.0, background);
+        } else {
+            frame.round_rectangle(body.position(), body.size(), radius, background);
         }
-        let plain = muted || selected;
+        let band_height = 14.0f32.min(body.height);
+        frame.round_rectangle(Point::new(body.x + if selected { 1.5 } else { 0.0 }, body.y + if selected { 1.5 } else { 0.0 }),
+            Size::new(body.width - if selected { 3.0 } else { 0.0 }, band_height - if selected { 1.5 } else { 0.0 }), radius - 1.0, band);
+        let plain = muted;
         let inner = Rectangle { y: body.y + 13.0, height: (body.height - 15.0).max(1.0), ..body };
         let view = self.state().time;
         match clip.source {
@@ -207,16 +211,16 @@ impl Arrangement<'_> {
             }
         }
         let name = source_name(app, clip.source);
-        let name = if clip.muted { format!("[muted] {name}") } else { name };
+        let name = if clip.muted { format!("{name} (muted)") } else { name };
         let visible_x = body.x.max(HEADER_WIDTH);
         let name = timeline::fit(&name, body.x + body.width - visible_x - 4.0);
-        timeline::label(frame, name, Point::new(visible_x + 3.0, body.y), text);
+        timeline::label(frame, name, Point::new(visible_x + 4.0, body.y), text);
     }
 }
 
 impl Arrangement<'_> {
     /// The take being recorded, on the track it will land on.
-    fn draw_take(&self, frame: &mut Frame<Renderer>, take: &Take) {
+    fn draw_take(&self, frame: &mut Frame, take: &Take) {
         let app = self.app;
         let channels = usize::from(take.channels.max(1));
         let frames = take.samples.len() / channels;
@@ -258,7 +262,7 @@ impl Arrangement<'_> {
 /// canvas x to a frame of the file, which has `frames` frames, and `level`
 /// gives the peak of frames `from..to`, where `from < to`.
 fn draw_waveform(
-    frame: &mut Frame<Renderer>,
+    frame: &mut Frame,
     area: Rectangle,
     frames: usize,
     frame_at: impl Fn(f32) -> f64,
@@ -279,12 +283,12 @@ fn draw_waveform(
     }
 }
 
-impl canvas::Program<AppMessage> for Arrangement<'_> {
+impl canvas::Program for Arrangement<'_> {
     type State = CanvasState;
 
-    fn update(&self, state: &mut CanvasState, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<AppMessage>> {
-        use iced::keyboard::Event as KeyEvent;
-        use iced::mouse::{Button, Event as MouseEvent};
+    fn update(&self, state: &mut CanvasState, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action> {
+        use crate::input::Event as KeyEvent;
+        use crate::ui::canvas::mouse::{Button, Event as MouseEvent};
         let publish = |m: Message| Some(canvas::Action::publish(AppMessage::from(m)).and_capture());
         match event {
             canvas::Event::Keyboard(KeyEvent::ModifiersChanged(m)) => {
@@ -342,7 +346,7 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
                     }
                     (Button::Right, Some((id, _))) => {
                         let open = menu::Message::Open(menu::Item::Clip(id));
-                        Some(canvas::Action::publish(open.into()).and_capture())
+                        Some(canvas::Action::publish(open).and_capture())
                     }
                     (Button::Left | Button::Right, _) => {
                         state.drag = Some(Drag::Box { from: p, to: p, additive: state.modifiers.shift() });
@@ -396,15 +400,14 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
         }
     }
 
-    fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &CanvasState, frame: &mut Frame, bounds: Rectangle, _cursor: mouse::Cursor) {
         let app = self.app;
         let playlist = self.state();
-        let mut frame = Frame::new(renderer, bounds.size());
         let size = bounds.size();
         let area = Size::new(size.width - HEADER_WIDTH, size.height - RULER_HEIGHT);
         let th = playlist.track_height;
 
-        timeline::draw_grid(&mut frame, playlist.time, HEADER_WIDTH, RULER_HEIGHT, area, app.project.signature, app.project.grid);
+        timeline::draw_grid(frame, playlist.time, HEADER_WIDTH, RULER_HEIGHT, area, app.project.signature, app.project.grid);
         let last_track = self.track_at(size.height).max(0) as usize;
         for track in playlist.top_track..=last_track {
             let y = self.track_y(track) + th - 1.0;
@@ -415,10 +418,10 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             let clip = playlist.drag_preview.iter().find(|c| c.id == clip.id).unwrap_or(clip);
             if clip.track < playlist.top_track || clip.track > last_track { continue; }
             let selected = playlist.selected.contains(&clip.id);
-            self.draw_clip(&mut frame, clip, selected);
+            self.draw_clip(frame, clip, selected);
         }
         if let Some(take) = app.session.current_take() {
-            self.draw_take(&mut frame, take);
+            self.draw_take(frame, take);
         }
 
         if let Some(Drag::Box { from, to, .. }) = state.drag {
@@ -434,17 +437,22 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             let Some(info) = app.project.playlist.tracks.get(track) else { break };
             let y = self.track_y(track);
             if playlist.selected_track == Some(track) {
-                frame.fill_rectangle(Point::new(0.0, y), Size::new(HEADER_WIDTH, th - 1.0), theme::CONTROL_ACTIVE);
+                frame.fill_rectangle(Point::new(0.0, y), Size::new(HEADER_WIDTH, th - 1.0), theme::RAISED);
+                frame.fill_rectangle(Point::new(0.0, y), Size::new(2.0, th - 1.0), theme::ACCENT);
             }
+            frame.fill_rectangle(Point::new(0.0, y + th - 1.0), Size::new(HEADER_WIDTH, 1.0), theme::LINE);
             let color = if info.mute { theme::TEXT_FAINT } else { theme::TEXT };
-            timeline::label(&mut frame, timeline::fit(&info.name, HEADER_WIDTH - MUTE_WIDTH - 6.0), Point::new(MUTE_WIDTH + 4.0, y + th / 2.0 - 7.0), color);
-            // Mute toggle, lit while muted like the channel rack's.
-            let (fill, mark) = if info.mute { (theme::SELECTED, theme::BG) } else { (theme::CONTROL_ACTIVE, theme::TEXT_DIM) };
-            frame.fill_rectangle(Point::new(3.0, y + th / 2.0 - 7.0), Size::new(MUTE_WIDTH - 2.0, 14.0), fill);
-            timeline::label(&mut frame, "m", Point::new(5.5, y + th / 2.0 - 8.0), mark);
+            timeline::label(frame, timeline::fit(&crate::panels::sentence(&info.name), HEADER_WIDTH - MUTE_WIDTH - 10.0), Point::new(MUTE_WIDTH + 8.0, y + th / 2.0 - 7.0), color);
+            // Mute toggle: a dot, hollow while the track plays, lit while muted.
+            let center = Point::new(4.0 + MUTE_WIDTH / 2.0, y + th / 2.0);
+            if info.mute {
+                frame.fill(&Path::circle(center, 4.5), theme::ACCENT);
+            } else {
+                frame.stroke(&Path::circle(center, 4.0), Stroke::default().with_color(theme::TEXT_FAINT).with_width(1.0));
+            }
         }
 
-        timeline::draw_ruler(&mut frame, playlist.time, HEADER_WIDTH, area.width, app.project.signature);
+        timeline::draw_ruler(frame, playlist.time, HEADER_WIDTH, area.width, app.project.signature);
         let loop_range = match state.drag {
             Some(Drag::Loop { from, to }) => Some((from.min(to), from.max(to))),
             _ => app.project.playlist.loop_range.map(|(a, b)| (a as f64, b as f64)),
@@ -463,18 +471,17 @@ impl canvas::Program<AppMessage> for Arrangement<'_> {
             _ => None,
         };
         if let Some(tick) = seeking {
-            timeline::draw_start_marker(&mut frame, playlist.time, HEADER_WIDTH, size.height, tick);
+            timeline::draw_start_marker(frame, playlist.time, HEADER_WIDTH, size.height, tick);
         }
         if app.mode == PlayMode::Song {
             // The start marker stays put; the playhead only moves away from it while playing.
             if seeking.is_none() {
-                timeline::draw_start_marker(&mut frame, playlist.time, HEADER_WIDTH, size.height, app.song_start);
+                timeline::draw_start_marker(frame, playlist.time, HEADER_WIDTH, size.height, app.song_start);
             }
             if app.playing {
-                timeline::draw_playhead(&mut frame, playlist.time, HEADER_WIDTH, size.height, app.position);
+                timeline::draw_playhead(frame, playlist.time, HEADER_WIDTH, size.height, app.position);
             }
         }
-        vec![frame.into_geometry()]
     }
 
     fn mouse_interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {

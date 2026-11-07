@@ -1,8 +1,7 @@
 mod app;
-mod capture;
 mod cli;
 mod config;
-mod dialogs;
+mod input;
 mod keys;
 mod menu;
 mod midi;
@@ -12,15 +11,15 @@ mod palette;
 mod panels;
 mod processing;
 mod project_files;
-mod quit;
 mod render;
 mod session;
+mod task;
 mod theme;
+mod ui;
 mod units;
 
 use std::process::ExitCode;
 
-use app::App;
 use clap::Parser;
 
 fn main() -> ExitCode {
@@ -32,6 +31,17 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if let Some(code) = daw_plugins::scan::run_child(&args) {
         std::process::exit(code);
+    }
+    // Rune's headless review tools: `daw --snap out.png --scene demo`.
+    if ui::headless_args(&args) {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+        return match ui::run(true) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     let cli = cli::Cli::parse();
     if let Some(command) = cli.command {
@@ -47,17 +57,8 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_app() -> iced::Result {
+fn run_app() -> Result<(), String> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     open_files::install();
-    iced::application(App::boot, App::update, App::view)
-        .title(App::title)
-        .theme(|_: &App| theme::theme())
-        .scale_factor(|app: &App| f32::from(app.config.ui_scale) / 100.0)
-        .subscription(App::subscription)
-        .settings(iced::Settings { default_text_size: theme::TEXT_SIZE.into(), ..iced::Settings::default() })
-        .window_size(iced::Size::new(1400.0, 860.0))
-        // Closing asks to save unsaved changes first; see `Message::CloseRequested`.
-        .exit_on_close_request(false)
-        .run()
+    ui::run(false)
 }

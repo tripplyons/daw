@@ -3,13 +3,14 @@
 use std::time::{Duration, Instant};
 
 use daw_model::time::{Grid, TICKS_PER_BEAT, Ticks, TimeSignature};
-use iced::widget::canvas::{Frame, Path, Stroke, Text};
-use iced::keyboard::Modifiers;
-use iced::{Color, Point, Renderer, Size, mouse};
+use rune::Color;
+
+use crate::input::{Modifiers, Point, ScrollDelta, Size};
+use crate::ui::canvas::{Frame, Path, Stroke, Text};
 
 use crate::theme;
 
-pub const RULER_HEIGHT: f32 = 16.0;
+pub const RULER_HEIGHT: f32 = 22.0;
 const MIN_SCALE: f32 = 2.0;
 const MAX_SCALE: f32 = 800.0;
 
@@ -87,7 +88,7 @@ pub enum Wheel {
 
 impl Wheel {
     /// `x` is relative to the left edge of the time area.
-    pub fn from_event(view: TimeView, delta: mouse::ScrollDelta, modifiers: Modifiers, x: f32) -> Wheel {
+    pub fn from_event(view: TimeView, delta: ScrollDelta, modifiers: Modifiers, x: f32) -> Wheel {
         let (dx, dy) = super::wheel_lines(delta);
         // macOS turns Shift+wheel into sideways steps, so take whichever axis moved.
         let steps = if dx.abs() > dy.abs() { dx } else { dy };
@@ -115,13 +116,13 @@ pub fn zoom_height(height: f32, steps: f32, min: f32, max: f32) -> f32 {
     (height * 1.15f32.powf(steps)).clamp(min, max)
 }
 
-fn line(frame: &mut Frame<Renderer>, from: Point, to: Point, color: Color) {
+fn line(frame: &mut Frame, from: Point, to: Point, color: Color) {
     frame.stroke(&Path::line(from, to), Stroke::default().with_color(color).with_width(1.0));
 }
 
 /// Vertical grid lines for bars, beats, and the snap grid, skipping any level
 /// that would be denser than a few pixels.
-pub fn draw_grid(frame: &mut Frame<Renderer>, view: TimeView, left: f32, top: f32, size: Size, signature: TimeSignature, grid: Grid) {
+pub fn draw_grid(frame: &mut Frame, view: TimeView, left: f32, top: f32, size: Size, signature: TimeSignature, grid: Grid) {
     let bar = signature.ticks_per_bar();
     let beat = Ticks::from(TICKS_PER_BEAT) * 4 / Ticks::from(signature.denominator);
     let step = grid.step(signature).unwrap_or(beat);
@@ -146,8 +147,9 @@ pub fn draw_grid(frame: &mut Frame<Renderer>, view: TimeView, left: f32, top: f3
 }
 
 /// Bar numbers along the top of a time area.
-pub fn draw_ruler(frame: &mut Frame<Renderer>, view: TimeView, left: f32, width: f32, signature: TimeSignature) {
+pub fn draw_ruler(frame: &mut Frame, view: TimeView, left: f32, width: f32, signature: TimeSignature) {
     frame.fill_rectangle(Point::new(left, 0.0), Size::new(width, RULER_HEIGHT), theme::HEADER);
+    frame.fill_rectangle(Point::new(left, RULER_HEIGHT - 1.0), Size::new(width, 1.0), theme::LINE);
     let bar = signature.ticks_per_bar();
     let bar_px = view.x(bar as f64) - view.x(0.0);
     let every = [1, 2, 4, 8, 16, 32, 64].into_iter().find(|&n| bar_px * n as f32 >= 28.0).unwrap_or(128);
@@ -161,10 +163,10 @@ pub fn draw_ruler(frame: &mut Frame<Renderer>, view: TimeView, left: f32, width:
         if x < left {
             continue;
         }
-        line(frame, Point::new(x + 0.5, RULER_HEIGHT - 5.0), Point::new(x + 0.5, RULER_HEIGHT), theme::TEXT_FAINT);
+        line(frame, Point::new(x + 0.5, RULER_HEIGHT - 7.0), Point::new(x + 0.5, RULER_HEIGHT - 1.0), theme::TEXT_FAINT);
         frame.fill_text(Text {
             content: format!("{}", index + 1),
-            position: Point::new(x + 3.0, 2.0),
+            position: Point::new(x + 4.0, 4.0),
             color: theme::TEXT_DIM,
             size: theme::SMALL.into(),
             ..Text::default()
@@ -172,31 +174,31 @@ pub fn draw_ruler(frame: &mut Frame<Renderer>, view: TimeView, left: f32, width:
     }
 }
 
-pub fn draw_playhead(frame: &mut Frame<Renderer>, view: TimeView, left: f32, height: f32, tick: f64) {
+pub fn draw_playhead(frame: &mut Frame, view: TimeView, left: f32, height: f32, tick: f64) {
     let x = left + view.x(tick).round() + 0.5;
     if x >= left {
-        line(frame, Point::new(x, 0.0), Point::new(x, height), theme::BRIGHT);
+        line(frame, Point::new(x, 0.0), Point::new(x, height), theme::ACCENT);
     }
 }
 
 /// Where play starts: a triangle in the ruler and a faint line below it.
-pub fn draw_start_marker(frame: &mut Frame<Renderer>, view: TimeView, left: f32, height: f32, tick: f64) {
+pub fn draw_start_marker(frame: &mut Frame, view: TimeView, left: f32, height: f32, tick: f64) {
     let x = left + view.x(tick).round();
     if x < left {
         return;
     }
     let marker = Path::new(|b| {
-        b.move_to(Point::new(x - 5.0, 0.0));
-        b.line_to(Point::new(x + 6.0, 0.0));
-        b.line_to(Point::new(x + 0.5, 7.0));
+        b.move_to(Point::new(x - 5.0, RULER_HEIGHT - 9.0));
+        b.line_to(Point::new(x + 6.0, RULER_HEIGHT - 9.0));
+        b.line_to(Point::new(x + 0.5, RULER_HEIGHT - 2.0));
         b.close();
     });
-    frame.fill(&marker, theme::TEXT);
-    frame.fill_rectangle(Point::new(x, RULER_HEIGHT), Size::new(1.0, height - RULER_HEIGHT), theme::TEXT_FAINT);
+    frame.fill(&marker, theme::ACCENT);
+    frame.fill_rectangle(Point::new(x, RULER_HEIGHT), Size::new(1.0, height - RULER_HEIGHT), theme::ACCENT.alpha(0.35));
 }
 
 /// Text helper for canvases.
-pub fn label(frame: &mut Frame<Renderer>, content: impl Into<String>, position: Point, color: Color) {
+pub fn label(frame: &mut Frame, content: impl Into<String>, position: Point, color: Color) {
     frame.fill_text(Text { content: content.into(), position, color, size: theme::SMALL.into(), ..Text::default() });
 }
 
@@ -252,7 +254,7 @@ mod tests {
     use super::*;
 
     fn wheel(dx: f32, dy: f32, modifiers: Modifiers) -> Wheel {
-        Wheel::from_event(TimeView::new(64.0), mouse::ScrollDelta::Lines { x: dx, y: dy }, modifiers, 100.0)
+        Wheel::from_event(TimeView::new(64.0), ScrollDelta::Lines { x: dx, y: dy }, modifiers, 100.0)
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use daw_engine::song::channel_node;
-use iced::keyboard::{Event, Modifiers, key::{Code, Physical}};
+use crate::input::{Event, Modifiers, key::{Code, Physical}};
 
 use super::App;
 use crate::midi::Packet;

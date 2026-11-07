@@ -10,15 +10,13 @@
 use daw_engine::song::{PlayMode, channel_node};
 use daw_model::time::{Grid, Ticks};
 use daw_model::{ChannelId, Note};
-use iced::keyboard::{Key, Modifiers, key::Named};
-use iced::widget::canvas::Canvas;
-use iced::widget::{pick_list, row};
-use iced::{Element, Length};
+use rune::El;
 
 use super::timeline::{self, RULER_HEIGHT, TimeView};
-use super::pick;
+use super::pick_sized;
 use crate::app::{App, Message as AppMessage};
-use crate::theme;
+use crate::input::{Key, Modifiers, key::Named};
+use crate::ui::{canvas, widgets::{self, Choice}};
 
 mod roll;
 use roll::Roll;
@@ -393,62 +391,41 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct ChannelChoice {
-    id: ChannelId,
-    name: String,
-}
-
-impl std::fmt::Display for ChannelChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name)
-    }
-}
-
 /// The channel whose notes the piano roll edits.
-pub fn channel_picker(app: &App, width: f32) -> Element<'_, AppMessage> {
-    let channels: Vec<ChannelChoice> =
-        app.project.channels.iter().map(|c| ChannelChoice { id: c.id, name: c.name.clone() }).collect();
-    let selected = channels.iter().find(|c| Some(c.id) == app.selected_channel).cloned();
-    let picker = pick_list(channels, selected, |c: ChannelChoice| Message::Channel(c.id).into())
-        .placeholder("channel")
-        .text_size(theme::SMALL)
-        .width(width)
-        .padding([2, 6])
-        .style(theme::pick)
-        .menu_style(theme::menu);
-    super::help(picker, "Channel to edit")
+pub fn channel_picker(app: &App, width: f32) -> El {
+    let choices = app.project.channels.iter()
+        .map(|c| Choice::new(c.name.clone(), Message::Channel(c.id), Some(c.id) == app.selected_channel))
+        .collect();
+    let current = app.selected_channel.and_then(|id| app.project.channel(id)).map(|c| c.name.clone());
+    widgets::select_with("roll-channel", current, "Channel", choices, width, Some("Channel to edit".into()))
 }
 
 /// The toggle for other channels' notes.
-pub fn ghosts_toggle(app: &App) -> Element<'_, AppMessage> {
+pub fn ghosts_toggle(app: &App) -> El {
     super::help(
-        super::toggle("ghosts", app.piano_roll.ghosts, Message::Ghosts.into()),
+        super::toggle("Ghost notes", app.piano_roll.ghosts, Message::Ghosts.into()),
         "Show other channels' notes in this pattern. Click one to edit its channel.",
     )
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
-    row![
+pub fn toolbar(app: &App) -> El {
+    super::bar(vec![
         channel_picker(app, 150.0),
         ghosts_toggle(app),
-        super::labeled("snap", pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into())),
-    ]
-    .spacing(4)
-    .align_y(iced::Alignment::Center)
-    .wrap()
-    .into()
+        super::labeled("Snap", pick_sized("roll-snap", Grid::CHOICES.to_vec(), Some(app.project.grid), "Snap", 0.0, |g| Message::Grid(g).into())),
+    ])
 }
 
-pub fn view(app: &App, focused: bool) -> Element<'_, AppMessage> {
-    let canvas = Canvas::new(Roll { app, focused }).width(Length::Fill).height(Length::Fill);
+pub fn view(app: &App, focused: bool) -> El {
+    let canvas = canvas::view(app, "piano-roll", move |app| Box::new(Roll { app, focused }));
     let empty = app.project.pattern(app.selected_pattern).is_some_and(|p| p.lanes.iter().all(|l| l.notes.is_empty()));
     let channel = app.selected_channel.and_then(|id| app.project.channel(id));
-    let Some(channel) = channel.filter(|_| empty) else { return canvas.into() };
+    let Some(channel) = channel.filter(|_| empty) else { return canvas };
     let lines = vec![
         format!("Click to draw a note for {}. Drag its right end to change its length.", channel.name),
         "Double-click or right-click a note to delete it.".to_string(),
     ];
-    let hint = super::empty_state("empty pattern", &lines, vec![super::action(app, "play with keyboard", crate::keys::Action::ToggleComputerKeyboard, Some(app.computer_keyboard.enabled))]);
-    iced::widget::stack![canvas, hint].into()
+    let hint = super::empty_state("Empty pattern", &lines, Vec::new());
+    // Presses pass through the hint to the canvas.
+    rune::el().w_full().h_full().child(canvas).child(hint.absolute(0.0, 0.0).w_full().h_full().inert())
 }

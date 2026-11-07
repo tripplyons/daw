@@ -9,17 +9,16 @@
 use daw_engine::song::PlayMode;
 use daw_model::time::{Grid, Ticks};
 use daw_model::{AudioEdit, Clip, ClipId, ClipSource, Source};
-use iced::keyboard::{Key, Modifiers};
-use iced::widget::canvas::Canvas;
-use iced::widget::{column, row, slider, text_input};
-use iced::{Element, Length};
+use rune::{El, col, row};
 
 use super::timeline::{self, RULER_HEIGHT, TimeView};
-use super::{label, pick, tool, toggle};
+use super::{label, pick_sized, tool, toggle};
 use crate::app::audio::audio_ticks;
 use crate::app::{App, Message as AppMessage};
+use crate::input::{Key, Modifiers};
 use crate::keys::Action;
-use crate::theme;
+use crate::theme::C;
+use crate::ui::{canvas, icons, widgets::{self, Btn, Choice, Slider}};
 
 mod arrangement;
 use arrangement::Arrangement;
@@ -647,81 +646,85 @@ fn brush_choices(app: &App) -> (Vec<BrushChoice>, Option<BrushChoice>) {
 }
 
 /// The brush picker for the tile header, so what a click places is in sight.
-pub fn brush_picker(app: &App, width: f32) -> Element<'_, AppMessage> {
-    let (choices, current) = brush_choices(app);
-    let picker = iced::widget::pick_list(choices, current, |c: BrushChoice| Message::Brush(c).into())
-        .text_size(theme::SMALL)
-        .width(width)
-        .padding([2, 6])
-        .style(theme::pick)
-        .menu_style(theme::menu);
-    super::help(super::labeled("brush", picker.into()), "What a click on an empty part of a track places")
+pub fn brush_picker(app: &App, width: f32) -> El {
+    super::help(super::labeled("Brush", brush_select(app, width)), "What a click on an empty part of a track places")
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
+fn brush_select(app: &App, width: f32) -> El {
     let (choices, current) = brush_choices(app);
-    let delete: Element<'_, AppMessage> = match app.playlist.selected_track {
-        Some(_) => super::tool("delete track", Message::DeleteTrack.into()),
-        None => label(""),
-    };
-    row![
-        super::help(tool("fit", Message::FitSong.into()), "Zoom to show the whole song"),
-        tool("unique", Message::MakeUnique.into()),
-        tool("consolidate", Message::Consolidate.into()),
-        toggle("stretch", app.playlist.stretch_mode, Message::StretchMode.into()),
-        super::tool("+ track", Message::AddTrack.into()),
-        delete,
-        super::action(app, "+ audio", Action::ImportAudio, None),
-        super::labeled("brush", pick(choices, current, |c| Message::Brush(c).into())),
-        super::labeled("snap", pick(Grid::CHOICES.to_vec(), Some(app.project.grid), |g| Message::Grid(g).into())),
-    ]
-    .spacing(4)
-    .align_y(iced::Alignment::Center)
-    .wrap()
-    .into()
+    let name = current.as_ref().map(|c| c.name.clone());
+    let choices = choices.into_iter().map(|c| {
+        let chosen = current.as_ref() == Some(&c);
+        Choice::new(c.name.clone(), Message::Brush(c), chosen)
+    }).collect();
+    widgets::select("playlist-brush", name, "Brush", choices, width)
 }
 
-pub fn view(app: &App, _focused: bool) -> Element<'_, AppMessage> {
-    let canvas = Canvas::new(Arrangement { app, tempo: app.project.tempo_map() }).width(Length::Fill).height(Length::Fill);
-    if app.project.playlist.clips.is_empty() {
-        let brush = app.playlist.brush.unwrap_or(ClipSource::Pattern(app.selected_pattern));
-        let lines = vec![
-            format!("Click a track to place {}.", source_name(app, brush)),
-            "Drop WAV files on the window to import audio.".to_string(),
-        ];
-        let hint = super::empty_state("empty song", &lines, vec![super::action(app, "+ audio", Action::ImportAudio, None)]);
-        return iced::widget::stack![canvas, hint].into();
+pub fn toolbar(app: &App) -> El {
+    let mut items = vec![
+        super::help(tool("Fit", Message::FitSong.into()), "Zoom to show the whole song"),
+        super::help(tool("Make unique", Message::MakeUnique.into()), "Give the selected clips their own copy of their pattern"),
+        tool("Consolidate", Message::Consolidate.into()),
+        toggle("Stretch", app.playlist.stretch_mode, Message::StretchMode.into()),
+        Btn::new("Track").icon(&icons::PLUS).help("Add a track").build(Message::AddTrack),
+    ];
+    if app.playlist.selected_track.is_some() {
+        items.push(tool("Delete track", Message::DeleteTrack.into()));
     }
-    let selected = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_)));
-    let Some(clip) = selected else { return canvas.into() };
+    items.push(super::action(app, "Import audio", Action::ImportAudio, None));
+    items.push(super::labeled("Brush", brush_select(app, 140.0)));
+    items.push(super::labeled("Snap", pick_sized("playlist-snap", Grid::CHOICES.to_vec(), Some(app.project.grid), "Snap", 0.0, |g| Message::Grid(g).into())));
+    super::bar(items)
+}
+
+/// Pitch, length, and direction for the selected audio clip.
+fn audio_controls(app: &App, clip: &Clip) -> El {
     let semitones = app.playlist.pitch_edit.as_ref().filter(|(ids, _)| ids.contains(&clip.id))
         .map_or(clip.audio.semitones, |(_, pitch)| *pitch);
     let mut current = AudioText::new(clip);
     current.pitch = semitones.trunc().to_string();
     current.cents = format!("{:.3}", (semitones - semitones.trunc()) * 100.0);
     let draft = app.playlist.audio_text.as_ref().filter(|text| text.clip == clip.id).unwrap_or(&current);
-    let audio_input = |placeholder: &str, value: &str, field| text_input(placeholder, value)
-        .on_input(move |s| Message::AudioText(field, s).into()).on_submit(Message::AudioApply(field).into())
-        .width(72).size(theme::SMALL).padding([3, 6]).style(theme::input);
-    let pitch = row![
-        label("audio pitch"), slider(AudioEdit::SEMITONES, semitones, |p| Message::AudioPitch(p).into())
-            .step(0.01_f32).on_release(Message::AudioPitchDone.into()).width(100).style(theme::fader),
-        audio_input("pitch", &draft.pitch, AudioField::Pitch), label("st"),
-        audio_input("cents", &draft.cents, AudioField::Cents), label("cents"),
-        tool("set pitch", Message::AudioApply(AudioField::Pitch).into()),
-        tool("reset pitch", Message::AudioReset(AudioField::Pitch).into()),
-        tool("reset cents", Message::AudioReset(AudioField::Cents).into()),
-    ].spacing(6).align_y(iced::Alignment::Center);
-    let options = row![
-        label("duration"), pick(vec![0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0], Some(clip.audio.stretch), |s| Message::AudioStretch(s).into()),
-        audio_input("ratio", &draft.stretch, AudioField::Stretch), label("x"),
-        tool("set ratio", Message::AudioApply(AudioField::Stretch).into()),
-        tool("reset ratio", Message::AudioReset(AudioField::Stretch).into()),
-        toggle("reverse", clip.audio.reverse, Message::Reverse.into()),
-        tool("mute clips", Message::MuteSelection.into()),
-    ].spacing(6).align_y(iced::Alignment::Center);
-    let controls = column![pitch, options].spacing(4).padding(4);
-    column![canvas, super::scroll(controls, false, true).width(Length::Fill).height(58)].into()
+    let pitch_field = widgets::field(app, "audio-pitch", &draft.pitch, "Pitch", |s| Message::AudioText(AudioField::Pitch, s).into(), Some(Message::AudioApply(AudioField::Pitch).into())).w(64.0);
+    let cents_field = widgets::field(app, "audio-cents", &draft.cents, "Cents", |s| Message::AudioText(AudioField::Cents, s).into(), Some(Message::AudioApply(AudioField::Cents).into())).w(72.0);
+    let ratio_field = widgets::field(app, "audio-stretch", &draft.stretch, "Ratio", |s| Message::AudioText(AudioField::Stretch, s).into(), Some(Message::AudioApply(AudioField::Stretch).into())).w(64.0);
+    let range = (*AudioEdit::SEMITONES.start(), *AudioEdit::SEMITONES.end());
+    let pitch = row().gap(8.0).center_y()
+        .child(widgets::section("Audio clip"))
+        .child(label("Pitch"))
+        .child(Slider::new(semitones, range).bipolar().default(0.0).width(110.0).color(C.accent)
+            .help("Drag to change pitch; double-click to reset")
+            .build(|p| Message::AudioPitch((p * 100.0).round() / 100.0).into()))
+        .child(pitch_field).child(label("semitones"))
+        .child(cents_field).child(label("cents"))
+        .child(Btn::new("Reset").ghost().help("Reset pitch and cents").build(Message::AudioReset(AudioField::Pitch)));
+    let options = row().gap(8.0).center_y()
+        .child(label("Length"))
+        .child(pick_sized("audio-stretch-pick", vec![0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0], Some(clip.audio.stretch), "Ratio", 72.0, |s| Message::AudioStretch(s).into()))
+        .child(ratio_field).child(label("×"))
+        .child(Btn::new("Reset").ghost().help("Play at the original length").build(Message::AudioReset(AudioField::Stretch)))
+        .child(widgets::divider())
+        .child(toggle("Reverse", clip.audio.reverse, Message::Reverse.into()))
+        .child(tool("Mute clips", Message::MuteSelection.into()));
+    let controls = col().gap(6.0).px(12.0).py(8.0).child(pitch).child(options);
+    col().w_full().fill(C.header).border_sides([1.0, 0.0, 0.0, 0.0], C.line)
+        .child(super::scroll(controls, false, true).h(76.0))
+}
+
+pub fn view(app: &App, _focused: bool) -> El {
+    let canvas = canvas::view(app, "playlist", |app| Box::new(Arrangement { app, tempo: app.project.tempo_map() }));
+    if app.project.playlist.clips.is_empty() {
+        let brush = app.playlist.brush.unwrap_or(ClipSource::Pattern(app.selected_pattern));
+        let lines = vec![
+            format!("Click a track to place {}.", source_name(app, brush)),
+            "Drop WAV files on the window to import audio.".to_string(),
+        ];
+        let hint = super::empty_state("Empty song", &lines, Vec::new());
+        return rune::el().w_full().h_full().child(canvas).child(hint.absolute(0.0, 0.0).w_full().h_full().inert());
+    }
+    let selected = app.project.playlist.clips.iter().find(|c| app.playlist.selected.contains(&c.id) && matches!(c.source, ClipSource::Audio(_)));
+    let Some(clip) = selected else { return canvas };
+    col().w_full().h_full().child(col().w_full().grow(1.0).min_h(0.0).child(canvas)).child(audio_controls(app, clip))
 }
 
 #[cfg(test)]

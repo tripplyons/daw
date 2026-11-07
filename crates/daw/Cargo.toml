@@ -7,11 +7,10 @@ version.workspace = true
 daw-model.workspace = true
 daw-engine.workspace = true
 daw-plugins.workspace = true
-iced.workspace = true
+rune.workspace = true
 cpal.workspace = true
 log.workspace = true
 env_logger.workspace = true
-rfd = "0.15"
 clap = { version = "4", features = ["derive"] }
 hound.workspace = true
 shell-words = "1"
@@ -28,6 +27,3 @@ objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 block2 = "0.6"
 
-
-[dev-dependencies]
-iced_test = "0.14"

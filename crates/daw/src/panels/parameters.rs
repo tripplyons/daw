@@ -2,12 +2,12 @@
 //! the selected channel. Right click any row to automate it.
 
 use daw_model::{ChannelId, InstanceId, Source, SynthParams, Target, Waveform};
-use iced::widget::{column, container, mouse_area, row, slider, text, text_input};
-use iced::{Element, Length};
+use rune::{El, col, row, text};
 
-use super::{label, pick};
+use super::label;
 use crate::app::{App, Message as AppMessage};
-use crate::theme;
+use crate::theme::{self, C};
+use crate::ui::widgets::{self, Slider};
 
 /// Rows shown at once; large plugins expose thousands of parameters.
 const ROW_LIMIT: usize = 300;
@@ -61,89 +61,55 @@ pub fn update(app: &mut App, message: Message) {
     }
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
+pub fn toolbar(app: &App) -> El {
     let Some(instance) = app.param_instance else { return label("") };
     let name = app.project.plugin(instance).map(|p| p.plugin.name.clone()).unwrap_or_default();
-    let mut bar = row![text(name).size(theme::SMALL).color(theme::TEXT)].spacing(4).align_y(iced::Alignment::Center);
+    let mut items = vec![text(name).font(theme::LABEL).color(C.text).single_line()];
     if app.session.has_editor(instance) {
         let open = app.session.editor_open(instance);
-        bar = bar.push(super::toggle("window", open, AppMessage::TogglePlugin(instance)));
+        items.push(super::toggle(if open { "Hide window" } else { "Show window" }, open, AppMessage::TogglePlugin(instance)));
     }
-    bar.wrap().into()
+    super::bar(items)
 }
 
-fn param_row<'a>(name: String, value: f32, shown: String, steps: u32, on_change: impl Fn(f32) -> AppMessage + 'a, target: Option<Target>) -> Element<'a, AppMessage> {
-    let step = if steps > 0 { 1.0 / steps as f32 } else { 0.001 };
-    let area = mouse_area(
-        row![
-            text(name).size(theme::SMALL).width(Length::FillPortion(3)),
-            slider(0.0..=1.0, value, on_change)
-                .step(step)
-                .on_release(AppMessage::EndEdit)
-                .height(14)
-                .width(Length::FillPortion(3))
-                .style(theme::fader),
-            text(shown).size(theme::SMALL).color(theme::TEXT_DIM).width(Length::FillPortion(2)),
-        ]
-        .spacing(8)
-        .padding([1, 6])
-        .align_y(iced::Alignment::Center),
-    );
-    match target {
-        Some(target) => area.on_right_press(AppMessage::Automate(target)).into(),
-        None => area.into(),
+/// A name, a slider, and the value as the plugin shows it.
+fn param_row(name: String, value: f32, shown: String, steps: u32, on_change: impl Fn(f32) -> AppMessage + 'static, target: Option<Target>) -> El {
+    // Stepped parameters snap to their steps.
+    let on_change = move |v: f32| {
+        let v = if steps > 0 { (v * steps as f32).round() / steps as f32 } else { v };
+        on_change(v)
+    };
+    let mut slider = Slider::new(value, (0.0, 1.0)).width(160.0).color(C.accent);
+    if let Some(target) = target {
+        slider = slider.on_secondary(AppMessage::Automate(target)).help(format!("{name}: {shown}\nRight-click to automate"));
     }
+    row().w_full().h(26.0).px(12.0).gap(10.0).center_y().radius(theme::RADIUS).hover(C.hover)
+        .child(text(name.clone()).font(theme::BODY).color(C.text_dim).single_line().truncate().grow(1.0).shrink().min_w(0.0))
+        .child(slider.build(on_change))
+        .child(text(shown).font(theme::NUMBER).color(C.text).single_line().truncate().w(72.0))
 }
 
-fn synth_view(app: &App, id: ChannelId, params: SynthParams) -> Element<'_, AppMessage> {
-    let waveforms = [Waveform::Sine, Waveform::Saw, Waveform::Square];
-    let waveform_names: Vec<String> = waveforms.iter().map(|w| format!("{w:?}").to_lowercase()).collect();
-    let current = waveforms.iter().position(|&w| w == params.waveform).map(|i| waveform_names[i].clone());
-    let names = waveform_names.clone();
-    let wave = row![
-        text("waveform").size(theme::SMALL).width(Length::FillPortion(3)),
-        container(pick(waveform_names, current, move |name: String| {
-            let index = names.iter().position(|n| *n == name).unwrap_or(0);
-            Message::Synth(id, SynthParams { waveform: waveforms[index], ..params }).into()
-        }))
-        .width(Length::FillPortion(5)),
-    ]
-    .spacing(8)
-    .padding([1, 6]);
+fn synth_view(app: &App, id: ChannelId, params: SynthParams) -> El {
+    let waveforms = [(Waveform::Sine, "Sine"), (Waveform::Saw, "Saw"), (Waveform::Square, "Square")];
+    let shape = widgets::segmented(waveforms.iter().map(|&(w, name)| {
+        (name.to_string(), w == params.waveform, Message::Synth(id, SynthParams { waveform: w, ..params }).into(), String::new())
+    }).collect());
     let cutoff = Target::SynthCutoff(id);
-    column![
-        wave,
-        param_row(
-            "cutoff".into(),
-            params.cutoff,
-            app.value_text(cutoff, params.cutoff),
-            0,
-            move |v| Message::Synth(id, SynthParams { cutoff: v, ..params }).into(),
-            Some(cutoff),
-        ),
-        param_row(
-            "attack".into(),
-            params.attack / 2.0,
-            format!("{:.0} ms", params.attack * 1000.0),
-            0,
-            move |v| Message::Synth(id, SynthParams { attack: v * 2.0, ..params }).into(),
-            None,
-        ),
-        param_row(
-            "release".into(),
-            params.release / 4.0,
-            format!("{:.0} ms", params.release * 1000.0),
-            0,
-            move |v| Message::Synth(id, SynthParams { release: v * 4.0, ..params }).into(),
-            None,
-        ),
-    ]
-    .spacing(2)
-    .padding([4, 0])
-    .into()
+    let name = app.project.channel(id).map(|c| c.name.clone()).unwrap_or_default();
+    col().w_full().gap(2.0).py(10.0)
+        .child(row().px(12.0).pb(6.0).child(text(format!("{name} · built-in synth")).font(theme::TITLE).color(C.text).single_line()))
+        .child(row().w_full().h(30.0).px(12.0).gap(10.0).center_y()
+            .child(text("Waveform").font(theme::BODY).color(C.text_dim).grow(1.0))
+            .child(shape))
+        .child(param_row("Cutoff".into(), params.cutoff, app.value_text(cutoff, params.cutoff), 0,
+            move |v| Message::Synth(id, SynthParams { cutoff: v, ..params }).into(), Some(cutoff)))
+        .child(param_row("Attack".into(), params.attack / 2.0, format!("{:.0} ms", params.attack * 1000.0), 0,
+            move |v| Message::Synth(id, SynthParams { attack: v * 2.0, ..params }).into(), None))
+        .child(param_row("Release".into(), params.release / 4.0, format!("{:.0} ms", params.release * 1000.0), 0,
+            move |v| Message::Synth(id, SynthParams { release: v * 4.0, ..params }).into(), None))
 }
 
-pub fn view(app: &App) -> Element<'_, AppMessage> {
+pub fn view(app: &App) -> El {
     let Some(instance) = app.param_instance else {
         let synth = app.selected_channel.and_then(|id| match app.project.channel(id)?.source {
             Source::Synth(params) => Some((id, params)),
@@ -151,36 +117,35 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
         });
         return match synth {
             Some((id, params)) => synth_view(app, id, params),
-            None => container(label("select a channel or plugin")).padding(8).into(),
+            None => widgets::empty_state("Nothing selected", &["Select a channel or a plugin to see its parameters.".to_string()], Vec::new()),
         };
     };
     if let Some(error) = app.session.load_errors.get(&instance) {
-        return container(label(format!("failed to load: {error}"))).padding(8).into();
+        return widgets::empty_state("The plugin failed to load", &[error.to_string()], Vec::new());
     }
-    let search = text_input("filter parameters", &app.params.search)
-        .on_input(|s| Message::Search(s).into())
-        .size(theme::SMALL)
-        .padding([3, 6])
-        .style(theme::input);
+    let search = row().w_full().px(10.0).pt(10.0).pb(6.0)
+        .child(widgets::field(app, "params-search", &app.params.search, "Filter parameters", |s| Message::Search(s).into(), None).w_full());
     let needle = app.params.search.to_lowercase();
     let params = app.session.params(instance);
     let matching: Vec<_> = params.iter().filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle)).collect();
-    let mut list = column![].spacing(1);
+    let mut list = col().w_full().gap(1.0).px(4.0).pb(8.0);
     for param in matching.iter().take(ROW_LIMIT) {
         let id = param.id;
         let value = app.session.param_value(instance, id);
-        let target = Target::Plugin { instance, param: id };
-        list = list.push(param_row(
+        list = list.child(param_row(
             param.name.clone(),
             value,
             app.session.param_text(instance, id, value),
             param.steps,
             move |v| Message::Set(instance, id, v).into(),
-            Some(target),
+            Some(Target::Plugin { instance, param: id }),
         ));
     }
     if matching.len() > ROW_LIMIT {
-        list = list.push(container(label(format!("{} more; filter to narrow", matching.len() - ROW_LIMIT))).padding(6));
+        list = list.child(row().padding(10.0).child(label(format!("{} more. Type in the filter to narrow the list.", matching.len() - ROW_LIMIT))));
     }
-    column![container(search).padding(4), super::scroll(list, true, false).height(Length::Fill)].into()
+    if matching.is_empty() && !params.is_empty() {
+        list = list.child(row().padding(12.0).child(label("No parameters match the filter.")));
+    }
+    col().w_full().h_full().child(search).child(super::scroll(list, true, false))
 }

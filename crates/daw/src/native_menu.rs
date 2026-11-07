@@ -6,10 +6,8 @@
 //! keyboard also matches the item, but the item gives the key press back to
 //! the window, so the key bindings and text fields handle it as before.
 
-use std::sync::Mutex;
 
 use daw_model::layout::Panel;
-use iced::futures::channel::mpsc::{self, UnboundedSender};
 
 use crate::app::{App, Message};
 use crate::keys::{Action, BINDINGS, Chord};
@@ -91,15 +89,6 @@ pub fn refresh(app: &App) {
     let _ = app;
 }
 
-/// Where menu clicks go: the app's subscription, once it runs.
-static SENDER: Mutex<Option<UnboundedSender<Message>>> = Mutex::new(None);
-
-/// Menu clicks as messages for the app's subscription.
-pub fn clicks() -> impl iced::futures::Stream<Item = Message> {
-    let (sender, receiver) = mpsc::unbounded();
-    *SENDER.lock().unwrap() = Some(sender);
-    receiver
-}
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -162,9 +151,7 @@ mod macos {
             FORWARDING.set(false);
             return;
         }
-        if let Some(sender) = super::SENDER.lock().unwrap().as_ref() {
-            let _ = sender.unbounded_send(message);
-        }
+        crate::ui::post(message);
     }
 
     fn typed(event: &objc2_app_kit::NSEvent, chord: Chord) -> bool {

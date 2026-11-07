@@ -18,7 +18,7 @@ base64 = "0.22"
 cpal = "0.18"
 rtrb = "0.4"
 hound = "3.5"
-iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
+rune = { git = "https://github.com/anomalyco/rune", rev = "65e7e60bf564940a51804b2f2511912fd03bbf6d", features = ["native-file-dialog"] }
 vst3 = "0.3"
 objc2 = "0.6"
 objc2-foundation = "0.3"

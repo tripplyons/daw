@@ -2,12 +2,14 @@
 //! Cmd+K, so commands are easy to find without knowing where they live.
 
 use daw_model::layout::Panel;
-use iced::widget::{Space, button, column, container, mouse_area, opaque, operation, row, stack, text, text_input};
-use iced::{Element, Length, Task};
+use rune::{Cursor, El, col, icon, row, text};
 
 use crate::app::{App, Message as AppMessage};
 use crate::keys::{Action, BINDINGS};
-use crate::theme;
+use crate::panels::sentence;
+use crate::task::Task;
+use crate::theme::{self, C};
+use crate::ui::{self, icons, widgets};
 
 const INPUT: &str = "palette-input";
 /// Commands shown at once; typing narrows the list.
@@ -82,15 +84,15 @@ pub fn matches(app: &App, query: &str) -> Vec<Command> {
     found
 }
 
-pub fn open(app: &mut App) -> Task<AppMessage> {
+pub fn open(app: &mut App) -> Task {
     if app.palette.take().is_some() { return Task::none(); }
     app.palette = Some(Palette::default());
     app.menu = None;
     app.settings.open = false;
-    operation::focus(INPUT)
+    Task::focus(INPUT)
 }
 
-pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub fn update(app: &mut App, message: Message) -> Task {
     let Some(palette) = &mut app.palette else { return Task::none() };
     match message {
         Message::Query(query) => {
@@ -121,40 +123,46 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     Task::none()
 }
 
-pub fn view<'a>(app: &'a App, palette: &'a Palette) -> Element<'a, AppMessage> {
-    let input = text_input("type a command", &palette.query)
-        .id(INPUT)
-        .on_input(|q| Message::Query(q).into())
-        .on_submit(Message::Submit.into())
-        .size(theme::TEXT_SIZE)
-        .padding([6, 8])
-        .style(theme::input);
-    let mut list = column![].spacing(1);
+/// A key combination as small keycaps: "cmd+shift+z" → Cmd Shift Z.
+fn keycaps(keys: &str) -> El {
+    let mut caps = row().gap(3.0).center_y();
+    if keys.is_empty() { return caps; }
+    for part in keys.split('+') {
+        let name = crate::keys::pretty(part);
+        caps = caps.child(row().h(18.0).min_w(18.0).px(5.0).center().radius(4.0).fill(C.raised).border(1.0, C.border)
+            .child(text(name).font(theme::SMALL_TEXT).color(C.text_dim).single_line()));
+    }
+    caps
+}
+
+pub fn view(app: &App, palette: &Palette) -> El {
+    let input = widgets::field(app, INPUT, &palette.query, "Search commands and panels", |q| Message::Query(q).into(), Some(Message::Submit.into()));
+    let search = row().h(48.0).px(14.0).gap(10.0).center_y()
+        .child(icon(&icons::SEARCH, 16.0).color(C.text_faint))
+        .child(input.grow(1.0).fill(rune::Color::TRANSPARENT).border(0.0, rune::Color::TRANSPARENT).px(0.0));
+    let mut list = col().gap(1.0).padding(6.0);
     let found = matches(app, &palette.query);
     if found.is_empty() {
-        list = list.push(container(text("no matching command").size(theme::SMALL).color(theme::TEXT_DIM)).padding([4, 8]));
+        list = list.child(row().h(40.0).px(10.0).center_y().child(text("No matching command").font(theme::BODY).color(C.text_dim)));
     }
     for (index, command) in found.into_iter().enumerate() {
         let selected = index == palette.selected;
-        let line = row![
-            text(command.label).size(theme::SMALL).width(Length::Fill),
-            text(command.group).size(theme::SMALL).color(theme::TEXT_DIM),
-            container(text(command.keys).size(theme::SMALL).color(theme::TEXT_DIM)).width(110).align_right(110),
-        ]
-        .spacing(12);
-        list = list.push(
-            button(line)
-                .on_press(Message::Run(index).into())
-                .padding([4, 8])
-                .width(Length::Fill)
-                .style(move |t, status| if selected { theme::toggle(true)(t, status) } else { theme::menu_entry(t, status) }),
-        );
+        let mut line = row().w_full().h(34.0).px(10.0).gap(12.0).center_y().radius(theme::RADIUS)
+            .child(text(sentence(&command.label)).font(theme::BODY).color(C.text).single_line().truncate().grow(1.0).shrink().min_w(0.0))
+            .child(text(sentence(command.group)).font(theme::LABEL).color(C.text_faint).single_line())
+            .child(row().w(120.0).justify_end().child(keycaps(&command.keys)))
+            .hover(C.hover)
+            .press(C.press)
+            .cursor(Cursor::Pointer)
+            .role("option")
+            .on_press_tx(ui::on(Message::Run(index)));
+        if selected { line = line.fill(C.accent_soft); }
+        list = list.child(line);
     }
-    let width = (app.window.width - 40.0).clamp(200.0, 520.0);
-    let dialog = container(column![input, list].spacing(6)).padding(6).width(width).style(theme::popup);
-    let backdrop = mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fill)
-        .style(|_| container::Style { background: Some(iced::Color { a: 0.35, ..iced::Color::BLACK }.into()), ..container::Style::default() }))
-        .on_press(Message::Close.into());
-    let placed = container(opaque(dialog)).center_x(Length::Fill).padding(iced::Padding { top: 80.0, ..iced::Padding::ZERO });
-    stack![backdrop, placed].into()
+    let width = (app.window.width - 40.0).clamp(240.0, 580.0);
+    let dialog = widgets::popover(col().w(width).child(search).child(widgets::rule()).child(list))
+        .radius(theme::RADIUS_LG + 2.0)
+        .role("dialog")
+        .on_press(|_: &mut App| {});
+    crate::app::modal(app, dialog, Message::Close.into(), 90.0)
 }

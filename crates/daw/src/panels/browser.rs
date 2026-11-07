@@ -6,12 +6,14 @@
 use daw_model::layout::Panel;
 use daw_model::{ChannelId, InsertId, PluginFormat, Source};
 use daw_plugins::{PluginInfo, PluginKind};
-use iced::widget::{column, container, mouse_area, row, text, text_input};
-use iced::{Element, Length, Point, Task, mouse};
+use rune::{Cursor, Drag as Gesture, El, Phase, Tx, col, el, row, text};
 
-use super::{label, tool, toggle};
+use super::label;
 use crate::app::{App, Message as AppMessage};
-use crate::theme;
+use crate::input::Point;
+use crate::task::Task;
+use crate::theme::{self, C};
+use crate::ui::{self, widgets::{self, Btn}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Filter {
@@ -66,8 +68,8 @@ pub enum Message {
     Search(String),
     Filter(Filter),
     Grab(usize),
-    Enter(DropZone),
-    Leave(DropZone),
+    /// The drop zones under the pointer, outermost first.
+    Over(Vec<DropZone>),
 }
 
 impl From<Message> for AppMessage {
@@ -81,7 +83,7 @@ fn matches(search: &str, fields: &[&str]) -> bool {
     search.split_whitespace().all(|word| fields.iter().any(|f| f.to_lowercase().contains(word)))
 }
 
-pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub fn update(app: &mut App, message: Message) -> Task {
     match message {
         Message::Search(search) => app.browser.search = search,
         Message::Filter(filter) => app.browser.filter = filter,
@@ -89,10 +91,9 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.browser.drag = Some(Drag { plugin, from: app.cursor, moved: false });
             app.browser.hover.clear();
         }
-        Message::Enter(zone) => {
-            if app.browser.drag.is_some() && !app.browser.hover.contains(&zone) { app.browser.hover.push(zone); }
+        Message::Over(zones) => {
+            if app.browser.drag.is_some() { app.browser.hover = zones; }
         }
-        Message::Leave(zone) => app.browser.hover.retain(|&z| z != zone),
     }
     Task::none()
 }
@@ -109,7 +110,7 @@ pub fn moved(app: &mut App, point: Point) {
 
 /// Drop the held plugin: a click adds it in the default place, a drag adds
 /// it where it lands, and a drag that lands nowhere does nothing.
-pub fn released(app: &mut App) -> Task<AppMessage> {
+pub fn released(app: &mut App) -> Task {
     let Some(drag) = app.browser.drag.take() else { return Task::none() };
     let hover = std::mem::take(&mut app.browser.hover);
     let Some(info) = app.catalog.plugins.get(drag.plugin).cloned() else { return Task::none() };
@@ -166,7 +167,7 @@ fn place_label(app: &App, place: Place) -> String {
 }
 
 /// Add a catalog plugin as one undo step and open its window.
-pub fn add(app: &mut App, info: &PluginInfo, place: Place) -> Task<AppMessage> {
+pub fn add(app: &mut App, info: &PluginInfo, place: Place) -> Task {
     app.checkpoint();
     let instance = app.project.add_plugin(info.plugin.clone());
     match place {
@@ -207,61 +208,135 @@ pub fn add(app: &mut App, info: &PluginInfo, place: Place) -> Task<AppMessage> {
     Task::done(AppMessage::OpenPlugin(instance))
 }
 
-/// Make `content` a place to drop plugins, outlined while a drop would land there.
-pub fn zone<'a>(app: &App, zone: DropZone, content: impl Into<Element<'a, AppMessage>>) -> Element<'a, AppMessage> {
+/// The key that marks a drop zone in the element tree.
+fn zone_key(zone: DropZone) -> String {
+    match zone {
+        DropZone::Rack => "drop-rack".into(),
+        DropZone::Channel(id) => format!("drop-ch-{}", id.0),
+        DropZone::Insert(id) => format!("drop-ins-{}", id.0),
+    }
+}
+
+/// The drop zones named in an element path, outermost first.
+fn zones_in(path: &str) -> Vec<DropZone> {
+    path.split('/').filter_map(|segment| {
+        let rest = segment.strip_prefix("drop-")?;
+        if rest == "rack" { return Some(DropZone::Rack); }
+        if let Some(id) = rest.strip_prefix("ch-") { return Some(DropZone::Channel(ChannelId(id.parse().ok()?))); }
+        let id = rest.strip_prefix("ins-")?;
+        let id = id.split('-').next()?;
+        Some(DropZone::Insert(InsertId(id.parse().ok()?)))
+    }).collect()
+}
+
+/// Make `content` a place to drop plugins, outlined while a drop would land
+/// there. `part` tells two zones for the same target apart.
+pub fn zone(app: &App, zone: DropZone, content: El) -> El {
+    zone_part(app, zone, "", content)
+}
+
+pub fn zone_part(app: &App, zone: DropZone, part: &str, content: El) -> El {
     let lit = drop_target(app).is_some_and(|(z, _)| z == zone);
-    let content = container(content).style(move |_| container::Style {
-        border: iced::Border { color: if lit { theme::BRIGHT } else { iced::Color::TRANSPARENT }, width: 1.0, radius: 0.0.into() },
-        ..container::Style::default()
-    });
-    if app.browser.drag.is_none() { return content.into(); }
-    mouse_area(content).on_enter(Message::Enter(zone).into()).on_exit(Message::Leave(zone).into()).into()
+    let key = if part.is_empty() { zone_key(zone) } else { format!("{}-{part}", zone_key(zone)) };
+    let content = content.key(key);
+    if lit { content.outline(1.5, -1.5, C.accent).fill(C.accent_soft) } else { content }
 }
 
 /// A label that follows the cursor while a plugin is dragged.
-pub fn drag_label(app: &App) -> Option<Element<'_, AppMessage>> {
+pub fn drag_label(app: &App) -> Option<El> {
     let drag = app.browser.drag.filter(|d| d.moved)?;
     let info = app.catalog.plugins.get(drag.plugin)?;
-    let note = match drop_target(app) {
-        Some((_, place)) => format!("add {} to {}", info.plugin.name, place_label(app, place)),
-        None => info.plugin.name.clone(),
+    let (note, ok) = match drop_target(app) {
+        Some((_, place)) => (format!("Add {} to {}", info.plugin.name, place_label(app, place)), true),
+        None => (info.plugin.name.clone(), false),
     };
-    let tag = container(text(note).size(theme::SMALL).color(theme::BRIGHT)).padding([3, 6]).style(theme::popup);
-    Some(iced::widget::pin(tag).x(app.cursor.x + 14.0).y(app.cursor.y + 10.0).into())
+    let tag = widgets::popover(row().h(26.0).px(10.0).gap(6.0).center_y()
+        .child(el().size(6.0, 6.0).radius(3.0).fill(if ok { C.accent } else { C.text_faint }))
+        .child(text(note).font(theme::LABEL).color(C.text).single_line()));
+    Some(tag.absolute(app.cursor.x + 14.0, app.cursor.y + 10.0).key("drag-label"))
 }
 
-pub fn toolbar(app: &App) -> Element<'_, AppMessage> {
+fn filters(app: &App) -> El {
     let filter = app.browser.filter;
-    let rescan: Element<'_, AppMessage> = if app.scan.is_some() { label("scanning") } else { tool("rescan", AppMessage::Rescan) };
-    row![
-        toggle("all", filter == Filter::All, Message::Filter(Filter::All).into()),
-        toggle("inst", filter == Filter::Instruments, Message::Filter(Filter::Instruments).into()),
-        toggle("fx", filter == Filter::Effects, Message::Filter(Filter::Effects).into()),
-        toggle("failed", filter == Filter::Failed, Message::Filter(Filter::Failed).into()),
-        rescan,
-    ]
-    .spacing(2)
-    .wrap()
-    .into()
+    let item = |label: &str, f: Filter| (label.to_string(), filter == f, AppMessage::from(Message::Filter(f)), String::new());
+    let mut items = vec![item("All", Filter::All), item("Instruments", Filter::Instruments), item("Effects", Filter::Effects)];
+    // Only offer the failures when there are some.
+    if !app.catalog.failed.is_empty() || filter == Filter::Failed {
+        items.push(item("Failed", Filter::Failed));
+    }
+    widgets::segmented(items)
 }
 
-pub fn view(app: &App) -> Element<'_, AppMessage> {
+pub fn toolbar(app: &App) -> El {
+    let rescan = if app.scan.is_some() { label("Scanning…") } else { super::tool("Rescan", AppMessage::Rescan) };
+    super::bar(vec![filters(app), rescan])
+}
+
+/// A plugin row: press to add it, or drag it onto a channel or insert.
+fn plugin_row(app: &App, index: usize, info: &PluginInfo) -> El {
+    let format = match info.plugin.format {
+        PluginFormat::Vst3 => "VST3",
+        PluginFormat::AudioUnit => "AU",
+    };
+    let kind = match info.kind {
+        PluginKind::Instrument => "Instrument",
+        PluginKind::Effect => "Effect",
+    };
+    let held = app.browser.drag.is_some_and(|d| d.plugin == index);
+    let dot = if info.kind == PluginKind::Instrument { C.accent } else { C.focus };
+    let name = col().grow(1.0).min_w(0.0).gap(1.0)
+        .child(text(info.plugin.name.clone()).font(theme::BODY).color(C.text).single_line().truncate())
+        .child(text(info.plugin.vendor.clone()).font(theme::SMALL_TEXT).color(C.text_faint).single_line().truncate());
+    let tag = text(format!("{kind} · {format}")).font(theme::SMALL_TEXT).color(C.text_faint).single_line();
+    let place = place_label(app, default_place(app, info));
+    let hint = format!("{}\n{} · {format} · {kind}\nClick to add to {place}, or drag onto a channel or mixer insert", info.plugin.name, info.plugin.vendor);
+    let mut line = row().w_full().h(40.0).px(10.0).gap(10.0).center_y().radius(theme::RADIUS)
+        .child(el().size(6.0, 6.0).radius(3.0).fill(dot))
+        .child(name)
+        .child(tag)
+        .hover(C.hover)
+        .cursor(if held { Cursor::Grabbing } else { Cursor::Grab })
+        .help(hint)
+        .on_drag(move |app: &mut App, d: &mut Gesture, tx: &mut Tx| {
+            let [x, y] = d.window_point();
+            let scale = f32::from(app.config.ui_scale) / 100.0;
+            let point = Point::new(x / scale, y / scale);
+            match d.phase {
+                Phase::Down => {
+                    ui::send(app, tx, AppMessage::MouseMoved(point));
+                    ui::send(app, tx, Message::Grab(index).into());
+                }
+                Phase::Move => {
+                    ui::send(app, tx, AppMessage::MouseMoved(point));
+                    // Only the tiles hold drop zones; toasts and the drag label float above them.
+                    tx.element_at_in("desk", x, y, |app: &mut App, picked, tx| {
+                        let zones = picked.map(|p| zones_in(p.path())).unwrap_or_default();
+                        ui::send(app, tx, Message::Over(zones).into());
+                    });
+                }
+                Phase::Up => {
+                    if d.cancelled() { app.browser.drag = None; }
+                    ui::send(app, tx, AppMessage::MouseReleased);
+                }
+            }
+        });
+    if held { line = line.fill(C.raised_hover); }
+    line
+}
+
+pub fn view(app: &App) -> El {
     let state = &app.browser;
-    let search = text_input("search plugins", &state.search)
-        .on_input(|s| Message::Search(s).into())
-        .size(theme::SMALL)
-        .padding([3, 6])
-        .style(theme::input);
-    let mut list = column![].width(Length::Fill);
+    let search = row().px(10.0).pt(10.0).pb(6.0).w_full()
+        .child(widgets::field(app, "browser-search", &state.search, "Search plugins", |s| Message::Search(s).into(), None).w_full());
+    let mut list = col().gap(1.0).px(4.0).pb(8.0).w_full();
     if state.filter == Filter::Failed {
         for failure in app.catalog.failed.iter().filter(|f| matches(&state.search, &[&f.name, &f.error])) {
-            list = list.push(
-                column![
-                    text(failure.name.clone()).size(theme::SMALL),
-                    text(failure.error.clone()).size(theme::SMALL).color(theme::TEXT_DIM),
-                ]
-                .padding([2, 6]),
-            );
+            list = list.child(col().px(10.0).py(6.0).gap(2.0)
+                .child(text(failure.name.clone()).font(theme::BODY).color(C.text).single_line().truncate())
+                .child(text(failure.error.clone()).font(theme::SMALL_TEXT).color(C.danger).wrap()));
+        }
+        if app.catalog.failed.is_empty() {
+            list = list.child(row().padding(10.0).child(label("No plugins failed to load.")));
         }
     } else {
         for (index, info) in app.catalog.plugins.iter().enumerate() {
@@ -273,50 +348,25 @@ pub fn view(app: &App) -> Element<'_, AppMessage> {
             if !kind_ok || !matches(&state.search, &[&info.plugin.name, &info.plugin.vendor, &info.category]) {
                 continue;
             }
-            let format = match info.plugin.format {
-                PluginFormat::Vst3 => "VST3",
-                PluginFormat::AudioUnit => "AU",
-            };
-            let (kind, short) = match info.kind {
-                PluginKind::Instrument => ("instrument", "inst"),
-                PluginKind::Effect => ("effect", "fx"),
-            };
-            let held = state.drag.is_some_and(|d| d.plugin == index);
-            let name = text(info.plugin.name.clone()).size(theme::SMALL).wrapping(text::Wrapping::None).width(Length::Fill);
-            let tags = text(format!("{short} {format}")).size(theme::SMALL).color(theme::TEXT_DIM);
-            let line = container(row![container(name).clip(true).width(Length::Fill), tags].spacing(6))
-                .padding([3, 6])
-                .width(Length::Fill)
-                .style(move |_| container::Style { background: held.then(|| theme::CONTROL_HOVER.into()), ..container::Style::default() });
-            let place = place_label(app, default_place(app, info));
-            let hint = format!("{}\n{} · {format} · {kind}\nClick to add to {place}, or drag onto a channel or mixer insert", info.plugin.name, info.plugin.vendor);
-            list = list.push(super::help(
-                mouse_area(line).on_press(Message::Grab(index).into()).interaction(mouse::Interaction::Grab),
-                hint,
-            ));
+            list = list.child(plugin_row(app, index, info));
         }
     }
-    let body: Element<'_, AppMessage> = if app.catalog.plugins.is_empty() && app.scan.is_some() {
-        container(label("scanning installed plugins")).padding(8).into()
+    let body = if app.catalog.plugins.is_empty() && app.scan.is_some() {
+        widgets::empty_state("Scanning plugins", &["Installed VST3 and Audio Unit plugins appear here as they are found.".to_string()], Vec::new())
     } else if app.catalog.plugins.is_empty() && state.filter != Filter::Failed {
-        let lines = vec!["Install VST3 or Audio Unit plugins, then rescan.".to_string()];
-        super::empty_state("no plugins found", &lines, vec![tool("rescan", AppMessage::Rescan)])
+        let lines = vec!["Install VST3 or Audio Unit plugins, then scan again.".to_string()];
+        widgets::empty_state("No plugins found", &lines, vec![Btn::new("Rescan").build(AppMessage::Rescan)])
     } else {
-        super::scroll(list, true, false).height(Length::Fill).into()
+        super::scroll(list, true, false)
     };
-    let filters = row![
-        toggle("all", state.filter == Filter::All, Message::Filter(Filter::All).into()),
-        toggle("inst", state.filter == Filter::Instruments, Message::Filter(Filter::Instruments).into()),
-        toggle("fx", state.filter == Filter::Effects, Message::Filter(Filter::Effects).into()),
-        toggle("failed", state.filter == Filter::Failed, Message::Filter(Filter::Failed).into()),
-    ].spacing(2).wrap();
+    let mut top = col().w_full().gap(6.0).child(search).child(row().px(10.0).child(filters(app)));
     // Name where a click puts effects, since the mixer may not be on screen.
-    let target = (state.filter != Filter::Instruments && state.filter != Filter::Failed).then(|| {
+    if state.filter != Filter::Instruments && state.filter != Filter::Failed {
         let insert = app.project.insert_label(app.selected_insert);
-        super::help(
-            container(label(format!("effects go to: {insert}"))).padding([0, 6]),
-            "Clicking an effect adds it to the selected mixer insert. Select another insert in the mixer, or drag the effect onto a channel or insert.",
-        )
-    });
-    column![container(search).padding(4), container(filters).padding([0, 4])].push(target).push(body).spacing(4).into()
+        top = top.child(row().px(12.0).pb(4.0).gap(4.0)
+            .child(label("Effects go to"))
+            .child(text(insert).font(theme::SMALL_TEXT).color(C.text).single_line())
+            .help("Clicking an effect adds it to the selected mixer insert. Select another insert in the mixer, or drag the effect onto a channel or insert."));
+    }
+    col().w_full().h_full().child(top).child(body)
 }

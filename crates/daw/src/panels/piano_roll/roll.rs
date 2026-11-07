@@ -4,9 +4,10 @@
 use daw_engine::song::PlayMode;
 use daw_model::{ChannelId, Note};
 use daw_model::time::Ticks;
-use iced::keyboard::Modifiers;
-use iced::widget::canvas::{self, Frame, Geometry};
-use iced::{Color, Point, Rectangle, Renderer, Size, Theme, mouse};
+use crate::input::Modifiers;
+use crate::ui::canvas::{self, Frame, mouse};
+use crate::input::{Point, Rectangle, Size};
+use rune::Color;
 
 use super::{Message, State, notes};
 use crate::app::{App, Message as AppMessage};
@@ -53,11 +54,16 @@ fn key_name(key: i32) -> String {
     crate::cli::parse::key_name(key.clamp(0, 127) as u8)
 }
 
-const WHITE_KEY: Color = Color::from_rgb(0.66, 0.66, 0.66);
-const WHITE_KEY_HOVER: Color = Color::from_rgb(0.85, 0.85, 0.85);
-const BLACK_KEY: Color = Color::from_rgb(0.09, 0.09, 0.09);
-const BLACK_KEY_HOVER: Color = Color::from_rgb(0.26, 0.26, 0.26);
-const KEY_TEXT: Color = Color::from_rgb(0.16, 0.16, 0.16);
+/// Linear gray from an sRGB level, for the keyboard.
+const fn gray(linear: f32) -> Color {
+    Color { r: linear, g: linear, b: linear, a: 1.0 }
+}
+
+const WHITE_KEY: Color = gray(0.50);
+const WHITE_KEY_HOVER: Color = gray(0.78);
+const BLACK_KEY: Color = gray(0.012);
+const BLACK_KEY_HOVER: Color = gray(0.065);
+const KEY_TEXT: Color = gray(0.085);
 
 impl Roll<'_> {
     fn state(&self) -> &State {
@@ -121,12 +127,12 @@ impl Roll<'_> {
     }
 }
 
-impl canvas::Program<AppMessage> for Roll<'_> {
+impl canvas::Program for Roll<'_> {
     type State = CanvasState;
 
-    fn update(&self, state: &mut CanvasState, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<AppMessage>> {
-        use iced::keyboard::Event as KeyEvent;
-        use iced::mouse::{Button, Event as MouseEvent};
+    fn update(&self, state: &mut CanvasState, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action> {
+        use crate::input::Event as KeyEvent;
+        use crate::ui::canvas::mouse::{Button, Event as MouseEvent};
         let publish = |m: Message| Some(canvas::Action::publish(AppMessage::from(m)).and_capture());
         match event {
             canvas::Event::Keyboard(KeyEvent::ModifiersChanged(m)) => {
@@ -231,10 +237,9 @@ impl canvas::Program<AppMessage> for Roll<'_> {
         }
     }
 
-    fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &CanvasState, frame: &mut Frame, bounds: Rectangle, cursor: mouse::Cursor) {
         let app = self.app;
         let roll = self.state();
-        let mut frame = Frame::new(renderer, bounds.size());
         let size = bounds.size();
         let area = Size::new(size.width - KEYS_WIDTH, size.height - RULER_HEIGHT);
         let kh = roll.key_height;
@@ -251,7 +256,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
         for key in bottom_key.max(0)..=roll.top_key.min(127) {
             let y = self.key_y(key);
             if is_black(key) {
-                frame.fill_rectangle(Point::new(KEYS_WIDTH, y), Size::new(area.width, kh), Color::from_rgb8(0x10, 0x10, 0x10));
+                frame.fill_rectangle(Point::new(KEYS_WIDTH, y), Size::new(area.width, kh), theme::mix(theme::SURFACE, Color::BLACK, 0.3));
             }
             if key % 12 == 0 {
                 frame.fill_rectangle(Point::new(KEYS_WIDTH, y + kh - 1.0), Size::new(area.width, 1.0), theme::GRID_STRONG);
@@ -260,7 +265,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                 frame.fill_rectangle(Point::new(KEYS_WIDTH, y), Size::new(area.width, kh), Color { a: 0.05, ..theme::BRIGHT });
             }
         }
-        timeline::draw_grid(&mut frame, roll.time, KEYS_WIDTH, RULER_HEIGHT, area, app.project.signature, app.project.grid);
+        timeline::draw_grid(frame, roll.time, KEYS_WIDTH, RULER_HEIGHT, area, app.project.signature, app.project.grid);
 
         // Pattern end.
         if let Some(pattern) = app.project.pattern(app.selected_pattern) {
@@ -280,7 +285,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
                 let ghost = theme::mix(theme::BG, theme::rgb(app.project.channel_color(lane.channel)), amount);
                 for note in &lane.notes {
                     let r = self.note_rect(note);
-                    frame.fill_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 2.0), ghost);
+                    frame.round_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 2.0), 2.0, ghost);
                 }
             }
         }
@@ -297,7 +302,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             } else {
                 theme::mix(theme::BG, channel_color, 0.35 + 0.65 * note.velocity)
             };
-            frame.fill_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 1.0), color);
+            frame.round_rectangle(Point::new(r.x, r.y + 1.0), Size::new(r.width - 1.0, r.height - 1.0), 3.0, color);
         }
 
         if let Some(Drag::Box { from, to, .. }) = state.drag {
@@ -313,8 +318,8 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             let name = format!("{}: click to edit", channel.name);
             let width = name.chars().count() as f32 * 6.4 + 10.0;
             let at = Point::new((p.x + 12.0).min(size.width - width).max(KEYS_WIDTH), (p.y - 22.0).max(RULER_HEIGHT));
-            frame.fill_rectangle(at, Size::new(width, 18.0), theme::CONTROL);
-            timeline::label(&mut frame, name, Point::new(at.x + 5.0, at.y + 2.0), theme::BRIGHT);
+            frame.round_rectangle(at, Size::new(width, 18.0), 4.0, theme::POPOVER);
+            timeline::label(frame, name, Point::new(at.x + 5.0, at.y + 2.0), theme::BRIGHT);
         }
 
         // Keyboard: light white keys with short black keys over them, a line
@@ -335,7 +340,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             if key % 12 == 0 || lit {
                 // Black key names sit on the black key.
                 let (x, color) = if is_black(key) { (2.0, theme::BRIGHT) } else { (KEYS_WIDTH - 22.0, KEY_TEXT) };
-                timeline::label(&mut frame, key_name(key), Point::new(x, y + (kh - theme::SMALL) / 2.0 - 1.0), color);
+                timeline::label(frame, key_name(key), Point::new(x, y + (kh - theme::SMALL) / 2.0 - 1.0), color);
             }
         }
 
@@ -344,7 +349,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
         if let Some(top) = Self::lane_top(size.height) {
             frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, LANE), theme::HEADER);
             frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, 1.0), theme::LINE);
-            timeline::label(&mut frame, "vel", Point::new(6.0, top + 4.0), theme::TEXT_DIM);
+            timeline::label(frame, "Velocity", Point::new(6.0, top + 4.0), theme::TEXT_FAINT);
             for (index, note) in notes(app).iter().enumerate() {
                 let x = self.note_rect(note).x;
                 if x + 7.0 < KEYS_WIDTH || x > size.width { continue; }
@@ -356,7 +361,7 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             }
         }
 
-        timeline::draw_ruler(&mut frame, roll.time, KEYS_WIDTH, area.width, app.project.signature);
+        timeline::draw_ruler(frame, roll.time, KEYS_WIDTH, area.width, app.project.signature);
         // Pattern end handle in the ruler; drag it to change the length.
         if let Some(pattern) = app.project.pattern(app.selected_pattern) {
             let x = KEYS_WIDTH + roll.time.x(pattern.length as f64).round();
@@ -371,18 +376,17 @@ impl canvas::Program<AppMessage> for Roll<'_> {
             _ => None,
         };
         if let Some(tick) = seeking {
-            timeline::draw_start_marker(&mut frame, roll.time, KEYS_WIDTH, size.height, tick);
+            timeline::draw_start_marker(frame, roll.time, KEYS_WIDTH, size.height, tick);
         }
         if app.mode == PlayMode::Pattern(app.selected_pattern) {
             // The start marker stays put; the playhead only moves away from it while playing.
             if seeking.is_none() {
-                timeline::draw_start_marker(&mut frame, roll.time, KEYS_WIDTH, size.height, app.pattern_start);
+                timeline::draw_start_marker(frame, roll.time, KEYS_WIDTH, size.height, app.pattern_start);
             }
             if app.playing {
-                timeline::draw_playhead(&mut frame, roll.time, KEYS_WIDTH, size.height, app.position);
+                timeline::draw_playhead(frame, roll.time, KEYS_WIDTH, size.height, app.position);
             }
         }
-        vec![frame.into_geometry()]
     }
 
     fn mouse_interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {

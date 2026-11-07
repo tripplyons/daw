@@ -2,15 +2,14 @@
 
 mod computer_keyboard;
 mod scan_tasks;
-mod ui_snapshots;
 
 use daw_engine::output::BitDepth;
 use daw_model::automation::{Shape, TimeSnap, ValueSnap};
 use daw_model::layout::{Axis, Panel};
 use daw_model::time::Grid;
 use daw_model::{ClipSource, Target};
-use iced::keyboard::key::{Code, Physical};
-use iced::keyboard::{self, Key, Location, Modifiers};
+use crate::input::key::{Code, Physical};
+use crate::input::{self as keyboard, Key, Location, Modifiers};
 
 use super::*;
 use crate::panels::{automation as auto, piano_roll as roll, playlist as list, timeline};
@@ -1973,7 +1972,7 @@ fn recoloring_a_channel_is_one_undo_step() {
 #[test]
 fn fit_song_shows_the_whole_song_in_the_playlist() {
     let mut app = app();
-    app.window = iced::Size::new(1400.0, 860.0);
+    app.window = crate::input::Size::new(1400.0, 860.0);
     let pattern = app.selected_pattern;
     let bar = app.project.signature.ticks_per_bar();
     app.project.add_clip(0, 7 * bar, ClipSource::Pattern(pattern));
@@ -1996,7 +1995,7 @@ fn narrow_windows_show_one_tile_and_switch_with_tabs() {
     assert!(app.split_handles().is_empty());
     let _ = app.update(Message::FocusTile(left));
     assert_eq!(app.layout().focused, left);
-    assert_eq!(app.panel_width(Panel::Playlist), Some(800.0));
+    assert_eq!(app.panel_width(Panel::Playlist), Some(800.0 - 2.0 * view::GUTTER), "the tile keeps a gutter from the window edges");
     assert_eq!(app.panel_width(Panel::Mixer), None, "hidden tiles have no width");
     app.window = Size::new(1400.0, 860.0);
     assert!(!app.compact());
@@ -2020,14 +2019,13 @@ fn dragged_plugins_land_on_the_zone_under_the_cursor() {
         let _ = app.update(Message::MouseMoved(Point::new(10.0, 10.0)));
         let _ = app.update(browser::Message::Grab(plugin).into());
         let _ = app.update(Message::MouseMoved(Point::new(300.0, 300.0)));
-        for &zone in zones {
-            let _ = app.update(browser::Message::Enter(zone).into());
-        }
+        // The zones under the pointer, outermost first, as hit testing reports them.
+        let _ = app.update(browser::Message::Over(zones.to_vec()).into());
     };
 
-    hold(&mut app, 0, &[DropZone::Channel(channel), DropZone::Rack]);
+    hold(&mut app, 0, &[DropZone::Rack, DropZone::Channel(channel)]);
     assert_eq!(browser::drop_target(&app), Some((DropZone::Channel(channel), Place::Effect(routed))), "an effect goes on the channel's insert");
-    let _ = app.update(browser::Message::Leave(DropZone::Channel(channel)).into());
+    let _ = app.update(browser::Message::Over(vec![DropZone::Rack]).into());
     assert_eq!(browser::drop_target(&app), None, "the rack takes no effects");
     let _ = app.update(Message::MouseReleased);
     assert!(app.browser.drag.is_none());
@@ -2036,12 +2034,12 @@ fn dragged_plugins_land_on_the_zone_under_the_cursor() {
 
     hold(&mut app, 1, &[DropZone::Insert(master)]);
     assert_eq!(browser::drop_target(&app), Some((DropZone::Insert(master), Place::Channel(Some(master)))));
-    hold(&mut app, 1, &[DropZone::Channel(channel), DropZone::Rack]);
+    hold(&mut app, 1, &[DropZone::Rack, DropZone::Channel(channel)]);
     assert_eq!(browser::drop_target(&app), Some((DropZone::Channel(channel), Place::Channel(None))));
 
     // A press without movement is a click and is never a drop.
     let _ = app.update(browser::Message::Grab(0).into());
-    let _ = app.update(browser::Message::Enter(DropZone::Insert(master)).into());
+    let _ = app.update(browser::Message::Over(vec![DropZone::Insert(master)]).into());
     assert_eq!(browser::drop_target(&app), None);
 }
 

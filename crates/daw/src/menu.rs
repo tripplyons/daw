@@ -2,16 +2,18 @@
 
 use daw_model::{AutomationId, ChannelId, ClipId, InsertId, PatternId, Project};
 use daw_model::layout::{Axis, Panel, TileId};
-use iced::widget::{Column, Space, button, container, mouse_area, opaque, operation, pin, stack, text, text_input};
-use iced::{Element, Length, Point, Task};
+use rune::{Cursor, El, Tx, col, el, row, text};
 
 use crate::app::{App, Message as AppMessage};
-use crate::panels::{self, channel_rack, mixer, playlist};
+use crate::input::Point;
 use crate::keys::Action;
-use crate::theme;
+use crate::panels::{self, channel_rack, mixer, playlist};
+use crate::task::Task;
+use crate::theme::{self, C};
+use crate::ui::{self, widgets};
 
-const WIDTH: f32 = 220.0;
-const ROW_HEIGHT: f32 = 26.0;
+const WIDTH: f32 = 232.0;
+const ROW_HEIGHT: f32 = 28.0;
 const INPUT: &str = "menu-rename";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,7 +97,7 @@ pub fn rename(app: &mut App, item: Item, new: &str) {
     app.edited();
 }
 
-pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub fn update(app: &mut App, message: Message) -> Task {
     match message {
         Message::Open(item) => return update(app, Message::OpenAt(item, app.cursor)),
         Message::OpenAt(item, at) => {
@@ -131,7 +133,7 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         Message::Rename => {
             let Some(menu) = &mut app.menu else { return Task::none() };
             menu.rename = name(&app.project, menu.item).map(str::to_owned);
-            return operation::focus(INPUT).chain(operation::select_all(INPUT));
+            return Task::focus(INPUT);
         }
         Message::Input(text) => {
             if let Some(menu) = &mut app.menu {
@@ -155,35 +157,35 @@ pub fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 fn entries(item: Item) -> Vec<(&'static str, AppMessage)> {
     match item {
         Item::Channel(id) => vec![
-            ("preview", channel_rack::Message::Preview(id).into()),
-            ("delete", channel_rack::Message::Remove.into()),
+            ("Preview", channel_rack::Message::Preview(id).into()),
+            ("Delete", channel_rack::Message::Remove.into()),
         ],
-        Item::Track(_) => vec![("delete", playlist::Message::DeleteTrack.into())],
-        Item::Insert(id) if id != daw_model::MASTER => vec![("delete", mixer::Message::DeleteInsert.into())],
-        Item::Pattern(id) => vec![("clone pattern", AppMessage::ClonePattern(id))],
+        Item::Track(_) => vec![("Delete", playlist::Message::DeleteTrack.into())],
+        Item::Insert(id) if id != daw_model::MASTER => vec![("Delete", mixer::Message::DeleteInsert.into())],
+        Item::Pattern(id) => vec![("Clone pattern", AppMessage::ClonePattern(id))],
         Item::Clip(id) => vec![
-            ("open", playlist::Message::Open(id).into()),
-            ("duplicate", playlist::Message::Duplicate.into()),
-            ("make unique", playlist::Message::MakeUnique.into()),
-            ("consolidate", playlist::Message::Consolidate.into()),
-            ("mute / unmute", playlist::Message::MuteSelection.into()),
-            ("delete", playlist::Message::DeleteSelection.into()),
+            ("Open", playlist::Message::Open(id).into()),
+            ("Duplicate", playlist::Message::Duplicate.into()),
+            ("Make unique", playlist::Message::MakeUnique.into()),
+            ("Consolidate", playlist::Message::Consolidate.into()),
+            ("Mute or unmute", playlist::Message::MuteSelection.into()),
+            ("Delete", playlist::Message::DeleteSelection.into()),
         ],
         Item::Tile(tile) => vec![
-            ("focus / restore", AppMessage::TileAction(tile, Action::Zoom)),
-            ("split side by side", AppMessage::SplitTile(tile, Axis::Horizontal)),
-            ("split stacked", AppMessage::SplitTile(tile, Axis::Vertical)),
-            ("close tile", AppMessage::TileAction(tile, Action::Close)),
+            ("Focus or restore", AppMessage::TileAction(tile, Action::Zoom)),
+            ("Split side by side", AppMessage::SplitTile(tile, Axis::Horizontal)),
+            ("Split stacked", AppMessage::SplitTile(tile, Axis::Vertical)),
+            ("Close tile", AppMessage::TileAction(tile, Action::Close)),
         ],
         Item::Files => vec![
-            ("new", AppMessage::Action(Action::New)),
-            ("open", AppMessage::Action(Action::Open)),
-            ("save", AppMessage::Action(Action::Save)),
-            ("save as", AppMessage::Action(Action::SaveAs)),
-            ("export WAV", AppMessage::Action(Action::Export)),
-            ("import audio", AppMessage::Action(Action::ImportAudio)),
-            ("recover backup", AppMessage::Action(Action::Recover)),
-            ("package project", AppMessage::Action(Action::Pack)),
+            ("New project", AppMessage::Action(Action::New)),
+            ("Open…", AppMessage::Action(Action::Open)),
+            ("Save", AppMessage::Action(Action::Save)),
+            ("Save as…", AppMessage::Action(Action::SaveAs)),
+            ("Export WAV…", AppMessage::Action(Action::Export)),
+            ("Import audio…", AppMessage::Action(Action::ImportAudio)),
+            ("Recover backup…", AppMessage::Action(Action::Recover)),
+            ("Package project…", AppMessage::Action(Action::Pack)),
         ],
         Item::Tools(_) | Item::PatternTools => Vec::new(),
         Item::Insert(_) | Item::Automation(_) => Vec::new(),
@@ -208,101 +210,109 @@ fn shortcut(app: &App, message: &AppMessage) -> Option<String> {
     app.keymap.chords(binding.id).first().map(ToString::to_string)
 }
 
-fn entry<'a>(label: &str, shortcut: Option<String>, message: AppMessage, selected: bool) -> Element<'a, AppMessage> {
-    let keys = text(shortcut.unwrap_or_default()).size(theme::SMALL).color(theme::TEXT_DIM);
-    button(iced::widget::row![text(label.to_string()).size(theme::SMALL).width(Length::Fill), keys].spacing(12))
-        .on_press(message)
-        .style(move |t, status| if selected { theme::toggle(true)(t, status) } else { theme::menu_entry(t, status) })
-        .padding([3, 8])
-        .width(Length::Fill)
-        .into()
+fn entry(label: &str, shortcut: Option<String>, message: AppMessage, selected: bool) -> El {
+    let keys = text(shortcut.as_deref().map(crate::keys::pretty).unwrap_or_default()).font(theme::LABEL).color(C.text_faint).single_line();
+    let line = row().w_full().h(ROW_HEIGHT).px(10.0).gap(12.0).center_y().radius(theme::RADIUS - 2.0)
+        .child(text(label.to_string()).font(theme::BODY).color(C.text).single_line().grow(1.0).shrink().min_w(0.0))
+        .child(keys)
+        .hover(C.hover)
+        .press(C.press)
+        .cursor(Cursor::Pointer)
+        .role("menuitem")
+        .on_press_tx(ui::on(message));
+    if selected { line.fill(C.hover) } else { line }
 }
 
-pub fn view<'a>(app: &'a App, menu: &'a Menu) -> Element<'a, AppMessage> {
-    let width = if matches!(menu.item, Item::Tools(_) | Item::PatternTools) { 380.0 } else { WIDTH };
+pub fn view(app: &App, menu: &Menu) -> El {
+    let width = if matches!(menu.item, Item::Tools(_) | Item::PatternTools) { 400.0 } else { WIDTH };
     let width = width.min((app.window.width - 16.0).max(1.0));
-    let (body, rows): (Element<'a, AppMessage>, usize) = match &menu.rename {
+    let (body, height) = match &menu.rename {
         Some(new) => {
-            let input = text_input("name", new)
-                .id(INPUT)
-                .on_input(|text| Message::Input(text).into())
-                .on_submit(Message::Close.into())
-                .size(theme::SMALL)
-                .padding([3, 6])
-                .style(theme::input);
-            (input.into(), 1)
+            let input = widgets::field(app, INPUT, new, "Name", |text| Message::Input(text).into(), Some(Message::Close.into()));
+            let body = col().gap(6.0).padding(10.0)
+                .child(widgets::section("Rename"))
+                .child(input.w_full())
+                .child(text("Enter keeps the name; Escape cancels.").font(theme::SMALL_TEXT).color(C.text_faint));
+            (body, 96.0)
         }
         None => {
             if let Item::Tools(tile) = menu.item {
                 let panel = app.layout().panel(tile);
                 let tools = panels::toolbar(app, panel);
-                let picker = panels::labeled("panel", panels::pick(Panel::ALL.to_vec(), Some(panel), move |p| AppMessage::SetPanel(tile, p)));
-                let mut body = iced::widget::column![panels::label(format!("{panel} tools")), picker, tools, panels::label("tile")].spacing(8).padding(8);
+                let picker = panels::labeled("Panel", panels::pick("menu-panel", Panel::ALL.to_vec(), Some(panel), move |p| AppMessage::SetPanel(tile, p)));
+                let mut body = col().gap(8.0).padding(10.0)
+                    .child(widgets::section(format!("{panel} tools")))
+                    .child(picker)
+                    .child(tools)
+                    .child(widgets::rule())
+                    .child(widgets::section("Tile"));
+                let mut list = col().gap(1.0).mx(-6.0);
                 for (label, message) in entries(Item::Tile(tile)) {
                     let keys = shortcut(app, &message);
-                    body = body.push(entry(label, keys, Message::Choose(Box::new(message)).into(), false));
+                    list = list.child(entry(label, keys, Message::Choose(Box::new(message)).into(), false));
                 }
-                return popup(app, menu, body.into(), width, 400.0);
+                body = body.child(list);
+                return popup(app, menu, body, width, 420.0);
             }
             if menu.item == Item::PatternTools {
-                return popup(app, menu, app.pattern_tools(), width, 140.0);
+                return popup(app, menu, col().padding(10.0).child(app.pattern_tools()), width, 160.0);
             }
-            let mut column = Column::new();
+            let mut list = col().gap(1.0).padding(4.0);
             let rename = name(&app.project, menu.item).is_some();
-            if rename { column = column.push(entry("rename", None, Message::Rename.into(), menu.selected == Some(0))); }
+            if let Some(title) = name(&app.project, menu.item) {
+                list = list.child(row().h(24.0).px(10.0).center_y().child(text(title.to_string()).font(theme::SECTION).color(C.text_faint).single_line().truncate()));
+                list = list.child(entry("Rename…", None, Message::Rename.into(), menu.selected == Some(0)));
+            }
             let entries = entries(menu.item);
-            let rows = entries.len() + usize::from(rename);
+            let mut rows = entries.len() + usize::from(rename);
             for (index, (label, message)) in entries.into_iter().enumerate() {
                 let hint = match &message {
                     AppMessage::Action(action) | AppMessage::TileAction(_, action) => panels::action_hint(app, *action),
                     _ => panels::hint(&message).unwrap_or(label).into(),
                 };
                 let keys = shortcut(app, &message);
-                column = column.push(panels::help(entry(label, keys, Message::Choose(Box::new(message)).into(), menu.selected == Some(index + usize::from(rename))), hint));
+                list = list.child(panels::help(entry(label, keys, Message::Choose(Box::new(message)).into(), menu.selected == Some(index + usize::from(rename))), hint));
             }
             if let Item::Channel(id) = menu.item {
-                column = column.push(swatches(app, id));
-                (column.into(), rows + 1)
-            } else {
-                (column.into(), rows)
+                list = list.child(swatches(app, id));
+                rows += 1;
             }
+            let extra = if rename { 24.0 } else { 0.0 };
+            (list, rows as f32 * (ROW_HEIGHT + 1.0) + 10.0 + extra)
         }
     };
-    popup(app, menu, body, width, rows as f32 * ROW_HEIGHT + 2.0)
+    popup(app, menu, body, width, height)
 }
 
 /// A row of channel colors; clicking one recolors the channel and closes the menu.
-fn swatches<'a>(app: &App, id: daw_model::ChannelId) -> Element<'a, AppMessage> {
+fn swatches(app: &App, id: daw_model::ChannelId) -> El {
     let current = app.project.channel_color(id);
-    let mut swatches = iced::widget::row![].spacing(3).padding([4, 8]);
+    let mut swatches = row().gap(4.0).px(10.0).py(6.0).flex_wrap();
     for color in daw_model::CHANNEL_COLORS {
         let fill = theme::rgb(color);
         let chosen = color == current;
-        let swatch = iced::widget::button(Space::new().width(14).height(14))
-            .on_press(Message::Choose(Box::new(crate::panels::channel_rack::Message::Color(id, color).into())).into())
-            .padding(0)
-            .style(move |_, status| iced::widget::button::Style {
-                background: Some(fill.into()),
-                border: iced::Border {
-                    color: if chosen || status == iced::widget::button::Status::Hovered { theme::BRIGHT } else { fill },
-                    width: if chosen { 2.0 } else { 1.0 },
-                    radius: 0.0.into(),
-                },
-                ..iced::widget::button::Style::default()
-            });
-        swatches = swatches.push(panels::help(swatch, "Channel color"));
+        let message: AppMessage = Message::Choose(Box::new(channel_rack::Message::Color(id, color).into())).into();
+        let mut swatch = el().size(16.0, 16.0).radius(8.0).fill(fill).cursor(Cursor::Pointer).help("Channel color")
+            .on_press_tx(ui::on(message));
+        swatch = if chosen { swatch.outline(2.0, 2.0, C.text) } else { swatch.hover(rune::Color::WHITE.alpha(0.2)) };
+        swatches = swatches.child(swatch);
     }
-    swatches.into()
+    swatches
 }
 
-fn popup<'a>(app: &'a App, menu: &Menu, body: Element<'a, AppMessage>, width: f32, height: f32) -> Element<'a, AppMessage> {
+fn popup(app: &App, menu: &Menu, body: El, width: f32, height: f32) -> El {
     let height = height.min((app.window.height - 16.0).max(1.0));
-    let popup = container(panels::scroll(body, true, false).height(Length::Shrink)).width(width).max_height(height).padding(1).style(theme::popup);
     // Keep the whole menu inside the window.
     let x = menu.at.x.min(app.window.width - width - 4.0).max(4.0);
     let y = menu.at.y.min(app.window.height - height - 4.0).max(4.0);
-    let backdrop = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
-        .on_press(Message::Close.into())
-        .on_right_press(Message::Close.into());
-    stack![backdrop, pin(opaque(popup)).position(Point::new(x, y))].into()
+    let panel = widgets::popover(col().w(width).max_h(height).child(body.w_full().scroll(rune::ScrollSpec { stick_bottom: false })))
+        .key("context-menu")
+        .absolute(x, y)
+        .role("menu")
+        .on_press(|_: &mut App| {});
+    let close = |app: &mut App, tx: &mut Tx| ui::send(app, tx, Message::Close.into());
+    let backdrop = el().absolute(0.0, 0.0).w_full().h_full()
+        .on_press_tx(close)
+        .on_secondary_press(move |app: &mut App, _, tx: &mut Tx| close(app, tx));
+    el().absolute(0.0, 0.0).w(app.window.width).h(app.window.height).child(backdrop).child(panel)
 }

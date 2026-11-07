@@ -3,24 +3,11 @@
 //! command-line arguments, and winit does not handle it, so install our own
 //! handler just before launch finishes, as Apple recommends.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
-
-use iced::futures::channel::mpsc::{self, UnboundedReceiver};
-
-/// Paths waiting for the app's subscription to take them.
-static RECEIVER: Mutex<Option<UnboundedReceiver<PathBuf>>> = Mutex::new(None);
-
-/// Take the stream of opened files. Returns `None` after the first call.
-pub fn take() -> Option<UnboundedReceiver<PathBuf>> {
-    RECEIVER.lock().unwrap().take()
-}
 
 #[cfg(target_os = "macos")]
 mod macos {
     use std::path::PathBuf;
     use std::ptr::NonNull;
-    use std::sync::OnceLock;
 
     use block2::RcBlock;
     use objc2::rc::Retained;
@@ -29,8 +16,6 @@ mod macos {
     use objc2_app_kit::NSApplicationWillFinishLaunchingNotification;
     use objc2_foundation::{NSObject, NSString};
 
-    use iced::futures::channel::mpsc::UnboundedSender;
-
     /// Four-character Apple Event codes.
     const fn code(c: &[u8; 4]) -> u32 {
         u32::from_be_bytes(*c)
@@ -38,8 +23,6 @@ mod macos {
     const CORE_EVENT_CLASS: u32 = code(b"aevt");
     const OPEN_DOCUMENTS: u32 = code(b"odoc");
     const DIRECT_OBJECT: u32 = code(b"----");
-
-    static SENDER: OnceLock<UnboundedSender<PathBuf>> = OnceLock::new();
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements, and this class
@@ -53,9 +36,7 @@ mod macos {
             fn handle_open(&self, event: &AnyObject, _reply: &AnyObject) {
                 for path in paths(event) {
                     log::info!("open from Finder: {}", path.display());
-                    if let Some(sender) = SENDER.get() {
-                        let _ = sender.unbounded_send(path);
-                    }
+                    crate::ui::post(crate::app::Message::Opened(Some(path)));
                 }
             }
         }
@@ -77,8 +58,7 @@ mod macos {
             .collect()
     }
 
-    pub fn install(sender: UnboundedSender<PathBuf>) {
-        let _ = SENDER.set(sender);
+    pub fn install() {
         let Some(center_class) = AnyClass::get(c"NSNotificationCenter") else { return };
         let center: Retained<AnyObject> = unsafe { msg_send![center_class, defaultCenter] };
         let block = RcBlock::new(|_: NonNull<AnyObject>| register_handler());
@@ -119,10 +99,6 @@ mod macos {
 /// Start listening for files opened from Finder. Call on the main thread
 /// before the app starts running.
 pub fn install() {
-    let (sender, receiver) = mpsc::unbounded();
-    *RECEIVER.lock().unwrap() = Some(receiver);
     #[cfg(target_os = "macos")]
-    macos::install(sender);
-    #[cfg(not(target_os = "macos"))]
-    drop(sender);
+    macos::install();
 }

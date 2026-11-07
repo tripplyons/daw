@@ -6,9 +6,9 @@ use std::time::Instant;
 
 use daw_engine::song::PlayMode;
 use daw_model::Project;
-use iced::Task;
+use crate::task::Task;
 
-use super::{App, Message, SaveChoice};
+use super::{App, Message};
 
 /// What replaces the current project once its unsaved changes are saved or
 /// discarded.
@@ -34,7 +34,7 @@ impl Pending {
 impl App {
     /// Run `next` now, or first ask to save unsaved changes. Ignored while
     /// the prompt is already showing.
-    pub(super) fn guard(&mut self, next: Pending) -> Task<Message> {
+    pub(super) fn guard(&mut self, next: Pending) -> Task {
         let _ = self.update(Message::BpmDone);
         self.poll_midi();
         self.finish_midi();
@@ -53,9 +53,9 @@ impl App {
         prompt
     }
 
-    pub(super) fn proceed(&mut self, next: Pending) -> Task<Message> {
+    pub(super) fn proceed(&mut self, next: Pending) -> Task {
         match next {
-            Pending::Close => return iced::exit(),
+            Pending::Close => return Task::exit(),
             Pending::New => self.new_project(),
             Pending::Open(path) => self.open(path),
             Pending::Recover(path) => {
@@ -100,29 +100,26 @@ impl App {
         self.reset_midi_input();
     }
 
-    fn ask_to_save(&self, next: &Pending) -> Task<Message> {
+    /// Show the unsaved changes prompt; its buttons send `SaveChoice`.
+    fn ask_to_save(&mut self, _next: &Pending) -> Task {
+        self.asking = true;
+        Task::none()
+    }
+
+    /// The prompt's title and question, while it shows.
+    pub(super) fn pending_question(&self) -> Option<(String, String)> {
+        let next = self.pending.as_ref().filter(|_| self.asking)?;
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let name = name.unwrap_or_else(|| self.project.name.clone());
-        let verb = next.verb();
-        Task::perform(
-            async move {
-                let result = rfd::AsyncMessageDialog::new()
-                    .set_level(rfd::MessageLevel::Warning)
-                    .set_title("Unsaved changes")
-                    .set_description(format!("Save changes to \"{name}\" before {verb}?"))
-                    .set_buttons(rfd::MessageButtons::YesNoCancelCustom("Save".into(), "Don't Save".into(), "Cancel".into()))
-                    .show()
-                    .await;
-                match result {
-                    rfd::MessageDialogResult::Custom(label) if label == "Save" => SaveChoice::Save,
-                    rfd::MessageDialogResult::Custom(label) if label == "Don't Save" => SaveChoice::Discard,
-                    rfd::MessageDialogResult::Yes => SaveChoice::Save,
-                    rfd::MessageDialogResult::No => SaveChoice::Discard,
-                    _ => SaveChoice::Cancel,
-                }
-            },
-            Message::SaveChoice,
-        )
+        Some((
+            format!("Save changes to \"{name}\"?"),
+            format!("Your changes will be lost if you don't save them before {}.", next.verb()),
+        ))
+    }
+
+    /// Whether a close is waiting on the prompt or a save.
+    pub fn closing_pending(&self) -> bool {
+        self.pending.is_some()
     }
 
     pub fn open(&mut self, path: PathBuf) {

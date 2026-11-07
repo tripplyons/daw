@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use daw_engine::song::PlayMode;
@@ -10,12 +9,9 @@ use daw_model::layout::{Axis, Layout, Panel, Rect, TileId};
 use daw_model::time::Ticks;
 use daw_model::{ChannelId, ClipSource, InsertId, InstanceId, PatternId, Project, Target};
 use daw_plugins::scan::{Catalog, Progress, ScanMode};
-use iced::futures::channel::mpsc::{self, UnboundedReceiver};
-use iced::futures::{Stream, StreamExt, stream};
-use iced::{Point, Size, Subscription, Task, event, keyboard, mouse, window};
-
 use crate::config;
-use crate::dialogs;
+use crate::input::{self as keyboard, Point, Size};
+use crate::task::Task;
 use crate::keys::{Action, Keymap};
 use crate::menu::{self, Menu};
 use crate::panels::{automation, browser, channel_rack, mixer, parameters, piano_roll, playlist, settings};
@@ -27,17 +23,19 @@ mod computer_keyboard;
 mod history;
 mod rendering;
 mod saving;
+pub mod scenes;
 mod targets;
 mod view;
+pub(crate) use view::modal;
 
 use closing::Pending;
 
 /// Project given on the command line, set by `main` before the app starts.
 pub static STARTUP_PROJECT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-pub const TRANSPORT_HEIGHT: f32 = 64.0;
+pub const TRANSPORT_HEIGHT: f32 = 52.0;
 /// Height of the background job bar under the transport, while it shows.
-const JOBS_HEIGHT: f32 = 26.0;
+const JOBS_HEIGHT: f32 = 34.0;
 /// Below this window width, one tile shows at a time under a tab strip.
 pub const COMPACT_WIDTH: f32 = 1000.0;
 const UNDO_LIMIT: usize = 200;
@@ -139,8 +137,8 @@ pub enum Message {
     Dropped(PathBuf),
     SavedAs(Option<PathBuf>),
     Exported(Option<PathBuf>),
-    Screenshot,
-    Captured(window::Screenshot),
+    /// UI state that is not part of the project: dropdowns, text fields.
+    Ui(crate::ui::Msg),
     /// The window's close button or Cmd+Q.
     CloseRequested,
     /// Answer to the unsaved changes prompt.
@@ -210,19 +208,20 @@ pub struct App {
     pub config_path: PathBuf,
     /// Problem reading the config file, shown in settings.
     pub config_error: Option<String>,
-    screenshot: Option<PathBuf>,
+    /// Text fields, the open dropdown, and canvas state.
+    pub ui: crate::ui::State,
     /// Text in the bpm field until the user commits it.
     bpm_text: Option<String>,
-    /// Cmd+Q has been pointed at the window's close request.
-    quit_routed: bool,
-    /// The unsaved changes prompt is showing, for this next step.
+    /// The unsaved changes prompt is showing, or a save is finishing, for this next step.
     pending: Option<Pending>,
+    /// The unsaved changes prompt is showing.
+    asking: bool,
     saving: saving::State,
     rendering: rendering::State,
 }
 
 impl App {
-    pub fn boot() -> (Self, Task<Message>) {
+    pub fn boot() -> (Self, Task) {
         let project = Project::new();
         let selected_pattern = project.patterns[0].id;
         let selected_channel = project.channels.first().map(|c| c.id);
@@ -275,10 +274,10 @@ impl App {
             config: config::Config::default(),
             config_path: config::path(),
             config_error: None,
-            screenshot: std::env::var_os("DAW_SCREENSHOT").map(PathBuf::from),
+            ui: crate::ui::State::default(),
             bpm_text: None,
-            quit_routed: false,
             pending: None,
+            asking: false,
             saving: saving::State::default(),
             rendering: rendering::State::default(),
         };
@@ -346,7 +345,9 @@ impl App {
     fn tile_area(&self) -> Rect {
         let tabs = if self.compact() { crate::theme::HEADER_HEIGHT } else { 0.0 };
         let top = TRANSPORT_HEIGHT + tabs + if self.showing_jobs() { JOBS_HEIGHT } else { 0.0 };
-        Rect { x: 0.0, y: top, width: self.window.width, height: (self.window.height - top).max(1.0) }
+        // Tiles keep a gutter from the window edges and the bars above them, as between each other.
+        let gap = view::GUTTER;
+        Rect { x: gap, y: top + gap, width: (self.window.width - 2.0 * gap).max(1.0), height: (self.window.height - top - 2.0 * gap).max(1.0) }
     }
 
     /// Whether a tile showing `panel` is on screen.
@@ -508,7 +509,7 @@ impl App {
     }
 
     /// Share shortcut dispatch; plugin musical typing has its own priority path.
-    fn key_event(&mut self, event: keyboard::Event, typing: bool, main_window: bool) -> Task<Message> {
+    fn key_event(&mut self, event: keyboard::Event, typing: bool, main_window: bool) -> Task {
         if matches!(&event, keyboard::Event::KeyReleased { .. })
             && self.computer_key(&event, typing) { return Task::none(); }
         if let keyboard::Event::KeyReleased { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown), .. } = &event {
@@ -567,8 +568,9 @@ impl App {
         Task::none()
     }
 
-    pub fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn update(&mut self, message: Message) -> Task {
         match message {
+            Message::Ui(message) => return crate::ui::update(self, message),
             Message::DismissToast => self.toast = None,
             Message::Palette(message) => return crate::palette::update(self, message),
             Message::ShowPanel(panel) => {
@@ -585,11 +587,7 @@ impl App {
                     Some(Ok(())) if self.status == "processing audio" => self.set_status("audio ready"),
                     _ => {}
                 }
-                let saves = self.poll_saves();
-                if self.bpm_text.is_none() {
-                    return saves;
-                }
-                return Task::batch([saves, iced::widget::operation::is_focused("tempo").map(Message::BpmFocused)]);
+                return self.poll_saves();
             }
             Message::CancelAudio => self.session.cancel_audio(),
             Message::RetryAudio => { self.refresh(); if self.session.audio_progress().is_some() { self.set_status("processing audio"); } }
@@ -767,26 +765,12 @@ impl App {
                 self.path = Some(path);
                 self.save();
             }
-            Message::Screenshot => {
-                return window::latest().and_then(window::screenshot).map(Message::Captured);
-            }
-            Message::Captured(shot) => {
-                for instance in self.project.plugins.iter().map(|p| (p.id, p.plugin.name.clone())).collect::<Vec<_>>() {
-                    let open = self.session.editor_open(instance.0);
-                    log::info!("editor {}: {}", instance.1, if open { "open" } else { "closed" });
-                }
-                if let Some(path) = self.screenshot.take() {
-                    if let Err(error) = crate::capture::write_bmp(&path, &shot) {
-                        log::error!("screenshot failed: {error}");
-                    }
-                    return iced::exit();
-                }
-            }
             Message::CloseRequested => {
                 log::info!("close requested (unsaved changes: {})", self.dirty);
                 return self.guard(Pending::Close);
             }
             Message::SaveChoice(SaveChoice::Save) => {
+                self.asking = false;
                 if self.path.is_none() {
                     return save_as(Message::SavedAsThenContinue);
                 }
@@ -794,12 +778,14 @@ impl App {
                 self.save();
             }
             Message::SaveChoice(SaveChoice::Discard) => {
+                self.asking = false;
                 self.saving.cancel_wait();
                 if let Some(next) = self.pending.take() {
                     return self.proceed(next);
                 }
             }
             Message::SaveChoice(SaveChoice::Cancel) | Message::SavedAsThenContinue(None) => {
+                self.asking = false;
                 self.pending = None;
                 self.saving.cancel_wait();
             }
@@ -831,9 +817,6 @@ impl App {
     }
 
     fn tick(&mut self) {
-        if !self.quit_routed {
-            self.quit_routed = crate::quit::route_to_close();
-        }
         let shared = self.session.shared();
         self.position = shared.position();
         let playing = shared.playing();
@@ -867,7 +850,7 @@ impl App {
         self.layout_mut().set_split_ratio(path, ratio);
     }
 
-    fn action(&mut self, action: Action) -> Task<Message> {
+    fn action(&mut self, action: Action) -> Task {
         self.menu = None;
         match action {
             Action::Focus(d) => {
@@ -938,7 +921,7 @@ impl App {
             Action::ToggleMidiRecord => self.toggle_midi_recording(),
             Action::ToggleComputerKeyboard => self.toggle_computer_keyboard(),
             Action::ToggleAudioRecord => self.toggle_audio_recording(),
-            Action::ImportAudio => return Task::perform(dialogs::open("wav", &["wav", "wave"], None), Message::ImportAudio),
+            Action::ImportAudio => return Task::open("WAV audio", &["wav", "wave"], None, Message::ImportAudio),
             Action::Delete => {
                 let deleted = match self.focused_panel() {
                     Panel::ChannelRack => channel_rack::delete_selected(self),
@@ -1026,15 +1009,15 @@ impl App {
                 }
             }
             Action::New => return self.guard(Pending::New),
-            Action::Open => return Task::perform(dialogs::open("project", &["dawproj", "dawzip"], None), Message::Opened),
+            Action::Open => return Task::open("project", &["dawproj", "dawzip"], None, Message::Opened),
             Action::Save if self.path.is_some() => self.save(),
             Action::Save | Action::SaveAs => return save_as(Message::SavedAs),
-            Action::Pack => return Task::perform(dialogs::save("portable project", &["dawzip"], "project.dawzip"), Message::PackPicked),
+            Action::Pack => return Task::save("portable project", &["dawzip"], "project.dawzip", Message::PackPicked),
             Action::Recover => {
                 let backups = crate::project_files::backups_dir();
-                return Task::perform(dialogs::open("backup", &["dawproj"], Some(backups)), Message::RecoverPicked);
+                return Task::open("backup", &["dawproj"], Some(backups), Message::RecoverPicked);
             }
-            Action::Export => return Task::perform(dialogs::save("wav", &["wav"], "export.wav"), Message::Exported),
+            Action::Export => return Task::save("WAV audio", &["wav"], "export.wav", Message::Exported),
         }
         Task::none()
     }
@@ -1053,42 +1036,8 @@ impl App {
         self.session.seek(start);
         self.position = start;
     }
-
-    pub fn subscription(&self) -> Subscription<Message> {
-        let events = event::listen_with(|event, status, _| match event {
-            iced::Event::Keyboard(event) => Some(Message::Key(event, status == event::Status::Captured)),
-            iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
-            iced::Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
-            iced::Event::Window(window::Event::Opened { size, .. }) => Some(Message::WindowResized(size)),
-            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
-            iced::Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::MouseMoved(position)),
-            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
-            // Wheel steps do not emit the slider's release message.
-            iced::Event::Mouse(mouse::Event::WheelScrolled { .. }) => Some(Message::EndEdit),
-            _ => None,
-        });
-        // Presses are listened to raw so a click focuses its tile even when a
-        // widget inside the tile handles it.
-        let presses = event::listen_raw(|event, _, _| match event {
-            iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => Some(Message::MousePressed),
-            _ => None,
-        });
-        let tick = iced::time::every(Duration::from_millis(33)).map(|_| Message::Tick);
-        let close = window::close_requests().map(|_| Message::CloseRequested);
-        let plugin_keys = Subscription::run(plugin_keys);
-        let opened = Subscription::run(opened_files);
-        let menu = Subscription::run(crate::native_menu::clicks);
-        let mut subscriptions = vec![events, presses, tick, close, plugin_keys, opened, menu];
-        if self.screenshot.is_some() {
-            let delay = std::env::var("DAW_SCREENSHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(8);
-            subscriptions.push(iced::time::every(Duration::from_secs(delay)).map(|_| Message::Screenshot));
-        }
-        Subscription::batch(subscriptions)
-    }
 }
 
-/// Keys from plugin editor windows, waiting for the subscription to take them.
-static PLUGIN_KEYS: Mutex<Option<UnboundedReceiver<Message>>> = Mutex::new(None);
 #[cfg(target_os = "macos")]
 static PLUGIN_KEYBOARD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1096,15 +1045,12 @@ static PLUGIN_KEYBOARD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomi
 /// Space plays while a plugin window is in front. Call on the main thread.
 #[cfg(target_os = "macos")]
 fn forward_plugin_keys() {
-    let (sender, receiver) = mpsc::unbounded();
-    *PLUGIN_KEYS.lock().unwrap() = Some(receiver);
-    let notes = sender.clone();
     let held = std::cell::RefCell::new(std::collections::HashSet::new());
     daw_plugins::set_editor_keys(move |press, typing| {
         use keyboard::{Event, Modifiers, key::{Code, Physical}};
         let Some(press) = press else {
             held.borrow_mut().clear();
-            let _ = notes.unbounded_send(Message::WindowUnfocused);
+            crate::ui::post(Message::WindowUnfocused);
             return false;
         };
         let Some(event) = crate::keys::plugin_key_event(press) else { return false };
@@ -1119,50 +1065,79 @@ fn forward_plugin_keys() {
             }
             _ => false,
         };
-        used && notes.unbounded_send(Message::PluginNote(event)).is_ok()
+        if used { crate::ui::post(Message::PluginNote(event)); }
+        used
     });
     daw_plugins::set_unhandled_keys(move |press| {
         let Some(event) = crate::keys::plugin_key_event(press) else { return false };
-        sender.unbounded_send(Message::PluginKey(event)).is_ok()
+        crate::ui::post(Message::PluginKey(event));
+        true
     });
 }
 
-/// Projects opened from Finder, loaded the same way as Cmd+O.
-fn opened_files() -> impl Stream<Item = Message> {
-    stream::iter(crate::open_files::take()).flatten().map(|path| Message::Opened(Some(path)))
-}
-
-fn plugin_keys() -> impl Stream<Item = Message> {
-    let receiver = PLUGIN_KEYS.lock().unwrap().take();
-    stream::iter(receiver).flatten()
-}
-
 /// Ask where to save the project, then send the answer as `then`.
-fn save_as(then: fn(Option<PathBuf>) -> Message) -> Task<Message> {
-    Task::perform(dialogs::save("project", &["dawproj"], "untitled.dawproj"), then)
+fn save_as(then: fn(Option<PathBuf>) -> Message) -> Task {
+    Task::save("project", &["dawproj"], "untitled.dawproj", then)
 }
 
-fn scan_task(mode: ScanMode) -> Task<Message> {
+fn scan_task(mode: ScanMode) -> Task {
     scan_task_with(move |sender| {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("daw"));
         let progress_sender = sender.clone();
         daw_plugins::scan::scan(&exe, &daw_plugins::scan::cache_path(), mode, move |p| {
-            let _ = progress_sender.unbounded_send(Message::ScanProgress(p));
+            let _ = progress_sender.send(Message::ScanProgress(p));
+            crate::ui::wake();
         })
     })
 }
 
-/// Defer discovery and child processes until the runtime polls this task.
+/// Defer discovery and child processes until the shell runs this task.
 /// Constructing or discarding a task, as unit tests do, must have no side effects.
-fn scan_task_with(scan: impl FnOnce(mpsc::UnboundedSender<Message>) -> Catalog + Send + 'static) -> Task<Message> {
-    Task::stream(stream::once(async move {
-        let (sender, receiver) = mpsc::unbounded();
-        std::thread::spawn(move || {
-            let catalog = scan(sender.clone());
-            let _ = sender.unbounded_send(Message::ScanDone(catalog));
-        });
-        receiver
-    }).flatten())
+fn scan_task_with(scan: impl FnOnce(std::sync::mpsc::Sender<Message>) -> Catalog + Send + 'static) -> Task {
+    Task::thread(move |sender| {
+        let catalog = scan(sender.clone());
+        let _ = sender.send(Message::ScanDone(catalog));
+    })
+}
+
+/// What the shell asks of the app.
+impl App {
+    /// A digest of what a tick can change on screen, so idle ticks draw nothing.
+    pub fn tick_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.position.to_bits().hash(&mut h);
+        self.playing.hash(&mut h);
+        for (l, r) in &self.meters {
+            ((l * 200.0) as u32, (r * 200.0) as u32).hash(&mut h);
+        }
+        self.toast.as_ref().map(|t| ((t.opacity() * 30.0) as u32, t.text.len())).hash(&mut h);
+        self.scan.map(|p| (p.done, p.total)).hash(&mut h);
+        self.session.audio_progress().map(|p| (p * 200.0) as u32).hash(&mut h);
+        self.session.preparation_error.is_some().hash(&mut h);
+        self.rendering.progress().map(|(l, p)| (l.to_string(), (p * 200.0) as u32)).hash(&mut h);
+        (self.revision, self.dirty, self.undo.len(), self.redo.len()).hash(&mut h);
+        (self.record, self.midi.recording, self.session.recording_armed(), self.computer_keyboard.enabled).hash(&mut h);
+        self.status.hash(&mut h);
+        self.path.hash(&mut h);
+        self.pending.is_some().hash(&mut h);
+        h.finish()
+    }
+
+    /// Whether something follows the pointer, so every move needs a new view.
+    pub fn follows_pointer(&self) -> bool {
+        self.browser.drag.is_some_and(|d| d.moved) || self.dragging_split.is_some() || self.browser.drag.is_some()
+    }
+
+    /// A text field lost keyboard focus: apply what was typed.
+    pub fn field_blurred(&mut self, key: &'static str) -> Task {
+        match key {
+            "tempo" => self.update(Message::BpmFocused(false)),
+            "tail-export" => self.update(Message::Settings(settings::Message::TailDone(settings::Tail::Export))),
+            "tail-consolidation" => self.update(Message::Settings(settings::Message::TailDone(settings::Tail::Consolidation))),
+            _ => Task::none(),
+        }
+    }
 }
 
 #[cfg(test)]
