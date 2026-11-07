@@ -7,6 +7,8 @@
 //! between them, so later drawing stays on top.
 
 use std::any::Any;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use rune::{Color, Drag, El, LineCap, Phase, PointerButton, Shape, Tx, canvas as shape_el, el, text};
@@ -412,9 +414,20 @@ impl Path {
     }
 }
 
+/// A layer and a fingerprint of what it draws. The fingerprint keys the
+/// layer's element, so a layer keeps its element only while it draws the same
+/// thing. Keyed by position instead, removing a note would hand its slot (and
+/// its fill) to the layer after it, and Rune would fade the colour across.
 enum Layer {
-    Shape(Shape),
-    El(El),
+    Shape(Shape, DefaultHasher),
+    El(El, u64),
+}
+
+fn fingerprint(parts: &[f32], color: Color, extra: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    for v in parts.iter().chain(&[color.r, color.g, color.b, color.a]) { v.to_bits().hash(&mut h); }
+    extra.hash(&mut h);
+    h.finish()
 }
 
 /// What a canvas paints, in order.
@@ -428,11 +441,14 @@ impl Frame {
         Frame { size, layers: Vec::new() }
     }
 
-    fn shape(&mut self, f: impl FnOnce(Shape) -> Shape) {
-        if let Some(Layer::Shape(shape)) = self.layers.last_mut() {
+    fn shape(&mut self, points: &[[f32; 2]], color: Color, f: impl FnOnce(Shape) -> Shape) {
+        if !matches!(self.layers.last(), Some(Layer::Shape(..))) {
+            self.layers.push(Layer::Shape(Shape::new(), DefaultHasher::new()));
+        }
+        if let Some(Layer::Shape(shape, hash)) = self.layers.last_mut() {
+            for [x, y] in points { x.to_bits().hash(hash); y.to_bits().hash(hash); }
+            for v in [color.r, color.g, color.b, color.a] { v.to_bits().hash(hash); }
             *shape = f(std::mem::take(shape));
-        } else {
-            self.layers.push(Layer::Shape(f(Shape::new())));
         }
     }
 
@@ -441,7 +457,8 @@ impl Frame {
             return;
         }
         let (x, y, w, h) = (p.x, p.y, size.width, size.height);
-        self.shape(|s| s.fill(vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]], color));
+        let points = vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+        self.shape(&points, color, |s| s.fill(points.clone(), color));
     }
 
     pub fn stroke_rectangle(&mut self, p: Point, size: Size, stroke: Stroke) {
@@ -452,14 +469,14 @@ impl Frame {
         for (points, closed) in &path.subpaths {
             let points = points.clone();
             let closed = *closed;
-            self.shape(|s| s.stroke_with(points, closed, stroke.width, LineCap::Butt, stroke.color));
+            self.shape(&points.clone(), stroke.color, |s| s.stroke_with(points, closed, stroke.width, LineCap::Butt, stroke.color));
         }
     }
 
     pub fn fill(&mut self, path: &Path, color: Color) {
         for (points, _) in &path.subpaths {
             let points = points.clone();
-            self.shape(|s| s.fill(points, color));
+            self.shape(&points.clone(), color, |s| s.fill(points, color));
         }
     }
 
@@ -468,7 +485,8 @@ impl Frame {
             return;
         }
         let style = if (t.size - theme::SMALL).abs() < 0.01 { theme::CANVAS } else { rune::TextStyle { size: t.size, ..theme::CANVAS } };
-        self.layers.push(Layer::El(text(t.content).font(style).color(t.color).single_line().absolute(t.position.x, t.position.y)));
+        let id = fingerprint(&[t.position.x, t.position.y, t.size], t.color, &t.content);
+        self.layers.push(Layer::El(text(t.content).font(style).color(t.color).single_line().absolute(t.position.x, t.position.y), id));
     }
 
     /// A rounded box, such as a note or clip body.
@@ -477,17 +495,23 @@ impl Frame {
             return;
         }
         let radius = radius.min(size.width / 2.0).min(size.height / 2.0);
-        self.layers.push(Layer::El(el().absolute(p.x, p.y).size(size.width, size.height).radius(radius).fill(color)));
+        let id = fingerprint(&[p.x, p.y, size.width, size.height, radius], color, "");
+        self.layers.push(Layer::El(el().absolute(p.x, p.y).size(size.width, size.height).radius(radius).fill(color), id));
     }
 
     pub fn into_el(self) -> El {
         let (w, h) = (self.size.width, self.size.height);
         let mut root = el().clip_rounded(0.0);
+        // Two layers can draw the same thing; the count keeps their keys apart.
+        let mut seen: HashMap<u64, u32> = HashMap::new();
         for layer in self.layers {
-            root = root.child(match layer {
-                Layer::Shape(shape) => shape_el(shape).absolute(0.0, 0.0).size(w, h),
-                Layer::El(element) => element,
-            });
+            let (element, id) = match layer {
+                Layer::Shape(shape, hash) => (shape_el(shape).absolute(0.0, 0.0).size(w, h), hash.finish()),
+                Layer::El(element, id) => (element, id),
+            };
+            let n = seen.entry(id).or_default();
+            root = root.child(element.key(format!("{id:x}-{n}")));
+            *n += 1;
         }
         root
     }
