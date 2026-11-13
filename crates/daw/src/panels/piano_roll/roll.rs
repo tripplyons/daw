@@ -180,6 +180,10 @@ impl canvas::Program for Roll<'_> {
                             app.project.grid.snap_floor(tick.max(0.0) as Ticks, app.project.signature)
                         };
                         state.drag = Some(Drag::Notes { tick: start as f64, key });
+                        // A new note sits under the pointer, often with its right
+                        // edge a few points away. The next press grabs it, so it
+                        // must not pair with this one into a double-click delete.
+                        state.clicks = Clicks::default();
                         publish(Message::Add { start, key: key as u8 })
                     }
                     (Button::Right, Some((index, _))) => publish(Message::Delete(index)),
