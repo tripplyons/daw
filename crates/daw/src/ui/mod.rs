@@ -7,7 +7,7 @@ pub mod widgets;
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -44,6 +44,10 @@ pub struct State {
     /// Editors for text fields by key. Interior mutability lets the view
     /// bring a field in line with the app's value while it builds it.
     pub fields: RefCell<HashMap<&'static str, TextEdit>>,
+    /// Fields the view being built shows. A focused field that the view
+    /// stops showing, such as the palette's search after a command runs,
+    /// loses focus; otherwise keys would still go to it as typing.
+    pub shown_fields: RefCell<HashSet<&'static str>>,
     /// Fields that had focus at the last poll, to report focus loss.
     focused: Vec<&'static str>,
     /// The open dropdown list.
@@ -332,7 +336,13 @@ fn view(app: &App, cx: &mut rune::Cx<App>) -> El {
     let scale = f32::from(app.config.ui_scale) / 100.0;
     cx.titlebar_height(crate::app::TRANSPORT_HEIGHT * scale);
     app.ui.chrome_inset.set(cx.chrome_insets().leading / scale);
-    app.root()
+    app.ui.shown_fields.borrow_mut().clear();
+    let root = app.root();
+    let shown = app.ui.shown_fields.borrow();
+    for (key, field) in app.ui.fields.borrow_mut().iter_mut() {
+        if field.focused && !shown.contains(key) { field.focused = false; }
+    }
+    root
 }
 
 fn init() -> App {

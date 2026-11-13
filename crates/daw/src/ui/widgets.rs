@@ -337,6 +337,7 @@ pub fn popover(content: El) -> El {
 /// A one-line text field bound to an app value. `on_change` turns the
 /// typed text into a message; Enter sends `on_submit` when given.
 pub fn field(app: &App, key: &'static str, value: &str, placeholder: &str, on_change: fn(String) -> Message, on_submit: Option<Message>) -> El {
+    app.ui.shown_fields.borrow_mut().insert(key);
     let edit = {
         let mut fields = app.ui.fields.borrow_mut();
         let edit = fields.entry(key).or_insert_with(|| rune::TextEdit::new(value));
