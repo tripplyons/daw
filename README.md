@@ -42,7 +42,7 @@ In the piano roll, hover the keyboard to see each key's name, and click a key to
 
 ## Build with Bazel
 
-The repo also builds with [Bazel](https://bazel.build) through [rules_rust](https://github.com/bazelbuild/rules_rust). `.bazelversion` pins Bazel 9.3.1; install it with [Bazelisk](https://github.com/bazelbuild/bazelisk) or Homebrew (`brew install bazel`).
+The repo also builds with [Bazel](https://bazel.build) through [rules_rust](https://github.com/bazelbuild/rules_rust). `.bazelversion` pins Bazel 9.3.2; install it with [Bazelisk](https://github.com/bazelbuild/bazelisk) or Homebrew (`brew install bazel`).
 
 ```sh
 bazel run -c opt //crates/daw
