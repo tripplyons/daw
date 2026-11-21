@@ -23,4 +23,49 @@ crate.from_cargo(
         "//crates/daw-plugins:Cargo.toml",
     ],
 )
-use_repo(crate, "crates")
+use_repo(
+    crate,
+    "crates",
+    rune_path_arrayref = "crates__arrayref-0.3.9",
+    rune_path_bytemuck = "crates__bytemuck-1.25.2",
+    rune_path_strict_num = "crates__strict-num-0.1.1",
+)
+
+# Crate Universe merges crates by name and version. Rune's vendored
+# tiny-skia-path needs its own target alongside the crates.io copy used by resvg.
+git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+git_repository(
+    name = "rune_tiny_skia_path",
+    build_file = "//:bazel/rune-tiny-skia-path.BUILD.bazel",
+    commit = "86b903de7fef9c6b683e05dc23440de4ebbc4347",
+    remote = "https://github.com/anomalyco/rune",
+    sparse_checkout_patterns = ["/vendor/tiny-skia-path/"],
+    strip_prefix = "vendor/tiny-skia-path",
+)
+
+crate.annotation(
+    crate = "rune",
+    additive_build_file_content = 'exports_files(glob(["assets/*.ttf", "assets/web/first/*.ttf"]))',
+)
+
+# Rune embeds fonts from a sibling crate. Declare them as inputs because Bazel
+# checks the two crates out into separate repositories.
+rune_text_fonts = {
+    "RUNE_INTER_REGULAR": "@crates__rune-0.0.1//:assets/Inter-Regular.ttf",
+    "RUNE_INTER_MEDIUM": "@crates__rune-0.0.1//:assets/Inter-Medium.ttf",
+    "RUNE_INTER_SEMIBOLD": "@crates__rune-0.0.1//:assets/Inter-SemiBold.ttf",
+    "RUNE_WEB_INTER_REGULAR": "@crates__rune-0.0.1//:assets/web/first/Inter-Regular.ttf",
+    "RUNE_WEB_INTER_MEDIUM": "@crates__rune-0.0.1//:assets/web/first/Inter-Medium.ttf",
+    "RUNE_WEB_INTER_SEMIBOLD": "@crates__rune-0.0.1//:assets/web/first/Inter-SemiBold.ttf",
+    "RUNE_IBM_PLEX_MONO": "@crates__rune-0.0.1//:assets/IBMPlexMono-Regular.ttf",
+}
+
+crate.annotation(
+    crate = "rune-text",
+    compile_data = rune_text_fonts.values(),
+    deps = ["@rune_tiny_skia_path//:tiny_skia_path"],
+    label_injections = {"@rune_tiny_skia_path": "@rune_tiny_skia_path"},
+    patch_args = ["-p1"],
+    patches = ["//:bazel/rune-text.patch"],
+    rustc_env = {name: "$(execpath %s)" % label for name, label in rune_text_fonts.items()},
+)

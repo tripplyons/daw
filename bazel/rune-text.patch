@@ -1,0 +1,30 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -30,7 +30,6 @@
+         "@crates__rustc-hash-2.1.3//:rustc_hash",
+         "@crates__skrifa-0.44.0//:skrifa",
+         "@crates__swash-0.2.10//:swash",
+-        "@crates__tiny-skia-path-0.11.4//:tiny_skia_path",
+         "@crates__unicode-segmentation-1.13.3//:unicode_segmentation",
+         "@crates__zeroize-1.9.1//:zeroize",
+     ] + select({
+diff --git a/src/fonts/default_fonts.rs b/src/fonts/default_fonts.rs
+--- a/src/fonts/default_fonts.rs
++++ b/src/fonts/default_fonts.rs
+@@ -7,3 +7,3 @@
+-    include_bytes!("../../../rune/assets/Inter-Regular.ttf"),
+-    include_bytes!("../../../rune/assets/Inter-Medium.ttf"),
+-    include_bytes!("../../../rune/assets/Inter-SemiBold.ttf"),
++    include_bytes!(env!("RUNE_INTER_REGULAR")),
++    include_bytes!(env!("RUNE_INTER_MEDIUM")),
++    include_bytes!(env!("RUNE_INTER_SEMIBOLD")),
+@@ -16,4 +16,4 @@
+-    include_bytes!("../../../rune/assets/web/first/Inter-Regular.ttf"),
+-    include_bytes!("../../../rune/assets/web/first/Inter-Medium.ttf"),
+-    include_bytes!("../../../rune/assets/web/first/Inter-SemiBold.ttf"),
+-    include_bytes!("../../../rune/assets/IBMPlexMono-Regular.ttf"),
++    include_bytes!(env!("RUNE_WEB_INTER_REGULAR")),
++    include_bytes!(env!("RUNE_WEB_INTER_MEDIUM")),
++    include_bytes!(env!("RUNE_WEB_INTER_SEMIBOLD")),
++    include_bytes!(env!("RUNE_IBM_PLEX_MONO")),

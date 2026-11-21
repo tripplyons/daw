@@ -1,0 +1,15 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "tiny_skia_path",
+    srcs = glob(["src/**/*.rs"]),
+    crate_features = ["default", "std"],
+    crate_root = "src/lib.rs",
+    edition = "2018",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@rune_path_arrayref//:arrayref",
+        "@rune_path_bytemuck//:bytemuck",
+        "@rune_path_strict_num//:strict_num",
+    ],
+)

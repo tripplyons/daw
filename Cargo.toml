@@ -18,7 +18,7 @@ base64 = "0.22"
 cpal = "0.18"
 rtrb = "0.4"
 hound = "3.5"
-rune = { git = "https://github.com/anomalyco/rune", rev = "65e7e60bf564940a51804b2f2511912fd03bbf6d", features = ["native-file-dialog"] }
+rune = { git = "https://github.com/anomalyco/rune", rev = "86b903de7fef9c6b683e05dc23440de4ebbc4347", features = ["native-file-dialog"] }
 vst3 = "0.3"
 objc2 = "0.6"
 objc2-foundation = "0.3"
@@ -31,6 +31,15 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 dirs = "6"
+
+# Cargo only applies patches from the consuming workspace. Keep these at Rune's revision.
+[patch.crates-io]
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "86b903de7fef9c6b683e05dc23440de4ebbc4347" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "86b903de7fef9c6b683e05dc23440de4ebbc4347" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "86b903de7fef9c6b683e05dc23440de4ebbc4347" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "86b903de7fef9c6b683e05dc23440de4ebbc4347" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "86b903de7fef9c6b683e05dc23440de4ebbc4347" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "86b903de7fef9c6b683e05dc23440de4ebbc4347" }
 
 [profile.dev.package."*"]
 opt-level = 2

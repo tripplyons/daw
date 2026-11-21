@@ -1,1 +1,5 @@
-exports_files(["Cargo.toml"])
+exports_files([
+    "Cargo.toml",
+    "bazel/rune-text.patch",
+    "bazel/rune-tiny-skia-path.BUILD.bazel",
+])
