@@ -2271,3 +2271,19 @@ fn dragging_a_note_up_and_down_previews_its_new_pitch() {
     assert_eq!(held(&app), None);
     let _ = app.update(roll::Message::End.into());
 }
+
+#[test]
+fn channel_preview_holds_its_note_until_a_tick_after_its_length() {
+    use std::time::{Duration, Instant};
+    let mut app = app();
+    let id = app.selected_channel.unwrap();
+    let _ = app.update(crate::panels::channel_rack::Message::Preview(id).into());
+    assert_eq!(app.session.previews().len(), 1);
+    // A second preview restarts the note instead of adding another.
+    let _ = app.update(crate::panels::channel_rack::Message::Preview(id).into());
+    assert_eq!(app.session.previews().len(), 1);
+    app.session.release_previews(Instant::now());
+    assert_eq!(app.session.previews().len(), 1, "still within its length");
+    app.session.release_previews(Instant::now() + Duration::from_secs(1));
+    assert!(app.session.previews().is_empty());
+}

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use daw_engine::input::{Recorder, Take};
 #[cfg(not(test))]
@@ -52,6 +53,8 @@ pub struct Session {
     peaks: crate::processing::Peaks,
     /// Microphone input, while audio recording is armed.
     recorder: Option<Recorder>,
+    /// Preview notes and when to release them, from `preview_note`.
+    previews: Vec<(u64, u8, Instant)>,
     #[cfg(test)]
     pub song_updates: usize,
 }
@@ -95,6 +98,7 @@ impl Session {
             preparation: None,
             peaks: HashMap::new(),
             recorder: None,
+            previews: Vec::new(),
             #[cfg(test)]
             song_updates: 0,
         }
@@ -301,6 +305,37 @@ impl Session {
     }
 
     pub fn release_notes(&mut self) { self.send(Command::ReleaseNotes); }
+
+    /// Play `key` on `node` for `length`, for a preview with no button to
+    /// hold. A note-off sent right after the note-on lands in the same audio
+    /// block, so most instruments would make no sound. `release_previews`
+    /// sends the note-off once `length` has passed.
+    pub fn preview_note(&mut self, node: u64, key: u8, velocity: f32, length: Duration) {
+        // A second preview of the same key restarts it instead of being cut
+        // short by the first one's release.
+        if let Some(index) = self.previews.iter().position(|&(n, k, _)| n == node && k == key) {
+            self.previews.remove(index);
+            self.note(node, key, 0.0);
+        }
+        self.note(node, key, velocity);
+        self.previews.push((node, key, Instant::now() + length));
+    }
+
+    /// Release the preview notes whose time is up. The app calls this on
+    /// every tick.
+    pub fn release_previews(&mut self, now: Instant) {
+        let (due, waiting) = self.previews.drain(..).partition(|&(_, _, at)| at <= now);
+        self.previews = waiting;
+        for (node, key, _) in due {
+            self.note(node, key, 0.0);
+        }
+    }
+
+    /// The preview notes not yet released.
+    #[cfg(test)]
+    pub fn previews(&self) -> Vec<(u64, u8)> {
+        self.previews.iter().map(|&(node, key, _)| (node, key)).collect()
+    }
 
     /// Open the default input device; audio is recorded whenever the song plays.
     pub fn arm_recording(&mut self) -> Result<(), String> {

@@ -15,6 +15,8 @@ use crate::theme::{self, C};
 use crate::ui::{self, widgets::{self, Btn, Choice, Slider}};
 
 const MAX_STEPS: u64 = 64;
+/// How long the channel menu's preview holds its note.
+const PREVIEW_LENGTH: std::time::Duration = std::time::Duration::from_millis(400);
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -145,8 +147,7 @@ pub fn update(app: &mut App, message: Message) -> Task {
         Message::Preview(id) => {
             if let Some(channel) = app.project.channel(id) {
                 let node = channel_node(&channel.source, id);
-                app.session.note(node, daw_model::DEFAULT_KEY, 0.8);
-                app.session.note(node, daw_model::DEFAULT_KEY, 0.0);
+                app.session.preview_note(node, daw_model::DEFAULT_KEY, 0.8, PREVIEW_LENGTH);
             }
             select(app, id);
         }

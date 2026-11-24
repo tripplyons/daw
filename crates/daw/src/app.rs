@@ -817,6 +817,7 @@ impl App {
     }
 
     fn tick(&mut self) {
+        self.session.release_previews(Instant::now());
         let shared = self.session.shared();
         self.position = shared.position();
         let playing = shared.playing();
