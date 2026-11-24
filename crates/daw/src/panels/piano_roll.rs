@@ -46,6 +46,9 @@ pub struct State {
     key_base: Vec<usize>,
     /// The node and key of the note held while the mouse button is down.
     pub sounding: Option<(u64, u8)>,
+    /// The key of the note under the pointer when a move began; the held
+    /// preview follows it up and down.
+    grabbed_key: Option<u8>,
     clipboard: Vec<Note>,
     /// Draw other channels' notes in the pattern behind this channel's.
     pub ghosts: bool,
@@ -65,6 +68,7 @@ impl Default for State {
             duplicate: false,
             key_base: Vec::new(),
             sounding: None,
+            grabbed_key: None,
             clipboard: Vec::new(),
             ghosts: true,
         }
@@ -76,6 +80,7 @@ impl State {
         self.originals.clear();
         self.drag_changed = false;
         self.duplicate = false;
+        self.grabbed_key = None;
     }
 }
 
@@ -235,6 +240,7 @@ pub fn update(app: &mut App, message: Message) {
             app.piano_roll.resizing = None;
             begin_drag(app);
             app.piano_roll.drag_changed = true;
+            app.piano_roll.grabbed_key = Some(key);
             preview(app, key);
             app.edited();
         }
@@ -246,6 +252,7 @@ pub fn update(app: &mut App, message: Message) {
             if let Some(note) = notes(app).get(index).copied()
                 && edge.is_none()
             {
+                app.piano_roll.grabbed_key = Some(note.key);
                 preview(app, note.key);
             }
         }
@@ -255,6 +262,11 @@ pub fn update(app: &mut App, message: Message) {
             let min_length = grid.step(signature).filter(|_| !bypass).unwrap_or(10);
             if app.piano_roll.duplicate && (delta != 0 || keys != 0) {
                 copy_dragged(app);
+            }
+            // The held preview follows the grabbed note to its new pitch.
+            if let Some(grabbed) = app.piano_roll.grabbed_key {
+                let key = (i32::from(grabbed) + keys).clamp(0, 127) as u8;
+                if app.piano_roll.sounding.is_some_and(|(_, held)| held != key) { preview(app, key); }
             }
             let originals = app.piano_roll.originals.clone();
             let resizing = app.piano_roll.resizing;

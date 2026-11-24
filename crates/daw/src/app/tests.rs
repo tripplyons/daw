@@ -2251,3 +2251,23 @@ fn piano_previews_hold_the_note_until_the_mouse_is_released() {
     let _ = app.update(roll::Message::End.into());
     assert_eq!(held(&app), None);
 }
+
+#[test]
+fn dragging_a_note_up_and_down_previews_its_new_pitch() {
+    let mut app = app();
+    let held = |app: &App| app.piano_roll.sounding.map(|(_, key)| key);
+    let _ = app.update(roll::Message::Add { start: 0, key: 60 }.into());
+    let _ = app.update(roll::Message::End.into());
+    let _ = app.update(roll::Message::Begin { index: 0, edge: None, pick: timeline::Pick::Replace }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 0.0, keys: 3, bypass: false }.into());
+    assert_eq!(held(&app), Some(63));
+    let _ = app.update(roll::Message::Drag { ticks: 480.0, keys: -2, bypass: false }.into());
+    assert_eq!(held(&app), Some(58));
+    let _ = app.update(roll::Message::End.into());
+    assert_eq!(held(&app), None);
+    // Resizing makes no sound.
+    let _ = app.update(roll::Message::Begin { index: 0, edge: Some(timeline::Edge::End), pick: timeline::Pick::Replace }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 480.0, keys: 4, bypass: false }.into());
+    assert_eq!(held(&app), None);
+    let _ = app.update(roll::Message::End.into());
+}
