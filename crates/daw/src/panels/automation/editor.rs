@@ -226,18 +226,17 @@ impl canvas::Program for Editor<'_> {
                     if let Some(index) = self.point_at(p, bounds) {
                         return publish(Message::Delete(index));
                     }
-                    state.drag = Some(Drag::Box { from: p, to: p, additive: modifiers.shift() });
-                    return redraw();
+                    return Some(canvas::Action::capture());
                 }
                 if *button != Button::Left {
                     return None;
                 }
                 match tool {
-                    Tool::Draw if !timeline::box_select_modifier(modifiers) => {
+                    Tool::Draw if !timeline::box_select(modifiers) => {
                         state.drag = Some(Drag::Stroke(vec![p]));
                         return redraw();
                     }
-                    Tool::Line if !timeline::box_select_modifier(modifiers) => {
+                    Tool::Line if !timeline::box_select(modifiers) => {
                         state.drag = Some(Drag::Line { from: p, to: p });
                         return redraw();
                     }
@@ -254,7 +253,7 @@ impl canvas::Program for Editor<'_> {
                     }
                     let point = points(self.app)[index];
                     state.drag = Some(Drag::Points { tick: point.time as f64, value: point.value, origin: p });
-                    return publish(Message::Begin { index, additive: modifiers.shift() });
+                    return publish(Message::Begin { index, additive: modifiers.shift() || modifiers.command() });
                 }
                 if modifiers.alt()
                     && let Some(index) = self.segment_at(tick)
@@ -266,13 +265,14 @@ impl canvas::Program for Editor<'_> {
                 if double && let Some(index) = self.segment_at(tick) {
                     return publish(Message::CycleShape(index));
                 }
-                if timeline::box_select_modifier(modifiers) {
+                if timeline::box_select(modifiers) {
                     state.drag = Some(Drag::Box { from: p, to: p, additive: modifiers.shift() });
                     return redraw();
                 }
-                let (time, snapped) = self.snap(tick, value, modifiers.command());
+                let bypass = timeline::snap_bypass(modifiers);
+                let (time, snapped) = self.snap(tick, value, bypass);
                 state.drag = Some(Drag::Points { tick: time as f64, value: snapped, origin: p });
-                publish(Message::Add { time: tick, value, bypass: modifiers.command() })
+                publish(Message::Add { time: tick, value, bypass })
             }
             canvas::Event::Mouse(MouseEvent::CursorMoved { .. }) => {
                 let p = cursor.position_from(bounds.position())?;
@@ -290,7 +290,7 @@ impl canvas::Program for Editor<'_> {
                                 dt = 0.0;
                             }
                         }
-                        publish(Message::Drag { ticks: dt, value: dv, bypass: modifiers.command() })
+                        publish(Message::Drag { ticks: dt, value: dv, bypass: timeline::snap_bypass(modifiers) })
                     }
                     Drag::Tension { index, origin, start, rising } => {
                         let sign = if *rising { 1.0 } else { -1.0 };
@@ -309,7 +309,7 @@ impl canvas::Program for Editor<'_> {
                 }
             }
             canvas::Event::Mouse(MouseEvent::ButtonReleased(_)) => {
-                let bypass = state.modifiers.command();
+                let bypass = timeline::snap_bypass(state.modifiers);
                 match state.drag.take()? {
                     Drag::Points { .. } => publish(Message::End),
                     Drag::Tension { .. } => publish(Message::End),
@@ -432,7 +432,7 @@ impl canvas::Program for Editor<'_> {
                 frame.stroke(&path, Stroke::default().with_color(theme::BRIGHT).with_width(1.0));
             }
             Some(Drag::Line { from, to }) => {
-                let bypass = state.modifiers.command();
+                let bypass = timeline::snap_bypass(state.modifiers);
                 let a = self.snap(self.tick(from.x), self.value(from.y, bounds), bypass);
                 let b = self.snap(self.tick(to.x), self.value(to.y, bounds), bypass);
                 let pa = Point::new(self.x(a.0 as f64), self.y(a.1, bounds));
@@ -486,7 +486,7 @@ impl canvas::Program for Editor<'_> {
                     Some(format!("{}  {}  {}", timeline::position_text(p.time as f64, app.project.signature), app.value_text(target, p.value), p.shape.name()))
                 }
                 None => {
-                    let (t, v) = self.snap(self.tick(hover.x), self.value(hover.y, bounds), state.modifiers.command());
+                    let (t, v) = self.snap(self.tick(hover.x), self.value(hover.y, bounds), timeline::snap_bypass(state.modifiers));
                     Some(format!("{}  {}", timeline::position_text(t as f64, app.project.signature), app.value_text(target, v)))
                 }
             },

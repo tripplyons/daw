@@ -1,8 +1,11 @@
 //! Note editor for the selected channel in the selected pattern.
 //!
-//! Left click places a note or drags notes (the right edge resizes), right
-//! click deletes, right drag (or Ctrl drag on macOS) selects a box, Cmd
-//! (Ctrl on Linux) bypasses snapping.
+//! The mouse follows FL Studio, with Cmd for Ctrl on macOS (see
+//! `timeline::box_select`). Left click places a note or drags notes; either
+//! edge resizes. Right click deletes. Cmd+drag selects a box, Cmd+click
+//! adds a note to the selection or removes it, Shift+drag copies the
+//! selection, and Alt bypasses snapping. Clicking a key plays it and
+//! selects the notes at that pitch; dragging along the keys selects a range.
 //! Clicking in the ruler sets where pattern playback starts; dragging the
 //! handle at the pattern end changes the length. Alt+Shift+scroll over a
 //! note changes its velocity; other scrolling follows `timeline::Wheel`.
@@ -12,7 +15,7 @@ use daw_model::time::{Grid, Ticks};
 use daw_model::{ChannelId, Note};
 use rune::El;
 
-use super::timeline::{self, RULER_HEIGHT, TimeView};
+use super::timeline::{self, Edge, Pick, RULER_HEIGHT, TimeView};
 use super::pick_sized;
 use crate::app::{App, Message as AppMessage};
 use crate::input::{Key, Modifiers, key::Named};
@@ -35,7 +38,12 @@ pub struct State {
     pub length: Ticks,
     originals: Vec<(usize, Note)>,
     drag_changed: bool,
-    resizing: bool,
+    /// The edge being dragged, or `None` when moving notes.
+    resizing: Option<Edge>,
+    /// The drag moves copies, made on its first move.
+    duplicate: bool,
+    /// The selection before a drag along the keyboard, which adds to it.
+    key_base: Vec<usize>,
     clipboard: Vec<Note>,
     /// Draw other channels' notes in the pattern behind this channel's.
     pub ghosts: bool,
@@ -51,7 +59,9 @@ impl Default for State {
             length: daw_model::STEP_TICKS,
             originals: Vec::new(),
             drag_changed: false,
-            resizing: false,
+            resizing: None,
+            duplicate: false,
+            key_base: Vec::new(),
             clipboard: Vec::new(),
             ghosts: true,
         }
@@ -62,6 +72,7 @@ impl State {
     pub fn cancel_drag(&mut self) {
         self.originals.clear();
         self.drag_changed = false;
+        self.duplicate = false;
     }
 }
 
@@ -72,12 +83,16 @@ pub enum Message {
     /// Alt+scroll: key height, keeping the key under `y` in place.
     ZoomKeys { steps: f32, y: f32 },
     Add { start: Ticks, key: u8 },
-    Begin { index: usize, resize: bool, additive: bool },
+    /// Press on a note: pick it, then drag it, an edge of it, or copies.
+    Begin { index: usize, edge: Option<Edge>, pick: Pick },
     Drag { ticks: f64, keys: i32, bypass: bool },
     End,
     Delete(usize),
     BoxSelect { from: (f64, i32), to: (f64, i32), additive: bool },
-    Preview(u8),
+    /// Press or drag on the keyboard: play `key` and select the notes from
+    /// `from` to `key`. `begin` marks the press; with `additive` the notes
+    /// join the selection from before it.
+    Keys { from: i32, key: i32, additive: bool, begin: bool },
     Velocity(usize, f32),
     /// Set the velocity of this channel's notes that sound at `tick`; a
     /// drag across the velocity lane is one undo step.
@@ -135,6 +150,20 @@ fn sort(app: &mut App) {
     }
 }
 
+/// Copy the dragged notes in place and drag the copies instead, leaving the
+/// originals where they were. One undo step covers the copy and the move.
+fn copy_dragged(app: &mut App) {
+    app.piano_roll.duplicate = false;
+    let originals = std::mem::take(&mut app.piano_roll.originals);
+    if !app.piano_roll.drag_changed { app.checkpoint(); }
+    app.piano_roll.drag_changed = true;
+    let Some(notes) = notes_mut(app) else { return };
+    let first = notes.len();
+    notes.extend(originals.iter().map(|(_, n)| *n));
+    app.piano_roll.originals = originals.iter().enumerate().map(|(i, (_, n))| (first + i, *n)).collect();
+    app.piano_roll.selected = (first..first + originals.len()).collect();
+}
+
 fn begin_drag(app: &mut App) {
     app.piano_roll.cancel_drag();
     let notes = notes(app).to_vec();
@@ -186,27 +215,19 @@ pub fn update(app: &mut App, message: Message) {
             notes.push(Note { start, length, key, velocity: 0.8 });
             let index = notes.len() - 1;
             app.piano_roll.selected = vec![index];
-            app.piano_roll.resizing = false;
+            app.piano_roll.resizing = None;
             begin_drag(app);
             app.piano_roll.drag_changed = true;
             preview(app, key);
             app.edited();
         }
-        Message::Begin { index, resize, additive } => {
-            let selected = &mut app.piano_roll.selected;
-            if additive {
-                if let Some(position) = selected.iter().position(|&i| i == index) {
-                    selected.remove(position);
-                } else {
-                    selected.push(index);
-                }
-            } else if !selected.contains(&index) {
-                *selected = vec![index];
-            }
-            app.piano_roll.resizing = resize;
+        Message::Begin { index, edge, pick } => {
+            timeline::pick(&mut app.piano_roll.selected, index, pick);
+            app.piano_roll.resizing = edge;
             begin_drag(app);
+            app.piano_roll.duplicate = pick == Pick::Duplicate && edge.is_none();
             if let Some(note) = notes(app).get(index).copied()
-                && !resize
+                && edge.is_none()
             {
                 preview(app, note.key);
             }
@@ -215,23 +236,34 @@ pub fn update(app: &mut App, message: Message) {
             let (grid, signature) = (app.project.grid, app.project.signature);
             let delta = timeline::snap_delta(ticks, grid, signature, bypass);
             let min_length = grid.step(signature).filter(|_| !bypass).unwrap_or(10);
+            if app.piano_roll.duplicate && (delta != 0 || keys != 0) {
+                copy_dragged(app);
+            }
             let originals = app.piano_roll.originals.clone();
             let resizing = app.piano_roll.resizing;
             let mut changed = Vec::new();
             for (index, original) in originals {
                 let mut note = original;
-                if resizing {
-                    note.length = (original.length as i64 + delta).max(min_length as i64) as Ticks;
-                } else {
-                    note.start = (original.start as i64 + delta).max(0) as Ticks;
-                    note.key = (i32::from(original.key) + keys).clamp(0, 127) as u8;
+                match resizing {
+                    Some(Edge::End) => note.length = (original.length as i64 + delta).max(min_length as i64) as Ticks,
+                    Some(Edge::Start) => {
+                        // The end stays put; the start stays before it.
+                        let end = original.end() as i64;
+                        let start = (original.start as i64 + delta).min(end - min_length as i64).min(end - 1).max(0);
+                        note.start = start as Ticks;
+                        note.length = (end - start) as Ticks;
+                    }
+                    None => {
+                        note.start = (original.start as i64 + delta).max(0) as Ticks;
+                        note.key = (i32::from(original.key) + keys).clamp(0, 127) as u8;
+                    }
                 }
                 if notes(app).get(index).is_some_and(|old| *old != note) { changed.push((index, note)); }
             }
             if changed.is_empty() { return; }
             if !app.piano_roll.drag_changed { app.checkpoint(); }
             app.piano_roll.drag_changed = true;
-            if resizing { app.piano_roll.length = changed.last().unwrap().1.length; }
+            if resizing.is_some() { app.piano_roll.length = changed.last().unwrap().1.length; }
             if let Some(notes) = notes_mut(app) {
                 for (index, note) in changed { notes[index] = note; }
             }
@@ -270,7 +302,18 @@ pub fn update(app: &mut App, message: Message) {
                 }
             }
         }
-        Message::Preview(key) => preview(app, key),
+        Message::Keys { from, key, additive, begin } => {
+            if begin {
+                app.piano_roll.key_base = if additive { app.piano_roll.selected.clone() } else { Vec::new() };
+            }
+            let (low, high) = (from.min(key), from.max(key));
+            let mut selected = app.piano_roll.key_base.clone();
+            for (index, _) in notes(app).iter().enumerate().filter(|(_, n)| (low..=high).contains(&i32::from(n.key))) {
+                if !selected.contains(&index) { selected.push(index); }
+            }
+            app.piano_roll.selected = selected;
+            preview(app, key.clamp(0, 127) as u8);
+        }
         Message::Velocity(index, delta) => {
             app.checkpoint();
             let mut shown = None;
@@ -381,7 +424,7 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
                 Named::ArrowUp => (0.0, octave),
                 _ => (0.0, -octave),
             };
-            app.piano_roll.resizing = false;
+            app.piano_roll.resizing = None;
             begin_drag(app);
             update(app, Message::Drag { ticks, keys, bypass: false });
             update(app, Message::End);
@@ -422,8 +465,8 @@ pub fn view(app: &App, focused: bool) -> El {
     let channel = app.selected_channel.and_then(|id| app.project.channel(id));
     let Some(channel) = channel.filter(|_| empty) else { return canvas };
     let lines = vec![
-        format!("Click to draw a note for {}. Drag its right end to change its length.", channel.name),
-        "Double-click or right-click a note to delete it.".to_string(),
+        format!("Click to draw a note for {}. Drag either end to change its length.", channel.name),
+        format!("Right-click a note to delete it. {}+drag selects; Shift+drag copies.", timeline::COMMAND),
     ];
     let hint = super::empty_state("Empty pattern", &lines, Vec::new());
     // Presses pass through the hint to the canvas.

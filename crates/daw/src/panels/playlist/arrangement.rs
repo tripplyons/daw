@@ -12,6 +12,7 @@ use crate::input::{Point, Rectangle, Size};
 use rune::Color;
 
 use super::{Edge, Message, State, loop_tick, source_name};
+use crate::panels::timeline::Pick;
 use crate::app::{App, Message as AppMessage};
 use crate::menu;
 use crate::panels::timeline::{self, Clicks, RULER_HEIGHT, Wheel};
@@ -41,6 +42,56 @@ mod tests {
         assert_eq!(status, Status::Captured);
         assert_eq!(app.project.playlist.clips.len(), 1);
     }
+
+    const BOUNDS: Rectangle = Rectangle { x: 0.0, y: 0.0, width: 800.0, height: 500.0 };
+
+    /// Send `event` at `p` with `modifiers`; returns the published message.
+    fn send(app: &App, state: &mut CanvasState, modifiers: Modifiers, event: mouse::Event, p: Point) -> Option<AppMessage> {
+        let arrangement = Arrangement { tempo: app.project.tempo_map(), app };
+        let cursor = mouse::Cursor::Available(p);
+        let _ = arrangement.update(state, &canvas::Event::Keyboard(crate::input::Event::ModifiersChanged(modifiers)), BOUNDS, cursor);
+        arrangement.update(state, &canvas::Event::Mouse(event), BOUNDS, cursor).and_then(|a| a.into_inner().0)
+    }
+
+    #[test]
+    fn ruler_click_seeks_drag_loops_and_right_click_clears() {
+        let mut app = App::boot().0;
+        let (left, right) = (Point::new(HEADER_WIDTH + 40.0, 10.0), Point::new(HEADER_WIDTH + 200.0, 10.0));
+        let mut state = CanvasState::default();
+        send(&app, &mut state, Modifiers::empty(), mouse::Event::ButtonPressed(mouse::Button::Left), left);
+        let released = send(&app, &mut state, Modifiers::empty(), mouse::Event::ButtonReleased(mouse::Button::Left), left);
+        assert!(matches!(released, Some(AppMessage::Playlist(Message::Seek(_)))));
+
+        let mut state = CanvasState::default();
+        send(&app, &mut state, Modifiers::empty(), mouse::Event::ButtonPressed(mouse::Button::Left), left);
+        send(&app, &mut state, Modifiers::empty(), mouse::Event::CursorMoved { position: right }, right);
+        let released = send(&app, &mut state, Modifiers::empty(), mouse::Event::ButtonReleased(mouse::Button::Left), right);
+        let Some(AppMessage::Playlist(message @ Message::Loop(Some(_)))) = released else { panic!("a drag sets the loop: {released:?}") };
+        let _ = app.update(message.into());
+        assert!(app.project.playlist.loop_range.is_some());
+
+        let clicked = send(&app, &mut CanvasState::default(), Modifiers::empty(), mouse::Event::ButtonPressed(mouse::Button::Right), left);
+        assert!(matches!(clicked, Some(AppMessage::Playlist(Message::Loop(None)))));
+        app.project.playlist.loop_range = None;
+        let clicked = send(&app, &mut CanvasState::default(), Modifiers::empty(), mouse::Event::ButtonPressed(mouse::Button::Right), left);
+        assert!(clicked.is_none(), "no loop to clear, so no undo step");
+    }
+
+    #[test]
+    fn command_drag_selects_and_shift_drag_copies() {
+        let mut app = App::boot().0;
+        app.project.add_clip(0, 0, ClipSource::Pattern(app.selected_pattern));
+        let empty = Point::new(HEADER_WIDTH + 400.0, RULER_HEIGHT + 100.0);
+        let mut state = CanvasState::default();
+        let message = send(&app, &mut state, Modifiers::COMMAND, mouse::Event::ButtonPressed(mouse::Button::Left), empty);
+        assert!(message.is_none());
+        assert!(matches!(state.drag, Some(Drag::Box { additive: false, .. })));
+        let clip = Point::new(HEADER_WIDTH + 20.0, RULER_HEIGHT + 10.0);
+        let message = send(&app, &mut CanvasState::default(), Modifiers::SHIFT, mouse::Event::ButtonPressed(mouse::Button::Left), clip);
+        assert!(matches!(message, Some(AppMessage::Playlist(Message::Begin { edge: None, pick: Pick::Duplicate, .. }))));
+        let message = send(&app, &mut CanvasState::default(), Modifiers::empty(), mouse::Event::ButtonPressed(mouse::Button::Right), empty);
+        assert!(message.is_none(), "right-click on empty space does nothing");
+    }
 }
 
 pub(super) struct Arrangement<'a> {
@@ -52,9 +103,9 @@ pub(super) struct Arrangement<'a> {
 enum Drag {
     Clips { tick: f64, track: i32 },
     Box { from: Point, to: Point, additive: bool },
-    /// Moving the start marker in the ruler; it is set on release.
-    Seek { tick: f64 },
-    Loop { from: f64, to: f64 },
+    /// A press in the ruler: a click seeks to `from` on release, and a drag
+    /// sets the loop from `from` to `to`.
+    Ruler { from: f64, to: f64 },
 }
 
 #[derive(Debug, Default)]
@@ -79,6 +130,12 @@ impl Arrangement<'_> {
 
     fn tick_at(&self, x: f32) -> f64 {
         self.state().time.tick(x - HEADER_WIDTH)
+    }
+
+    /// Whether a ruler drag from `from` to `to` went far enough to set a loop.
+    fn is_loop(&self, from: f64, to: f64) -> bool {
+        let view = self.state().time;
+        (view.x(to) - view.x(from)).abs() >= 3.0
     }
 
     fn marker_tick(&self, tick: f64) -> Ticks {
@@ -304,13 +361,11 @@ impl canvas::Program for Arrangement<'_> {
                     }
                     return match button {
                         Button::Left => {
-                            state.drag = Some(Drag::Seek { tick });
+                            state.drag = Some(Drag::Ruler { from: tick, to: tick });
                             Some(canvas::Action::request_redraw().and_capture())
                         }
-                        Button::Right => {
-                            state.drag = Some(Drag::Loop { from: tick, to: tick });
-                            Some(canvas::Action::request_redraw().and_capture())
-                        }
+                        Button::Right if self.app.project.playlist.loop_range.is_some() => publish(Message::Loop(None)),
+                        Button::Right => Some(canvas::Action::capture()),
                         _ => None,
                     };
                 }
@@ -327,16 +382,21 @@ impl canvas::Program for Arrangement<'_> {
                     return publish(if p.x < MUTE_WIDTH { Message::Mute(track) } else { Message::SelectTrack(track) });
                 }
                 let double = state.clicks.press(p);
+                let modifiers = state.modifiers;
                 match (button, self.hit(p)) {
-                    (Button::Left, Some((id, _))) if state.modifiers.alt() => publish(Message::Split(id, tick)),
+                    (Button::Left, Some((id, _))) if modifiers.alt() => publish(Message::Split(id, tick)),
                     (Button::Left, Some((id, _))) if double => publish(Message::Open(id)),
                     (Button::Left, Some((id, edge))) => {
                         state.drag = Some(Drag::Clips { tick, track });
-                        publish(Message::Begin { id, edge, additive: state.modifiers.shift() })
+                        publish(Message::Begin { id, edge, pick: Pick::from_modifiers(modifiers, edge.is_some()) })
                     }
-                    (Button::Left, None) if !timeline::box_select_modifier(state.modifiers) => {
+                    (Button::Left, None) if timeline::box_select(modifiers) => {
+                        state.drag = Some(Drag::Box { from: p, to: p, additive: modifiers.shift() });
+                        Some(canvas::Action::request_redraw().and_capture())
+                    }
+                    (Button::Left, None) => {
                         let app = self.app;
-                        let start = if state.modifiers.command() {
+                        let start = if timeline::snap_bypass(modifiers) {
                             tick.max(0.0) as Ticks
                         } else {
                             app.project.grid.snap_floor(tick.max(0.0) as Ticks, app.project.signature)
@@ -348,10 +408,7 @@ impl canvas::Program for Arrangement<'_> {
                         let open = menu::Message::Open(menu::Item::Clip(id));
                         Some(canvas::Action::publish(open).and_capture())
                     }
-                    (Button::Left | Button::Right, _) => {
-                        state.drag = Some(Drag::Box { from: p, to: p, additive: state.modifiers.shift() });
-                        Some(canvas::Action::request_redraw().and_capture())
-                    }
+                    (Button::Right, None) => Some(canvas::Action::capture()),
                     _ => None,
                 }
             }
@@ -362,13 +419,13 @@ impl canvas::Program for Arrangement<'_> {
                     Drag::Clips { tick: origin, track } => publish(Message::Drag {
                         ticks: tick - *origin,
                         tracks: self.track_at(p.y) - *track,
-                        bypass: state.modifiers.command(),
+                        bypass: timeline::snap_bypass(state.modifiers),
                     }),
                     Drag::Box { to, .. } => {
                         *to = p;
                         Some(canvas::Action::request_redraw())
                     }
-                    Drag::Seek { tick: to } | Drag::Loop { to, .. } => {
+                    Drag::Ruler { to, .. } => {
                         *to = tick;
                         Some(canvas::Action::request_redraw())
                     }
@@ -381,11 +438,8 @@ impl canvas::Program for Arrangement<'_> {
                     to: (self.tick_at(to.x), self.track_at(to.y).max(0) as usize),
                     additive,
                 }),
-                Drag::Seek { tick } => publish(Message::Seek(tick)),
-                Drag::Loop { from, to } => {
-                    let tiny = (self.state().time.x(to) - self.state().time.x(from)).abs() < 3.0;
-                    publish(Message::Loop((!tiny).then_some((from, to))))
-                }
+                Drag::Ruler { from, to } if self.is_loop(from, to) => publish(Message::Loop(Some((from, to)))),
+                Drag::Ruler { from, .. } => publish(Message::Seek(from)),
             },
             canvas::Event::Mouse(MouseEvent::WheelScrolled { delta }) => {
                 let p = cursor.position_in(bounds)?;
@@ -414,11 +468,20 @@ impl canvas::Program for Arrangement<'_> {
             frame.fill_rectangle(Point::new(HEADER_WIDTH, y), Size::new(area.width, 1.0), theme::GRID);
         }
 
+        // A copying drag leaves the originals in place and draws the copies
+        // over them; other drags draw the clips where they would land.
+        let copying = playlist.duplicating && !playlist.drag_preview.is_empty();
+        let visible = |clip: &Clip| clip.track >= playlist.top_track && clip.track <= last_track;
         for clip in &app.project.playlist.clips {
-            let clip = playlist.drag_preview.iter().find(|c| c.id == clip.id).unwrap_or(clip);
-            if clip.track < playlist.top_track || clip.track > last_track { continue; }
-            let selected = playlist.selected.contains(&clip.id);
+            let clip = if copying { clip } else { playlist.drag_preview.iter().find(|c| c.id == clip.id).unwrap_or(clip) };
+            if !visible(clip) { continue; }
+            let selected = !copying && playlist.selected.contains(&clip.id);
             self.draw_clip(frame, clip, selected);
+        }
+        if copying {
+            for clip in playlist.drag_preview.iter().filter(|c| visible(c)) {
+                self.draw_clip(frame, clip, true);
+            }
         }
         if let Some(take) = app.session.current_take() {
             self.draw_take(frame, take);
@@ -454,7 +517,7 @@ impl canvas::Program for Arrangement<'_> {
 
         timeline::draw_ruler(frame, playlist.time, HEADER_WIDTH, area.width, app.project.signature);
         let loop_range = match state.drag {
-            Some(Drag::Loop { from, to }) => Some((from.min(to), from.max(to))),
+            Some(Drag::Ruler { from, to }) if self.is_loop(from, to) => Some((from.min(to), from.max(to))),
             _ => app.project.playlist.loop_range.map(|(a, b)| (a as f64, b as f64)),
         };
         if let Some((a, b)) = loop_range {
@@ -467,7 +530,7 @@ impl canvas::Program for Arrangement<'_> {
         frame.fill_rectangle(Point::ORIGIN, Size::new(HEADER_WIDTH, RULER_HEIGHT), theme::HEADER);
         // While dragging in the ruler, the marker follows the pointer.
         let seeking = match state.drag {
-            Some(Drag::Seek { tick }) => Some(self.marker_tick(tick) as f64),
+            Some(Drag::Ruler { from, to }) if !self.is_loop(from, to) => Some(self.marker_tick(from) as f64),
             _ => None,
         };
         if let Some(tick) = seeking {

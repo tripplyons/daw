@@ -1,9 +1,10 @@
 //! Automation clip editor.
 //!
 //! Edit tool: click adds a point, drag moves the selection, right click
-//! deletes, right drag (or Ctrl drag on macOS) selects a box, Alt drag (or
+//! deletes, Cmd+drag (Ctrl+drag on Linux) selects a box, Cmd+click or
+//! Shift+click adds a point to the selection or removes it, Alt drag (or
 //! the square handle) bends a segment, double click cycles the segment shape.
-//! Cmd (Ctrl on Linux) bypasses snapping and Shift locks the drag to one
+//! Alt held during a drag bypasses snapping and Shift locks the drag to one
 //! axis. Keys 1-6 set the shape of the selected points, arrows nudge, Delete
 //! and Cmd A/C/V/D edit the selection.
 //! The draw tool paints a curve and the line tool replaces a range with a ramp.

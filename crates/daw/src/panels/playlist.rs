@@ -1,17 +1,21 @@
 //! Song arrangement: pattern, automation, and audio clips on tracks.
 //!
-//! Left click places the brush clip or drags clips (either edge trims),
-//! double click opens a clip, right click opens its menu, right drag (or Ctrl drag
-//! on macOS) selects a box, Alt click splits a clip. Click a track name to
-//! select the track, or its square to mute it; right click it for its menu.
-//! In the ruler, left click seeks and right drag sets the loop.
+//! The mouse follows FL Studio, with Cmd for Ctrl on macOS (see
+//! `timeline::box_select`). Left click places the brush clip or drags clips
+//! (either edge trims), double click opens a clip, right click opens its
+//! menu. Cmd+drag selects a box, Cmd+click adds a clip to the selection or
+//! removes it, Shift+drag copies the selection, Alt bypasses snapping, and
+//! Alt click splits a clip. Click a track name to select the track, or its
+//! dot to mute it; right click it for its menu. In the ruler, click seeks,
+//! drag sets the loop, and right click clears the loop.
 
 use daw_engine::song::PlayMode;
 use daw_model::time::{Grid, Ticks};
 use daw_model::{AudioEdit, Clip, ClipId, ClipSource, Source};
 use rune::{El, col, row};
 
-use super::timeline::{self, RULER_HEIGHT, TimeView};
+use super::timeline::{self, Pick, RULER_HEIGHT, TimeView};
+pub use super::timeline::Edge;
 use super::{label, pick_sized, tool, toggle};
 use crate::app::audio::audio_ticks;
 use crate::app::{App, Message as AppMessage};
@@ -40,6 +44,8 @@ pub struct State {
     drag_added: bool,
     /// The edge being dragged, or `None` when moving clips.
     resizing: Option<Edge>,
+    /// The drag moves copies; the originals stay where they are.
+    pub duplicating: bool,
     clipboard: Vec<Clip>,
     pub stretch_mode: bool,
     /// Slider preview; audio is prepared only when the drag ends.
@@ -65,14 +71,6 @@ impl AudioText {
     }
 }
 
-/// A clip edge. Dragging the start trims the clip's beginning and keeps its
-/// content in place; dragging the end changes its length.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Edge {
-    Start,
-    End,
-}
-
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -86,6 +84,7 @@ impl Default for State {
             drag_preview: Vec::new(),
             drag_added: false,
             resizing: None,
+            duplicating: false,
             clipboard: Vec::new(),
             stretch_mode: false,
             pitch_edit: None,
@@ -99,6 +98,7 @@ impl State {
         self.originals.clear();
         self.drag_preview.clear();
         self.drag_added = false;
+        self.duplicating = false;
     }
 }
 
@@ -125,7 +125,8 @@ pub enum Message {
     /// Alt+scroll: track height, keeping the track under `y` in place.
     ZoomTracks { steps: f32, y: f32 },
     Add { start: Ticks, track: usize },
-    Begin { id: ClipId, edge: Option<Edge>, additive: bool },
+    /// Press on a clip: pick it, then drag it, an edge of it, or copies.
+    Begin { id: ClipId, edge: Option<Edge>, pick: Pick },
     Drag { ticks: f64, tracks: i32, bypass: bool },
     End,
     Split(ClipId, f64),
@@ -358,22 +359,14 @@ pub fn update(app: &mut App, message: Message) {
             app.playlist.drag_added = true;
             app.edited();
         }
-        Message::Begin { id, edge, additive } => {
-            let selected = &mut app.playlist.selected;
-            if additive {
-                if let Some(position) = selected.iter().position(|&c| c == id) {
-                    selected.remove(position);
-                } else {
-                    selected.push(id);
-                }
-            } else if !selected.contains(&id) {
-                *selected = vec![id];
-            }
+        Message::Begin { id, edge, pick } => {
+            timeline::pick(&mut app.playlist.selected, id, pick);
             if let Some(clip) = app.project.playlist.clips.iter().find(|c| c.id == id) {
                 app.playlist.brush = Some(clip.source);
             }
             app.playlist.resizing = edge;
             begin_drag(app);
+            app.playlist.duplicating = pick == Pick::Duplicate && edge.is_none();
         }
         Message::Drag { ticks, tracks, bypass } => {
             let (grid, signature) = (app.project.grid, app.project.signature);
@@ -433,7 +426,10 @@ pub fn update(app: &mut App, message: Message) {
         Message::End => {
             let preview = std::mem::take(&mut app.playlist.drag_preview);
             let changed = preview.iter().any(|c| app.project.playlist.clips.iter().any(|old| old.id == c.id && old != c));
-            if changed {
+            if changed && app.playlist.duplicating {
+                // The copies land where the drag left them.
+                paste(app, preview, 0);
+            } else if changed {
                 if !app.playlist.drag_added { app.checkpoint(); }
                 let tracks = preview.iter().map(|c| c.track + 1).max().unwrap_or(0);
                 grow_tracks(app, tracks);
@@ -609,6 +605,7 @@ pub fn key(app: &mut App, key: &Key, modifiers: Modifiers) -> bool {
 
 fn paste(app: &mut App, source: Vec<Clip>, offset: i64) {
     app.checkpoint();
+    grow_tracks(app, source.iter().map(|c| c.track + 1).max().unwrap_or(0));
     let mut added = Vec::new();
     for clip in source {
         let id = app.project.add_clip(clip.track, (clip.start as i64 + offset).max(0) as Ticks, clip.source);

@@ -18,8 +18,10 @@ const MAX_STEPS: u64 = 64;
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Select a channel and show or hide its plugin window, if it has one.
+    /// Select a channel for the piano roll and the parameter panel.
     Select(ChannelId),
+    /// Select a channel and show or hide its plugin window, if it has one.
+    Open(ChannelId),
     Step(ChannelId, u64),
     Mute(ChannelId),
     /// Set a channel's color, 0xRRGGBB.
@@ -70,7 +72,8 @@ pub fn delete_selected(app: &mut App) -> bool {
 
 pub fn update(app: &mut App, message: Message) -> Task {
     match message {
-        Message::Select(id) => {
+        Message::Select(id) => select(app, id),
+        Message::Open(id) => {
             select(app, id);
             if let Some(Source::Plugin(instance)) = app.project.channel(id).map(|c| &c.source) {
                 return Task::done(AppMessage::TogglePlugin(*instance));
@@ -198,8 +201,9 @@ pub fn view(app: &App) -> El {
             .build(Message::Mute(id));
         let name = Btn::new(channel.name.clone()).width(110.0).start()
             .look(if open { widgets::Look::On } else if selected { widgets::Look::Selected } else { widgets::Look::Ghost })
-            .help(format!("{}\nSelect channel and show its plugin; right-click to rename, preview, or delete", channel.name))
+            .help(format!("{}\nClick to select; double-click to show or hide its plugin.\nRight-click to rename, preview, or delete", channel.name))
             .build(Message::Select(id))
+            .on_double_press_tx(ui::on(Message::Open(id)))
             .on_secondary_press(move |app: &mut App, _, tx: &mut Tx| ui::send(app, tx, menu::Message::Open(menu::Item::Channel(id)).into()));
         let volume = Slider::new(channel.volume, (0.0, 1.0)).default(0.8).width(70.0).color(color)
             .help(format!("Channel volume: {:.0}%\nRight-click to automate", channel.volume * 100.0))

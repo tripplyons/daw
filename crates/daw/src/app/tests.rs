@@ -355,7 +355,7 @@ fn piano_roll_add_move_resize_and_keys() {
     let notes = app.project.pattern(app.selected_pattern).unwrap().notes(app.selected_channel.unwrap()).to_vec();
     assert_eq!((notes[0].start, notes[0].key), (480, 62));
 
-    let _ = app.update(roll::Message::Begin { index: 0, resize: true, additive: false }.into());
+    let _ = app.update(roll::Message::Begin { index: 0, edge: Some(timeline::Edge::End), pick: timeline::Pick::Replace }.into());
     let _ = app.update(roll::Message::Drag { ticks: 480.0, keys: 0, bypass: false }.into());
     let _ = app.update(roll::Message::End.into());
     let notes = app.project.pattern(app.selected_pattern).unwrap().notes(app.selected_channel.unwrap()).to_vec();
@@ -991,7 +991,7 @@ fn dropped_audio_places_a_clip_that_trims_from_both_edges() {
     assert_eq!((clip.start, clip.length, clip.source), (0, 1920, ClipSource::Audio(channel.id)));
 
     let drag = |app: &mut App, edge, ticks| {
-        let _ = app.update(list::Message::Begin { id: clip.id, edge, additive: false }.into());
+        let _ = app.update(list::Message::Begin { id: clip.id, edge, pick: timeline::Pick::Replace }.into());
         let _ = app.update(list::Message::Drag { ticks, tracks: 0, bypass: true }.into());
         let _ = app.update(list::Message::End.into());
         let clip = &app.project.playlist.clips[0];
@@ -1136,24 +1136,24 @@ fn selecting_notes_and_clips_preserves_dirty_state_undo_and_redo() {
     app.dirty = false;
     let before = app.project.clone();
     let (revision, undo, redo, updates) = (app.revision, app.undo.len(), app.redo.len(), app.session.song_updates);
-    for additive in [false, true, true] {
-        let _ = app.update(roll::Message::Begin { index: 0, resize: false, additive }.into());
+    for pick in [timeline::Pick::Replace, timeline::Pick::Toggle, timeline::Pick::Toggle] {
+        let _ = app.update(roll::Message::Begin { index: 0, edge: None, pick }.into());
         let _ = app.update(roll::Message::Drag { ticks: 1.0, keys: 0, bypass: false }.into());
         let _ = app.update(roll::Message::End.into());
-        let _ = app.update(list::Message::Begin { id: clip, edge: None, additive }.into());
+        let _ = app.update(list::Message::Begin { id: clip, edge: None, pick }.into());
         let _ = app.update(list::Message::Drag { ticks: 1.0, tracks: 0, bypass: false }.into());
         let _ = app.update(list::Message::End.into());
     }
     assert_eq!(app.project, before);
     assert!(!app.dirty);
     assert_eq!((app.revision, app.undo.len(), app.redo.len(), app.session.song_updates), (revision, undo, redo, updates));
-    let _ = app.update(list::Message::Begin { id: clip, edge: None, additive: false }.into());
+    let _ = app.update(list::Message::Begin { id: clip, edge: None, pick: timeline::Pick::Replace }.into());
     let _ = app.update(list::Message::Drag { ticks: 960.0, tracks: 0, bypass: false }.into());
     let _ = app.update(list::Message::Drag { ticks: 0.0, tracks: 0, bypass: false }.into());
     let _ = app.update(list::Message::End.into());
     assert_eq!((app.revision, app.undo.len(), app.redo.len()), (revision, undo, redo));
 
-    let _ = app.update(roll::Message::Begin { index: 0, resize: false, additive: false }.into());
+    let _ = app.update(roll::Message::Begin { index: 0, edge: None, pick: timeline::Pick::Replace }.into());
     let _ = app.update(roll::Message::Drag { ticks: 240.0, keys: 1, bypass: true }.into());
     let _ = app.update(roll::Message::Drag { ticks: 480.0, keys: 2, bypass: true }.into());
     let _ = app.update(roll::Message::End.into());
@@ -1297,7 +1297,7 @@ fn audio_stretch_drag_prepares_only_on_release_and_cancels_on_undo() {
     app.playlist.stretch_mode = true;
     app.dirty = false;
     let (revision, undo, updates) = (app.revision, app.undo.len(), app.session.song_updates);
-    let _ = app.update(list::Message::Begin { id: clip.id, edge: Some(list::Edge::End), additive: false }.into());
+    let _ = app.update(list::Message::Begin { id: clip.id, edge: Some(list::Edge::End), pick: timeline::Pick::Replace }.into());
     for ticks in [480.0, 960.0, 1920.0] {
         let _ = app.update(list::Message::Drag { ticks, tracks: 0, bypass: true }.into());
         assert_eq!(app.project.playlist.clips[0], clip);
@@ -1314,7 +1314,7 @@ fn audio_stretch_drag_prepares_only_on_release_and_cancels_on_undo() {
     assert_eq!((stretched.length, stretched.audio.stretch), (3840, 2.0));
     assert!(app.session.waveform(&daw_engine::audio::cache_key(&path, stretched.audio)).is_some());
     assert_eq!((app.revision, app.undo.len(), app.session.song_updates), (revision + 1, undo + 1, updates + 2));
-    let _ = app.update(list::Message::Begin { id: clip.id, edge: Some(list::Edge::Start), additive: false }.into());
+    let _ = app.update(list::Message::Begin { id: clip.id, edge: Some(list::Edge::Start), pick: timeline::Pick::Replace }.into());
     let _ = app.update(list::Message::Drag { ticks: 960.0, tracks: 0, bypass: true }.into());
     let _ = app.update(Message::Action(Action::Undo));
     let _ = app.update(list::Message::End.into());
@@ -2109,4 +2109,122 @@ fn painting_velocities_is_one_undo_step() {
     assert_eq!(app.status, "velocity 50%");
     let _ = app.update(Message::Action(Action::Undo));
     assert_eq!(velocities(&app), before, "one undo restores the whole stroke");
+}
+
+fn roll_notes(app: &App) -> Vec<daw_model::Note> {
+    app.project.pattern(app.selected_pattern).unwrap().notes(app.selected_channel.unwrap()).to_vec()
+}
+
+#[test]
+fn piano_roll_left_edge_resize_keeps_the_end() {
+    let mut app = app();
+    app.project.grid = Grid::Division(16);
+    let _ = app.update(roll::Message::Add { start: 480, key: 60 }.into());
+    let _ = app.update(roll::Message::End.into());
+    let end = roll_notes(&app)[0].end();
+    let _ = app.update(roll::Message::Begin { index: 0, edge: Some(timeline::Edge::Start), pick: timeline::Pick::Replace }.into());
+    let _ = app.update(roll::Message::Drag { ticks: -240.0, keys: 3, bypass: false }.into());
+    let _ = app.update(roll::Message::End.into());
+    let note = roll_notes(&app)[0];
+    assert_eq!((note.start, note.end(), note.key), (240, end, 60));
+    // The start stops one grid step before the end.
+    let _ = app.update(roll::Message::Begin { index: 0, edge: Some(timeline::Edge::Start), pick: timeline::Pick::Replace }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 5000.0, keys: 0, bypass: false }.into());
+    let _ = app.update(roll::Message::End.into());
+    let note = roll_notes(&app)[0];
+    assert_eq!((note.end(), note.length), (end, 240));
+}
+
+#[test]
+fn piano_roll_shift_drag_copies_notes_in_one_undo_step() {
+    let mut app = app();
+    app.project.grid = Grid::Division(16);
+    let _ = app.update(roll::Message::Add { start: 0, key: 60 }.into());
+    let _ = app.update(roll::Message::End.into());
+    let undo = app.undo.len();
+    // A press without a move copies nothing.
+    let _ = app.update(roll::Message::Begin { index: 0, edge: None, pick: timeline::Pick::Duplicate }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 1.0, keys: 0, bypass: false }.into());
+    let _ = app.update(roll::Message::End.into());
+    assert_eq!(roll_notes(&app).len(), 1);
+    assert_eq!(app.undo.len(), undo);
+
+    let _ = app.update(roll::Message::Begin { index: 0, edge: None, pick: timeline::Pick::Duplicate }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 480.0, keys: 2, bypass: false }.into());
+    let _ = app.update(roll::Message::Drag { ticks: 960.0, keys: 2, bypass: false }.into());
+    let _ = app.update(roll::Message::End.into());
+    let notes: Vec<_> = roll_notes(&app).iter().map(|n| (n.start, n.key)).collect();
+    assert_eq!(notes, vec![(0, 60), (960, 62)]);
+    assert_eq!(app.piano_roll.selected, vec![1], "the copy is selected");
+    assert_eq!(app.undo.len(), undo + 1);
+    let _ = app.update(Message::Action(Action::Undo));
+    assert_eq!(roll_notes(&app).len(), 1);
+}
+
+#[test]
+fn piano_keys_select_the_notes_at_their_pitches() {
+    let mut app = app();
+    for (start, key) in [(0, 60), (480, 62), (960, 64), (1440, 60)] {
+        let _ = app.update(roll::Message::Add { start, key }.into());
+        let _ = app.update(roll::Message::End.into());
+    }
+    let at = |app: &App| -> Vec<u8> {
+        let notes = roll_notes(app);
+        let mut keys: Vec<u8> = app.piano_roll.selected.iter().map(|&i| notes[i].key).collect();
+        keys.sort_unstable();
+        keys
+    };
+    let _ = app.update(roll::Message::Keys { from: 60, key: 60, additive: false, begin: true }.into());
+    assert_eq!(at(&app), vec![60, 60]);
+    // Dragging along the keys widens and narrows the range.
+    let _ = app.update(roll::Message::Keys { from: 60, key: 63, additive: false, begin: false }.into());
+    assert_eq!(at(&app), vec![60, 60, 62]);
+    let _ = app.update(roll::Message::Keys { from: 60, key: 61, additive: false, begin: false }.into());
+    assert_eq!(at(&app), vec![60, 60]);
+    // An additive press keeps the selection from before it.
+    let _ = app.update(roll::Message::Keys { from: 64, key: 64, additive: true, begin: true }.into());
+    assert_eq!(at(&app), vec![60, 60, 64]);
+    let _ = app.update(roll::Message::Keys { from: 50, key: 50, additive: false, begin: true }.into());
+    assert!(app.piano_roll.selected.is_empty());
+}
+
+#[test]
+fn playlist_shift_drag_copies_clips() {
+    let mut app = app();
+    let bar = app.project.signature.ticks_per_bar();
+    let clip = app.project.add_clip(0, 0, ClipSource::Pattern(app.selected_pattern));
+    let undo = app.undo.len();
+    let _ = app.update(list::Message::Begin { id: clip, edge: None, pick: timeline::Pick::Duplicate }.into());
+    let _ = app.update(list::Message::Drag { ticks: 0.0, tracks: 0, bypass: false }.into());
+    let _ = app.update(list::Message::End.into());
+    assert_eq!(app.project.playlist.clips.len(), 1, "a press without a move copies nothing");
+
+    let _ = app.update(list::Message::Begin { id: clip, edge: None, pick: timeline::Pick::Duplicate }.into());
+    let _ = app.update(list::Message::Drag { ticks: bar as f64, tracks: 4, bypass: false }.into());
+    let _ = app.update(list::Message::End.into());
+    let clips: Vec<_> = app.project.playlist.clips.iter().map(|c| (c.start, c.track)).collect();
+    assert_eq!(clips, vec![(0, 0), (bar, 4)]);
+    assert!(app.project.playlist.tracks.len() >= 5);
+    assert_eq!(app.playlist.selected.len(), 1);
+    assert_ne!(app.playlist.selected[0], clip, "the copy is selected");
+    assert_eq!(app.undo.len(), undo + 1);
+}
+
+#[test]
+fn solo_is_exclusive_unless_command_is_held() {
+    use crate::panels::mixer::Message as Mix;
+    let mut app = app();
+    for _ in 0..2 { let _ = app.update(Mix::AddInsert.into()); }
+    let ids: Vec<_> = app.project.mixer.inserts.iter().map(|i| i.id).collect();
+    let soloed = |app: &App| app.project.mixer.inserts.iter().filter(|i| i.solo).map(|i| i.id).collect::<Vec<_>>();
+    let _ = app.update(Mix::Solo { id: ids[1], exclusive: true }.into());
+    assert_eq!(soloed(&app), vec![ids[1]]);
+    let _ = app.update(Mix::Solo { id: ids[2], exclusive: false }.into());
+    assert_eq!(soloed(&app), vec![ids[1], ids[2]]);
+    // An exclusive click on one of several soloed inserts keeps only it.
+    let _ = app.update(Mix::Solo { id: ids[2], exclusive: true }.into());
+    assert_eq!(soloed(&app), vec![ids[2]]);
+    // Again on the only soloed insert, it turns solo off.
+    let _ = app.update(Mix::Solo { id: ids[2], exclusive: true }.into());
+    assert!(soloed(&app).is_empty());
 }

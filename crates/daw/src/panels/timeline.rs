@@ -105,10 +105,74 @@ impl Wheel {
     }
 }
 
-/// Whether a left drag selects a box. Ctrl does on macOS; on Linux Ctrl is
-/// the command modifier, so only right drag selects there.
-pub fn box_select_modifier(modifiers: Modifiers) -> bool {
-    modifiers.control() && !modifiers.command()
+// Mouse conventions shared by the piano roll, playlist, and automation
+// editor follow FL Studio, with Cmd in place of Ctrl on macOS:
+//
+// - Cmd+drag selects a box; Cmd+Shift+drag adds the box to the selection.
+// - Cmd+click on an item adds it to the selection or removes it.
+// - Shift+drag on a note or clip copies the selection.
+// - Alt bypasses snapping.
+//
+// Right-click and macOS Ctrl+click arrive as one secondary press with no
+// drag, so no gesture depends on dragging with them.
+
+/// The command modifier's name, for hints.
+pub const COMMAND: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
+/// Whether a press on empty space starts a box selection.
+pub fn box_select(modifiers: Modifiers) -> bool {
+    modifiers.command()
+}
+
+/// Whether a drag or placement ignores the snap grid.
+pub fn snap_bypass(modifiers: Modifiers) -> bool {
+    modifiers.alt()
+}
+
+/// A note or clip edge. Dragging the start moves the beginning and keeps the
+/// end in place; dragging the end changes the length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Edge {
+    Start,
+    End,
+}
+
+/// How a press on a note or clip changes the selection before a drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// Select only the item, unless it is already selected.
+    Replace,
+    /// Add the item to the selection or remove it.
+    Toggle,
+    /// Keep the selection (or select the item) and drag copies of it.
+    Duplicate,
+}
+
+impl Pick {
+    /// The pick for a press with these modifiers. Edges resize, so they
+    /// never copy.
+    pub fn from_modifiers(modifiers: Modifiers, on_edge: bool) -> Pick {
+        if modifiers.command() {
+            Pick::Toggle
+        } else if modifiers.shift() && !on_edge {
+            Pick::Duplicate
+        } else {
+            Pick::Replace
+        }
+    }
+}
+
+/// Apply a pick of `item` to `selected`.
+pub fn pick<T: PartialEq + Copy>(selected: &mut Vec<T>, item: T, pick: Pick) {
+    match pick {
+        Pick::Toggle => match selected.iter().position(|&i| i == item) {
+            Some(position) => { selected.remove(position); }
+            None => selected.push(item),
+        },
+        Pick::Replace | Pick::Duplicate => {
+            if !selected.contains(&item) { *selected = vec![item]; }
+        }
+    }
 }
 
 /// Scale a row height by `steps` wheel steps of zoom, within `min..=max`.
@@ -272,6 +336,24 @@ mod tests {
         // The other of Cmd and Ctrl does not zoom.
         let other = if cfg!(target_os = "macos") { Modifiers::CTRL } else { Modifiers::LOGO };
         assert_eq!(wheel(0.0, 1.0, other), Wheel::Vertical(1.0));
+    }
+
+    #[test]
+    fn picks_follow_fl_modifiers() {
+        assert_eq!(Pick::from_modifiers(Modifiers::empty(), false), Pick::Replace);
+        assert_eq!(Pick::from_modifiers(Modifiers::COMMAND, false), Pick::Toggle);
+        assert_eq!(Pick::from_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, false), Pick::Toggle);
+        assert_eq!(Pick::from_modifiers(Modifiers::SHIFT, false), Pick::Duplicate);
+        assert_eq!(Pick::from_modifiers(Modifiers::SHIFT, true), Pick::Replace, "edges resize, never copy");
+
+        let mut selected = vec![1, 2];
+        pick(&mut selected, 2, Pick::Replace);
+        assert_eq!(selected, vec![1, 2], "a press on a selected item keeps the selection for the drag");
+        pick(&mut selected, 3, Pick::Duplicate);
+        assert_eq!(selected, vec![3]);
+        pick(&mut selected, 1, Pick::Toggle);
+        pick(&mut selected, 3, Pick::Toggle);
+        assert_eq!(selected, vec![1]);
     }
 
     #[test]

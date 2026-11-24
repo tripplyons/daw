@@ -11,7 +11,7 @@ use rune::Color;
 
 use super::{Message, State, notes};
 use crate::app::{App, Message as AppMessage};
-use crate::panels::timeline::{self, Clicks, RULER_HEIGHT, Wheel};
+use crate::panels::timeline::{self, Edge, Pick, RULER_HEIGHT, Wheel};
 use crate::theme;
 
 const KEYS_WIDTH: f32 = 40.0;
@@ -37,13 +37,14 @@ enum Drag {
     Seek { tick: f64 },
     /// Painting velocities in the velocity lane.
     Velocity,
+    /// Playing and selecting keys along the keyboard, from the pressed key.
+    Keys { from: i32, last: i32, additive: bool },
 }
 
 #[derive(Debug, Default)]
 pub struct CanvasState {
     drag: Option<Drag>,
     modifiers: Modifiers,
-    clicks: Clicks,
 }
 
 fn is_black(key: i32) -> bool {
@@ -119,10 +120,19 @@ impl Roll<'_> {
         Message::PaintVelocity { tick: self.tick_at(p.x), value }
     }
 
-    fn hit(&self, p: Point) -> Option<(usize, bool)> {
+    /// The note under `p`, and the edge when `p` is on one. Only notes wide
+    /// enough to also grab in the middle have a start edge.
+    fn hit(&self, p: Point) -> Option<(usize, Option<Edge>)> {
         notes(self.app).iter().enumerate().rev().find_map(|(i, n)| {
             let r = self.note_rect(n);
-            r.contains(p).then_some((i, p.x > r.x + r.width - EDGE && r.width > EDGE * 2.0))
+            let edge = if p.x > r.x + r.width - EDGE && r.width > EDGE * 2.0 {
+                Some(Edge::End)
+            } else if p.x < r.x + EDGE && r.width >= EDGE * 4.0 {
+                Some(Edge::Start)
+            } else {
+                None
+            };
+            r.contains(p).then_some((i, edge))
         })
     }
 }
@@ -160,37 +170,36 @@ impl canvas::Program for Roll<'_> {
                     return publish(self.velocity_at(p, bounds.height));
                 }
                 let key = self.key_at(p.y).clamp(0, 127);
+                let modifiers = state.modifiers;
                 if p.x < KEYS_WIDTH {
-                    return publish(Message::Preview(key as u8));
+                    if *button != Button::Left { return Some(canvas::Action::capture()); }
+                    let additive = modifiers.command() || modifiers.shift();
+                    state.drag = Some(Drag::Keys { from: key, last: key, additive });
+                    return publish(Message::Keys { from: key, key, additive, begin: true });
                 }
                 let tick = self.tick_at(p.x);
-                let double = state.clicks.press(p);
                 match (button, self.hit(p)) {
-                    (Button::Left, Some((index, _))) if double => publish(Message::Delete(index)),
-                    (Button::Left, Some((index, resize))) => {
+                    (Button::Left, Some((index, edge))) => {
                         state.drag = Some(Drag::Notes { tick, key });
-                        publish(Message::Begin { index, resize, additive: state.modifiers.shift() })
+                        publish(Message::Begin { index, edge, pick: Pick::from_modifiers(modifiers, edge.is_some()) })
+                    }
+                    (Button::Left, None) if timeline::box_select(modifiers) => {
+                        state.drag = Some(Drag::Box { from: p, to: p, additive: modifiers.shift() });
+                        Some(canvas::Action::request_redraw().and_capture())
                     }
                     (Button::Left, None) if let Some(channel) = self.ghost_at(p) => publish(Message::Channel(channel)),
-                    (Button::Left, None) if !timeline::box_select_modifier(state.modifiers) => {
+                    (Button::Left, None) => {
                         let app = self.app;
-                        let start = if state.modifiers.command() {
+                        let start = if timeline::snap_bypass(modifiers) {
                             tick.max(0.0) as Ticks
                         } else {
                             app.project.grid.snap_floor(tick.max(0.0) as Ticks, app.project.signature)
                         };
                         state.drag = Some(Drag::Notes { tick: start as f64, key });
-                        // A new note sits under the pointer, often with its right
-                        // edge a few points away. The next press grabs it, so it
-                        // must not pair with this one into a double-click delete.
-                        state.clicks = Clicks::default();
                         publish(Message::Add { start, key: key as u8 })
                     }
                     (Button::Right, Some((index, _))) => publish(Message::Delete(index)),
-                    (Button::Left | Button::Right, _) => {
-                        state.drag = Some(Drag::Box { from: p, to: p, additive: state.modifiers.shift() });
-                        Some(canvas::Action::request_redraw().and_capture())
-                    }
+                    (Button::Right, None) => Some(canvas::Action::capture()),
                     _ => None,
                 }
             }
@@ -200,8 +209,14 @@ impl canvas::Program for Roll<'_> {
                     Drag::Notes { tick, key } => publish(Message::Drag {
                         ticks: self.tick_at(p.x) - *tick,
                         keys: self.key_at(p.y) - *key,
-                        bypass: state.modifiers.command(),
+                        bypass: timeline::snap_bypass(state.modifiers),
                     }),
+                    Drag::Keys { from, last, additive } => {
+                        let key = self.key_at(p.y).clamp(0, 127);
+                        if key == *last { return Some(canvas::Action::capture()); }
+                        *last = key;
+                        publish(Message::Keys { from: *from, key, additive: *additive, begin: false })
+                    }
                     Drag::Box { to, .. } => {
                         *to = p;
                         Some(canvas::Action::request_redraw())
@@ -219,6 +234,7 @@ impl canvas::Program for Roll<'_> {
                 Drag::End => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
                 Drag::Seek { tick } => publish(Message::Seek(tick)),
                 Drag::Velocity => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
+                Drag::Keys { .. } => Some(canvas::Action::capture()),
                 Drag::Box { from, to, additive } => publish(Message::BoxSelect {
                     from: (self.tick_at(from.x), self.key_at(from.y)),
                     to: (self.tick_at(to.x), self.key_at(to.y)),
@@ -253,7 +269,7 @@ impl canvas::Program for Roll<'_> {
         let lane = Self::lane_top(size.height).unwrap_or(f32::INFINITY);
         let hovered = cursor
             .position_in(bounds)
-            .filter(|p| p.y >= RULER_HEIGHT && p.y < lane && state.drag.is_none())
+            .filter(|p| p.y >= RULER_HEIGHT && p.y < lane && state.drag.is_none_or(|d| matches!(d, Drag::Keys { .. })))
             .map(|p| self.key_at(p.y));
 
         // Key rows.
@@ -401,11 +417,123 @@ impl canvas::Program for Roll<'_> {
             (Some(Drag::Velocity), _) => mouse::Interaction::ResizingVertically,
             _ if p.x >= KEYS_WIDTH && Self::lane_top(bounds.height).is_some_and(|top| p.y >= top) => mouse::Interaction::ResizingVertically,
             _ if p.y < RULER_HEIGHT && p.x >= KEYS_WIDTH && self.near_end(p.x) => mouse::Interaction::ResizingHorizontally,
-            (_, Some((_, true))) => mouse::Interaction::ResizingHorizontally,
+            (_, Some((_, Some(_)))) => mouse::Interaction::ResizingHorizontally,
             (_, Some(_)) => mouse::Interaction::Grab,
             (None, None) if self.ghost_at(p).is_some() => mouse::Interaction::Pointer,
+            _ if p.x < KEYS_WIDTH && p.y >= RULER_HEIGHT => mouse::Interaction::Pointer,
             _ if p.x >= KEYS_WIDTH && p.y >= RULER_HEIGHT => mouse::Interaction::Crosshair,
             _ => mouse::Interaction::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::canvas::{Program, Status};
+    use crate::ui::canvas::mouse::{Button, Cursor, Event as MouseEvent};
+
+    const BOUNDS: Rectangle = Rectangle { x: 0.0, y: 0.0, width: 800.0, height: 500.0 };
+
+    /// Press `button` at `p` with `modifiers`; returns the published message.
+    fn press(app: &App, state: &mut CanvasState, button: Button, modifiers: Modifiers, p: Point) -> (Option<AppMessage>, Status) {
+        let roll = Roll { app, focused: true };
+        let _ = roll.update(state, &canvas::Event::Keyboard(crate::input::Event::ModifiersChanged(modifiers)), BOUNDS, Cursor::Available(p));
+        let action = roll.update(state, &canvas::Event::Mouse(MouseEvent::ButtonPressed(button)), BOUNDS, Cursor::Available(p)).unwrap();
+        let (message, _, status) = action.into_inner();
+        (message, status)
+    }
+
+    fn note_point(app: &App) -> Point {
+        let roll = Roll { app, focused: true };
+        let r = roll.note_rect(&notes(app)[0]);
+        Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
+    }
+
+    #[test]
+    fn command_drag_on_empty_space_selects_a_box_without_drawing() {
+        let app = App::boot().0;
+        let mut state = CanvasState::default();
+        let (message, status) = press(&app, &mut state, Button::Left, Modifiers::COMMAND, Point::new(200.0, 100.0));
+        assert!(message.is_none());
+        assert_eq!(status, Status::Captured);
+        assert!(matches!(state.drag, Some(Drag::Box { additive: false, .. })));
+        let mut state = CanvasState::default();
+        press(&app, &mut state, Button::Left, Modifiers::COMMAND | Modifiers::SHIFT, Point::new(200.0, 100.0));
+        assert!(matches!(state.drag, Some(Drag::Box { additive: true, .. })));
+    }
+
+    #[test]
+    fn right_click_on_empty_space_does_nothing() {
+        let app = App::boot().0;
+        let mut state = CanvasState::default();
+        let (message, status) = press(&app, &mut state, Button::Right, Modifiers::empty(), Point::new(200.0, 100.0));
+        assert!(message.is_none());
+        assert_eq!(status, Status::Captured);
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn modifiers_pick_how_a_press_on_a_note_selects() {
+        let mut app = App::boot().0;
+        let _ = app.update(Message::Add { start: 960, key: 72 }.into());
+        let _ = app.update(Message::End.into());
+        let p = note_point(&app);
+        for (modifiers, pick) in [(Modifiers::empty(), Pick::Replace), (Modifiers::COMMAND, Pick::Toggle), (Modifiers::SHIFT, Pick::Duplicate)] {
+            let (message, _) = press(&app, &mut CanvasState::default(), Button::Left, modifiers, p);
+            assert!(matches!(message, Some(AppMessage::PianoRoll(Message::Begin { index: 0, edge: None, pick: got })) if got == pick), "{modifiers:?}");
+        }
+        // A double click no longer deletes.
+        let mut state = CanvasState::default();
+        press(&app, &mut state, Button::Left, Modifiers::empty(), p);
+        let (message, _) = press(&app, &mut state, Button::Left, Modifiers::empty(), p);
+        assert!(matches!(message, Some(AppMessage::PianoRoll(Message::Begin { .. }))));
+    }
+
+    #[test]
+    fn note_edges_resize_from_either_end() {
+        let mut app = App::boot().0;
+        app.piano_roll.length = daw_model::time::TICKS_PER_BEAT as Ticks;
+        let _ = app.update(Message::Add { start: 960, key: 72 }.into());
+        let _ = app.update(Message::End.into());
+        let roll = Roll { app: &app, focused: true };
+        let r = roll.note_rect(&notes(&app)[0]);
+        let y = r.y + r.height / 2.0;
+        assert_eq!(roll.hit(Point::new(r.x + 2.0, y)), Some((0, Some(Edge::Start))));
+        assert_eq!(roll.hit(Point::new(r.x + r.width - 2.0, y)), Some((0, Some(Edge::End))));
+        assert_eq!(roll.hit(Point::new(r.x + r.width / 2.0, y)), Some((0, None)));
+        // Shift on an edge resizes instead of copying.
+        let (message, _) = press(&app, &mut CanvasState::default(), Button::Left, Modifiers::SHIFT, Point::new(r.x + 2.0, y));
+        assert!(matches!(message, Some(AppMessage::PianoRoll(Message::Begin { edge: Some(Edge::Start), pick: Pick::Replace, .. }))));
+    }
+
+    #[test]
+    fn alt_places_a_note_off_the_grid() {
+        let app = App::boot().0;
+        let roll = Roll { app: &app, focused: true };
+        // A point between grid lines, so snapping moves it.
+        let grid = |t: Ticks| app.project.grid.snap_floor(t, app.project.signature);
+        let x = (200..400).map(|x| x as f32).find(|&x| grid(roll.tick_at(x) as Ticks) != roll.tick_at(x) as Ticks).unwrap();
+        let raw = roll.tick_at(x) as Ticks;
+        let (message, _) = press(&app, &mut CanvasState::default(), Button::Left, Modifiers::ALT, Point::new(x, 100.0));
+        assert!(matches!(message, Some(AppMessage::PianoRoll(Message::Add { start, .. })) if start == raw));
+        let (message, _) = press(&app, &mut CanvasState::default(), Button::Left, Modifiers::empty(), Point::new(x, 100.0));
+        assert!(matches!(message, Some(AppMessage::PianoRoll(Message::Add { start, .. })) if start != raw));
+    }
+
+    #[test]
+    fn dragging_along_the_keys_reports_each_new_key() {
+        let app = App::boot().0;
+        let mut state = CanvasState::default();
+        let roll = Roll { app: &app, focused: true };
+        let y = |key: i32| roll.key_y(key) + 2.0;
+        let (message, _) = press(&app, &mut state, Button::Left, Modifiers::empty(), Point::new(10.0, y(60)));
+        assert!(matches!(message, Some(AppMessage::PianoRoll(Message::Keys { from: 60, key: 60, begin: true, .. }))));
+        let moved = |state: &mut CanvasState, key: i32| {
+            let p = Point::new(10.0, y(key));
+            roll.update(state, &canvas::Event::Mouse(MouseEvent::CursorMoved { position: p }), BOUNDS, Cursor::Available(p)).unwrap().into_inner().0
+        };
+        assert!(matches!(moved(&mut state, 58), Some(AppMessage::PianoRoll(Message::Keys { from: 60, key: 58, begin: false, .. }))));
+        assert!(moved(&mut state, 58).is_none(), "the same key plays once");
     }
 }

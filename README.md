@@ -38,7 +38,7 @@ On macOS, the menu bar has File, Edit, View, Transport, and Window menus that li
 
 The playlist header has a brush picker. It chooses the pattern, automation clip, or audio clip that a click on an empty part of a track places.
 
-In the piano roll, hover the keyboard to see each key's name, and click a key to hear it. Notes from the pattern's other channels show as dim ghost notes. Hover one to see its channel, and click it to edit that channel. The "ghosts" button hides them. When the roll is at least 220 points tall, a velocity lane runs along its bottom. Drag across the lane to set the velocity of the notes at each point. One undo reverts the whole drag.
+In the piano roll, hover the keyboard to see each key's name. Click a key to hear it and select every note at that pitch, or drag along the keys to hear each one and select the notes in that range. Hold Cmd or Shift to add to the selection. Notes from the pattern's other channels show as dim ghost notes. Hover one to see its channel, and click it to edit that channel. The "ghosts" button hides them. When the roll is at least 220 points tall, a velocity lane runs along its bottom. Drag across the lane to set the velocity of the notes at each point. One undo reverts the whole drag.
 
 ## Build with Bazel
 
@@ -86,7 +86,7 @@ Audio clips play part of a WAV file at its own speed, without following tempo ch
 
 - Import: press Cmd+I, click "+ audio" in the playlist toolbar, or drop WAV files on the window. The clip starts at the song start marker on the first free track.
 - Record: press Cmd+Shift+A or click "audio" in the recording row to arm the default input device, then play in song mode. Each stretch of playback becomes a take, written to the recordings folder and placed on the first free track. Saving the project embeds the take in the project file. Input latency is compensated. Click "audio" again to disarm. The app asks for microphone access the first time.
-- Edit: drag a clip's left or right edge to trim it, Alt-click to split it, and Cmd+C, Cmd+V, and Cmd+D to copy, paste, and duplicate it. After an import or a take, the playlist brush is that file, so a click places the whole file again.
+- Edit: drag a clip's left or right edge to trim it, Alt-click to split it, Shift-drag to copy it, and Cmd+C, Cmd+V, and Cmd+D to copy, paste, and duplicate it. After an import or a take, the playlist brush is that file, so a click places the whole file again.
 
 A take recorded over a loop keeps going past the loop end as one clip.
 
@@ -208,6 +208,29 @@ Cmd is the primary shortcut modifier on macOS. On Windows and Linux, Ctrl replac
 | Cmd+comma | Settings |
 
 On macOS, bound keys also work while a plugin window is in front, as long as the plugin does not use the key itself.
+
+## Mouse
+
+The piano roll, playlist, and automation editor follow FL Studio's mouse scheme, with Cmd in place of Ctrl on macOS. Right-click, and Ctrl+click on macOS, open a menu or delete but never drag.
+
+| Mouse | Action |
+| --- | --- |
+| Click empty space | Draw a note, place the brush clip, or add a point |
+| Drag a note, clip, or point | Move the selection |
+| Drag a note or clip edge | Resize from that end; the other end stays in place |
+| Cmd+drag | Select a box; add Shift to keep the current selection |
+| Cmd+click | Add the item to the selection or remove it |
+| Shift+drag a note or clip | Copy the selection; the originals stay |
+| Alt while placing or dragging | Ignore the snap grid |
+| Right-click | Delete a note or point, or open a clip's menu |
+| Alt+click a clip | Split it at the pointer |
+| Double-click a clip | Open its pattern, automation, or audio channel |
+| Click the playlist ruler | Move the start marker |
+| Drag the playlist ruler | Set the loop range; right-click the ruler to clear it |
+
+In the automation editor, Shift+click also toggles a point, Alt+drag on a segment bends it, and Shift locks a drag to one axis.
+
+In the channel rack, click a channel name to select the channel, and double-click it to show or hide its plugin window. In the mixer, click S to solo only that insert, and click it again to turn solo off. Cmd+click S adds the insert to the soloed inserts or removes it.
 
 ## Scrolling
 

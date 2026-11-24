@@ -32,7 +32,9 @@ pub enum Message {
     Volume(InsertId, f32),
     Pan(InsertId, f32),
     Mute(InsertId),
-    Solo(InsertId),
+    /// Solo an insert. An exclusive solo unsolos the others, or unsolos
+    /// the insert when it is the only one soloed; otherwise toggle it alone.
+    Solo { id: InsertId, exclusive: bool },
     RemoveEffect(InsertId, usize),
     RaiseEffect(InsertId, usize),
     AddInsert,
@@ -189,10 +191,16 @@ pub fn update(app: &mut App, message: Message) -> Task {
             app.project.mixer.set_output(from, to);
             app.edited();
         }
-        Message::Solo(id) => {
+        Message::Solo { id, exclusive } => {
             app.checkpoint();
-            if let Some(insert) = app.project.mixer.insert_mut(id) {
-                insert.solo = !insert.solo;
+            let inserts = &mut app.project.mixer.inserts;
+            let only = inserts.iter().all(|i| i.solo == (i.id == id));
+            for insert in inserts.iter_mut() {
+                if insert.id == id {
+                    insert.solo = if exclusive { !only } else { !insert.solo };
+                } else if exclusive {
+                    insert.solo = false;
+                }
             }
             app.edited();
         }
@@ -286,7 +294,13 @@ fn strip(app: &App, index: usize, insert: &Insert) -> El {
     let meters = row().gap(2.0).child(widgets::meter(left, 150.0)).child(widgets::meter(right, 150.0));
     let buttons = row().gap(3.0)
         .child(Btn::new("M").width(28.0).height(22.0).look(if insert.mute { Look::On } else { Look::Raised }).help("Mute insert").build(Message::Mute(id)))
-        .child(Btn::new("S").width(28.0).height(22.0).look(if insert.solo { Look::On } else { Look::Raised }).help("Solo insert").build(Message::Solo(id)));
+        .child(Btn::new("S").width(28.0).height(22.0).look(if insert.solo { Look::On } else { Look::Raised })
+            .help(format!("Solo only this insert\n{}+click to add it to the soloed inserts or remove it", super::timeline::COMMAND)).view()
+            .on_press_tx(move |app: &mut App, tx: &mut Tx| {
+                ui::touch(app);
+                let exclusive = !ui::modifiers(tx.mods()).command();
+                ui::send(app, tx, Message::Solo { id, exclusive }.into());
+            }));
     let body = col().w(STRIP_WIDTH).h_full().items_center().gap(6.0).pt(0.0).pb(8.0)
         .child(el().w_full().h(3.0).fill(color.unwrap_or(rune::Color::TRANSPARENT)))
         .child(name.mt(4.0))
