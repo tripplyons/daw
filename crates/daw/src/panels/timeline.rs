@@ -232,8 +232,7 @@ pub fn draw_ruler(frame: &mut Frame, view: TimeView, left: f32, width: f32, sign
             content: format!("{}", index + 1),
             position: Point::new(x + 4.0, 4.0),
             color: theme::TEXT_DIM,
-            size: theme::SMALL.into(),
-            ..Text::default()
+            size: theme::SMALL,
         });
     }
 }
@@ -263,7 +262,7 @@ pub fn draw_start_marker(frame: &mut Frame, view: TimeView, left: f32, height: f
 
 /// Text helper for canvases.
 pub fn label(frame: &mut Frame, content: impl Into<String>, position: Point, color: Color) {
-    frame.fill_text(Text { content: content.into(), position, color, size: theme::SMALL.into(), ..Text::default() });
+    frame.fill_text(Text { content: content.into(), position, color, size: theme::SMALL });
 }
 
 /// Cut text to about `width` pixels, since canvas text is not clipped.

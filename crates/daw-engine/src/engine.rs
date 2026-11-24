@@ -222,10 +222,10 @@ impl Shared {
 
     fn raise_peak(&self, index: usize, left: f32, right: f32) {
         let raise = |i: usize, value: f32| {
+            // Peaks are never negative, and non-negative floats order the
+            // same way as their bits.
             if let Some(peak) = self.peaks.get(i) {
-                let _ = peak.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
-                    (value > f32::from_bits(bits)).then_some(value.to_bits())
-                });
+                peak.fetch_max(value.to_bits(), Ordering::Relaxed);
             }
         };
         raise(index * 2, left);

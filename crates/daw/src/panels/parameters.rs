@@ -121,7 +121,7 @@ pub fn view(app: &App) -> El {
         };
     };
     if let Some(error) = app.session.load_errors.get(&instance) {
-        return widgets::empty_state("The plugin failed to load", &[error.to_string()], Vec::new());
+        return widgets::empty_state("The plugin failed to load", std::slice::from_ref(error), Vec::new());
     }
     let search = row().w_full().px(10.0).pt(10.0).pb(6.0)
         .child(widgets::field(app, "params-search", &app.params.search, "Filter parameters", |s| Message::Search(s).into(), None).w_full());

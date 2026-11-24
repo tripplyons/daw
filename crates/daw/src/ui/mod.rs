@@ -371,8 +371,11 @@ fn setup(app: &mut App, _waker: rune::Waker) {
     }
 }
 
+/// Set up the app for one review scene.
+type Scene = fn(&mut App);
+
 /// Review scenes for headless snapshots: `daw --snap out.png --scene NAME`.
-const SCENES: &[(&str, fn(&mut App))] = &[
+const SCENES: &[(&str, Scene)] = &[
     ("demo", |app| crate::app::scenes::demo(app)),
     ("settings", |app| {
         crate::app::scenes::demo(app);
@@ -411,8 +414,10 @@ pub fn run(headless: bool) -> Result<(), String> {
             // Closing asks to save unsaved changes first; the window comes
             // back while the question is open.
             send(app, tx, Message::CloseRequested);
-            if app.closing_pending() {
-                if let Some(handle) = HANDLE.get() { handle.open(); }
+            if app.closing_pending()
+                && let Some(handle) = HANDLE.get()
+            {
+                handle.open();
             }
         });
     let argv: Vec<String> = if headless { std::env::args().skip(1).collect() } else { Vec::new() };
