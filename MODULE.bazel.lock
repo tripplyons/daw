@@ -476,7 +476,7 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "JrgZjgLLbINNXUdcaFM8E2hNzo6+wetYoYoU1HYi6s0=",
+        "bzlTransitiveDigest": "MsqCW1xpyzcV8Cra74D6+1r3Su6PdP5G2L39KgeDaD0=",
         "usagesDigest": "16fMLJa/jsP22eOWwLuIkjrYVRfTkCRvYsuKbN8swzM=",
         "recordedInputs": [
           "ENV:CARGO_BAZEL_DEBUG \\0",
