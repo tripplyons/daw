@@ -234,7 +234,7 @@ impl canvas::Program for Roll<'_> {
                 Drag::End => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
                 Drag::Seek { tick } => publish(Message::Seek(tick)),
                 Drag::Velocity => Some(canvas::Action::publish(AppMessage::EndEdit).and_capture()),
-                Drag::Keys { .. } => Some(canvas::Action::capture()),
+                Drag::Keys { .. } => publish(Message::KeysReleased),
                 Drag::Box { from, to, additive } => publish(Message::BoxSelect {
                     from: (self.tick_at(from.x), self.key_at(from.y)),
                     to: (self.tick_at(to.x), self.key_at(to.y)),
@@ -535,5 +535,8 @@ mod tests {
         };
         assert!(matches!(moved(&mut state, 58), Some(AppMessage::PianoRoll(Message::Keys { from: 60, key: 58, begin: false, .. }))));
         assert!(moved(&mut state, 58).is_none(), "the same key plays once");
+        let p = Point::new(10.0, y(58));
+        let released = roll.update(&mut state, &canvas::Event::Mouse(MouseEvent::ButtonReleased(Button::Left)), BOUNDS, Cursor::Available(p));
+        assert!(matches!(released.unwrap().into_inner().0, Some(AppMessage::PianoRoll(Message::KeysReleased))));
     }
 }

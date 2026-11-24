@@ -2228,3 +2228,26 @@ fn solo_is_exclusive_unless_command_is_held() {
     let _ = app.update(Mix::Solo { id: ids[2], exclusive: true }.into());
     assert!(soloed(&app).is_empty());
 }
+
+#[test]
+fn piano_previews_hold_the_note_until_the_mouse_is_released() {
+    let mut app = app();
+    let held = |app: &App| app.piano_roll.sounding.map(|(_, key)| key);
+    let _ = app.update(roll::Message::Keys { from: 60, key: 60, additive: false, begin: true }.into());
+    assert_eq!(held(&app), Some(60));
+    // Moving to another key releases the first and holds the new one.
+    let _ = app.update(roll::Message::Keys { from: 60, key: 62, additive: false, begin: false }.into());
+    assert_eq!(held(&app), Some(62));
+    let _ = app.update(roll::Message::KeysReleased.into());
+    assert_eq!(held(&app), None);
+
+    // A placed or grabbed note sounds until the drag ends.
+    let _ = app.update(roll::Message::Add { start: 0, key: 64 }.into());
+    assert_eq!(held(&app), Some(64));
+    let _ = app.update(roll::Message::End.into());
+    assert_eq!(held(&app), None);
+    let _ = app.update(roll::Message::Begin { index: 0, edge: None, pick: timeline::Pick::Replace }.into());
+    assert_eq!(held(&app), Some(64));
+    let _ = app.update(roll::Message::End.into());
+    assert_eq!(held(&app), None);
+}

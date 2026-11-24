@@ -44,6 +44,8 @@ pub struct State {
     duplicate: bool,
     /// The selection before a drag along the keyboard, which adds to it.
     key_base: Vec<usize>,
+    /// The node and key of the note held while the mouse button is down.
+    pub sounding: Option<(u64, u8)>,
     clipboard: Vec<Note>,
     /// Draw other channels' notes in the pattern behind this channel's.
     pub ghosts: bool,
@@ -62,6 +64,7 @@ impl Default for State {
             resizing: None,
             duplicate: false,
             key_base: Vec::new(),
+            sounding: None,
             clipboard: Vec::new(),
             ghosts: true,
         }
@@ -93,6 +96,8 @@ pub enum Message {
     /// `from` to `key`. `begin` marks the press; with `additive` the notes
     /// join the selection from before it.
     Keys { from: i32, key: i32, additive: bool, begin: bool },
+    /// Mouse up on the keyboard: release the held key.
+    KeysReleased,
     Velocity(usize, f32),
     /// Set the velocity of this channel's notes that sound at `tick`; a
     /// drag across the velocity lane is one undo step.
@@ -125,11 +130,23 @@ fn notes_mut(app: &mut App) -> Option<&mut Vec<Note>> {
     Some(app.project.pattern_mut(app.selected_pattern)?.notes_mut(channel))
 }
 
+/// Start playing `key` on the selected channel until `stop_preview`. A
+/// note-off sent right after the note-on lands in the same audio block, so
+/// most instruments would make no sound; the note is held while the mouse
+/// button is down instead.
 fn preview(app: &mut App, key: u8) {
+    stop_preview(app);
     let Some(channel) = app.selected_channel.and_then(|c| app.project.channel(c)) else { return };
     let node = channel_node(&channel.source, channel.id);
     app.session.note(node, key, 0.8);
-    app.session.note(node, key, 0.0);
+    app.piano_roll.sounding = Some((node, key));
+}
+
+/// Release the note `preview` started, if it still sounds.
+fn stop_preview(app: &mut App) {
+    if let Some((node, key)) = app.piano_roll.sounding.take() {
+        app.session.note(node, key, 0.0);
+    }
 }
 
 /// Sort notes by start and keep the selection pointing at the same notes.
@@ -269,7 +286,9 @@ pub fn update(app: &mut App, message: Message) {
             }
             app.edited();
         }
+        Message::KeysReleased => stop_preview(app),
         Message::End => {
+            stop_preview(app);
             if app.piano_roll.drag_changed { sort(app); app.edited(); }
             app.piano_roll.cancel_drag();
         }

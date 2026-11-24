@@ -38,7 +38,7 @@ On macOS, the menu bar has File, Edit, View, Transport, and Window menus that li
 
 The playlist header has a brush picker. It chooses the pattern, automation clip, or audio clip that a click on an empty part of a track places.
 
-In the piano roll, hover the keyboard to see each key's name. Click a key to hear it and select every note at that pitch, or drag along the keys to hear each one and select the notes in that range. Hold Cmd or Shift to add to the selection. Notes from the pattern's other channels show as dim ghost notes. Hover one to see its channel, and click it to edit that channel. The "ghosts" button hides them. When the roll is at least 220 points tall, a velocity lane runs along its bottom. Drag across the lane to set the velocity of the notes at each point. One undo reverts the whole drag.
+In the piano roll, hover the keyboard to see each key's name. Press a key to hear it for as long as you hold the button, and to select every note at that pitch. Drag along the keys to hear each one in turn and select the notes in that range. A note you place or grab also sounds until you let go. Hold Cmd or Shift to add to the selection. Notes from the pattern's other channels show as dim ghost notes. Hover one to see its channel, and click it to edit that channel. The "ghosts" button hides them. When the roll is at least 220 points tall, a velocity lane runs along its bottom. Drag across the lane to set the velocity of the notes at each point. One undo reverts the whole drag.
 
 ## Build with Bazel
 
